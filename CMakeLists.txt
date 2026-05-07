@@ -14,6 +14,8 @@ set(APP_SOURCES
     main/synthwave.c
     main/rendertext.c
     main/icons.c
+    main/input.c
+    main/game.c
 )
 
 # Include directories — add paths to your headers here

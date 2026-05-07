@@ -10,6 +10,7 @@
 
 #include "synthwave.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -211,6 +212,23 @@ static struct {
 
 #define MOUNTAIN_LINE_COUNT (sizeof(mountain_lines) / sizeof(mountain_lines[0]))
 
+// Vertical lift applied at draw time. Pushes the horizon further from
+// the camera by repositioning the mountain peaks roughly at the level
+// where the top of the sun used to be, with the sun shifted up by the
+// same amount so it still rises behind the mountains. The grid floor's
+// horizon is also lifted by the same amount so the ground extends up
+// to meet the bases of the lifted mountains; the vertical perspective
+// lines are extrapolated along their original slope (so the perspective
+// angle is preserved, just longer).
+#define MOUNTAIN_LIFT_PX 98.0f
+#define SUN_LIFT_PX      98.0f
+#define GRID_LIFT_PX     MOUNTAIN_LIFT_PX
+
+// Original (unlifted) grid horizon, kept so the slope-preserving
+// extrapolation math reads cleanly.
+#define GRID_HORIZON_Y_BASE 354.0f
+#define GRID_BOTTOM_Y       480.0f
+
 // --- Cached triangulation indices --------------------------------------------
 
 static size_t* sun_idx[SUN_BAND_COUNT] = {0};
@@ -250,7 +268,7 @@ void synthwave_draw_sun(pax_buf_t* fb, float dy) {
         sun_band_t const* band = &sun_bands[i];
         for (size_t p = 0; p < band->npts; p++) {
             scratch[p].x = band->pts[p].x;
-            scratch[p].y = band->pts[p].y + dy;
+            scratch[p].y = band->pts[p].y + dy - SUN_LIFT_PX;
         }
         if (sun_idx[i] != NULL) {
             pax_draw_shape_triang(fb, band->color, band->npts, scratch, sun_ntri[i], sun_idx[i]);
@@ -262,44 +280,78 @@ void synthwave_draw_sun(pax_buf_t* fb, float dy) {
 }
 
 void synthwave_draw_mountains(pax_buf_t* fb) {
+    pax_vec2f scratch[MOUNTAINS_NPTS];
+    for (size_t i = 0; i < MOUNTAINS_NPTS; i++) {
+        scratch[i].x = mountains_pts[i].x;
+        scratch[i].y = mountains_pts[i].y - MOUNTAIN_LIFT_PX;
+    }
     if (mountains_idx != NULL) {
-        pax_draw_shape_triang(fb, 0xFF340575, MOUNTAINS_NPTS, mountains_pts, mountains_ntri, mountains_idx);
+        pax_draw_shape_triang(fb, 0xFF340575, MOUNTAINS_NPTS, scratch, mountains_ntri, mountains_idx);
     } else {
-        pax_draw_shape(fb, 0xFF340575, MOUNTAINS_NPTS, mountains_pts);
+        pax_draw_shape(fb, 0xFF340575, MOUNTAINS_NPTS, scratch);
     }
 }
 
 void synthwave_draw_wireframe(pax_buf_t* fb) {
     for (size_t i = 0; i < MOUNTAIN_LINE_COUNT; i++) {
-        pax_simple_line(fb, 0xFF31FBFB, mountain_lines[i].x0, mountain_lines[i].y0, mountain_lines[i].x1,
-                        mountain_lines[i].y1);
+        pax_simple_line(fb, 0xFF31FBFB, mountain_lines[i].x0, mountain_lines[i].y0 - MOUNTAIN_LIFT_PX,
+                        mountain_lines[i].x1, mountain_lines[i].y1 - MOUNTAIN_LIFT_PX);
     }
 }
 
 void synthwave_draw_top_grid(pax_buf_t* fb) {
-    pax_simple_line(fb, 0xFFF71FF1, 0, 354, 800, 354);
+    float const horizon_y = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
+    pax_simple_line(fb, 0xFFF71FF1, 0, horizon_y, 800, horizon_y);
 }
 
 void synthwave_step(pax_buf_t* fb, int dj) {
     static int j = 0;
 
-    pax_simple_rect(fb, 0xFF5D0B8B, 0, 355, 800, 125);
+    float const horizon_y    = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;        // top of perspective lines
+    float const rect_top_y   = horizon_y + 1.0f;                          // grid background starts 1px below
+    float const rect_height  = GRID_BOTTOM_Y - rect_top_y;
+    // Slope extrapolation factor: for each line we know its (x1, x2)
+    // at the original (354 → 480) endpoints; preserving slope while
+    // lifting the top by GRID_LIFT_PX shifts the top-x outward by this
+    // ratio of (x1 - x2).
+    float const slope_factor = GRID_LIFT_PX / (GRID_BOTTOM_Y - GRID_HORIZON_Y_BASE);
 
-    // Vertical perspective lines from horizon to bottom.
-    float a = 800.0f / 17.0f;
-    float c = 800.0f;
-    float b = (800.0f + c) / 17.0f;
-    for (size_t i = 0; i < 17; i++) {
-        float x1 = a * (i + 1);
-        float x2 = b * (i + 1) - (c / 2.0f);
-        pax_simple_line(fb, 0xFFF71FF1, x1, 354, x2, 480);
+    pax_simple_rect(fb, 0xFF5D0B8B, 0, rect_top_y, 800, rect_height);
+
+    // Vertical perspective lines extended along their original slope.
+    // The (x1, 354) → (x2, 480) pair came from the launcher's synthwave;
+    // we extrapolate the top point upward to (horizon_y) so each line's
+    // length grows but its angle is unchanged.
+    //
+    // Lifting the horizon also pulls all 17 of the original lines toward
+    // the vanishing point at the top, leaving empty wedges on the left
+    // and right of the new horizon. We solve for the i range that keeps
+    // x_top within [0, 800] and iterate over that, so the extra lines
+    // share the same generating function (same perspective angles) but
+    // sit outside the launcher's original 17.
+    float const a            = 800.0f / 17.0f;
+    float const c            = 800.0f;
+    float const b            = (800.0f + c) / 17.0f;
+    float const x_top_step   = a + (a - b) * slope_factor;     // x_top per (i+1) increment
+    float const x_top_offset = (c / 2.0f) * slope_factor;      // x_top at i+1 = 0
+    int   const k_min        = (int)floorf((0.0f   - x_top_offset) / x_top_step);
+    int   const k_max        = (int)ceilf ((800.0f - x_top_offset) / x_top_step);
+
+    for (int k = k_min; k <= k_max; k++) {
+        float x1    = a * (float)k;
+        float x2    = b * (float)k - (c / 2.0f);
+        float x_top = x1 + (x1 - x2) * slope_factor;
+        pax_simple_line(fb, 0xFFF71FF1, x_top, horizon_y, x2, GRID_BOTTOM_Y);
     }
 
     // Horizontal scanlines that march down to suggest forward motion.
-    float distance = 20.0f;
-    for (size_t i = 0; i < 9; i++) {
-        int y = 354 + (int)(distance * i) + j;
-        if (y > 480) {
+    // Density (20 px per band) preserved from the launcher; we just need
+    // enough bands to cover the now-taller grid area.
+    float const distance = 20.0f;
+    int const   band_count = (int)((GRID_BOTTOM_Y - horizon_y) / distance) + 1;
+    for (int i = 0; i < band_count; i++) {
+        int y = (int)horizon_y + (int)(distance * i) + j;
+        if (y > (int)GRID_BOTTOM_Y) {
             y -= (int)(distance * i) + j;
         }
         pax_simple_line(fb, 0xFFF71FF1, 0, y, 800, y);

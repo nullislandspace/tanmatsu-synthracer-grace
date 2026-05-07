@@ -10,13 +10,13 @@
 
 ## Current Status
 
-**Phase: Phase 1 complete; Phase 2 next**
+**Phase: Phase 2 complete; Phase 3 next**
 
 | Phase | Description | State |
 |-------|-------------|-------|
 | 0 | Research, design, plan | ✅ done — see this document |
-| 1 | Skeleton + synthwave backdrop | ✅ builds clean (8.7 KB text); on-device verification pending user `make install run` |
-| 2 | Ship + steering | ⬜ not started |
+| 1 | Skeleton + synthwave backdrop | ✅ runs on-device; sun arch fixed, Hershey font, F-key icon hint, horizon lifted, grid floor extended with extra perspective lines on each side |
+| 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
 | 3 | 3D projection + obstacles | ⬜ not started |
 | 4 | Collision + game over | ⬜ not started |
 | 5 | Sun timer + shadow + boost | ⬜ not started |
@@ -30,10 +30,16 @@
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
 
 **Open questions / parking lot:**
-- None — all major design questions resolved with the user (full 25-level
-  ladder, hand-coded perspective, RTC daily + custom seed, SFX from day
-  one, system-volume keys, sun-behind-mountains z-order, shadow slowdown,
-  pre-triangulation).
+- **Framerate** — landed the backdrop cache (see decisions log
+  2026-05-07). On-device measurement still pending. If still slow,
+  next candidates: Hershey direct text per-pixel cost, the wide grid
+  perspective line set (~78 lines per frame), and the per-frame
+  full-FB memcpy itself (1.15 MB at 60 fps = 69 MB/s of PSRAM
+  bandwidth — measurable but should be fine).
+- **Phase 5 sun re-cache** — when the sunset mechanic lands, the
+  cached sun position becomes stale as `sun_dy` changes. Plan: track
+  the dy used to render the cache, re-render only when the new dy
+  differs by more than ~2 px. Most frames stay on the memcpy path.
 
 **Conventions / decisions log** (append-only as new decisions are made):
 - 2026-05-07 — Project bootstrapped from `tanmatsu-template-grace`.
@@ -62,6 +68,55 @@
   init + vsync-paced main loop drawing the static backdrop + scrolling
   grid + "Press F1 to exit" prompt. App slug set to
   `at.cavac.racethesynth` in Makefile.
+- 2026-05-07 — Sun arch fix: `sun0_pts` had a 34th trailing point
+  `{300, 168.72115}` that the launcher's source ignored via
+  `count = 33` in `pax_draw_shape`. Our refactor used `sizeof()` so it
+  passed 34, which made `pax_triang_concave` produce a self-intersecting
+  triangulation and the dome silently disappeared. Dropped the trailing
+  point in `synthwave.c`.
+- 2026-05-07 — Adopted Hershey vector font from
+  `tanmatsu-paperclips-grace` (`hershey.h`, `hershey_font.h`,
+  `hershey_font_direct.h`, `rendertext.{c,h}`) for all in-game text
+  rendering. The "direct" path writes pixels straight to the pax_buf_t,
+  bypassing pax's text rasterizer — faster than `pax_draw_text` per
+  frame.
+- 2026-05-07 — Added `main/icons.{c,h}` for loading function-key PNG
+  glyphs from `/int/icons/` (mirroring `tanmatsu-camera/main/icons.c`
+  but using `pax_draw_image()` for alpha-correct compositing since our
+  framebuffer is pax-managed). The Tanmatsu's keyboard prints symbols
+  rather than "F1"/"F2"/etc text, so HUD prompts use the icons with a
+  text fallback if the launcher's icon set isn't installed.
+- 2026-05-07 — Phase 2 implementation landed: `input.{c,h}` (modal
+  polled steering for D-pad / WASD / Esc-Backspace, queued events for
+  pickup-button and F1-exit), `game.{c,h}` (ship state + physics,
+  exponential-decay friction, screen-space delta-wing draw in
+  sun-yellow + grid-magenta). Main loop now uses `esp_timer_get_time()`
+  for dt and clamps it to 0.1 s to survive long stalls.
+- 2026-05-07 — Synthwave horizon lifted by 98 px
+  (`MOUNTAIN_LIFT_PX = SUN_LIFT_PX = GRID_LIFT_PX = 98.0f` in
+  `synthwave.c`) so the highest mountain peak is roughly at the
+  pre-lift sun-top altitude, with sun and ground floor lifted by the
+  same amount so the relative geometry is preserved.
+- 2026-05-07 — Grid floor: vertical perspective lines now generated
+  over a parametric `k` range derived from the new horizon, instead
+  of the launcher's hard-coded 17. Same generating function ⇒ same
+  per-line slopes ⇒ angle preserved. This fills the wedges of empty
+  floor on the left/right that appeared after the lift compressed
+  the lines toward the vanishing point. Horizontal scanline count
+  is also derived from the new floor height. Setting
+  `GRID_LIFT_PX = 0` reproduces the launcher's original 17-line look.
+- 2026-05-07 — F1 exit hint anchored at the top-left margin (12 px
+  in) with the F1 icon followed by the "to exit" Hershey text.
+- 2026-05-07 — Backdrop cache: a second `pax_buf_t` (`backdrop_cache`)
+  is allocated in PSRAM at boot, same dimensions/format/orientation/
+  endianness as the main fb. The static synthwave layers (sky, sun,
+  mountains, wireframe, top horizon) render into it once. Each frame
+  the main fb is initialized via `memcpy(pax_buf_get_pixels(&fb),
+  backdrop_pixels, size)` instead of re-running the triangulated
+  fills + ~200 wireframe lines. The cast-away-const on
+  `pax_buf_get_pixels` is intentional — pax's buffer is logically
+  mutable, the const just communicates "don't muck with this via
+  arbitrary writes". The memcpy is ~1.15 MB per frame on RGB888.
 
 ---
 
