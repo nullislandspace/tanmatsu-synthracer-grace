@@ -11,6 +11,9 @@ project(app C)
 set(APP_SOURCES
     main/main.c
     main/crt0.c
+    main/synthwave.c
+    main/rendertext.c
+    main/icons.c
 )
 
 # Include directories — add paths to your headers here

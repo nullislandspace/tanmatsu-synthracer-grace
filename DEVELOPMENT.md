@@ -1,0 +1,819 @@
+# Race the Synth — Implementation Plan & Tracking
+
+> **This file is the canonical, cross-session tracking document for the
+> project.** It contains the original-game research, every design decision
+> already made, the phased plan, and the current status. Update it as work
+> progresses so a fresh session can resume without re-researching anything.
+>
+> Once plan mode is exited, this file should be mirrored into the repo as
+> `tanmatsu-synthracer-grace/DEVELOPMENT.md` so it travels with the code.
+
+## Current Status
+
+**Phase: Phase 1 complete; Phase 2 next**
+
+| Phase | Description | State |
+|-------|-------------|-------|
+| 0 | Research, design, plan | ✅ done — see this document |
+| 1 | Skeleton + synthwave backdrop | ✅ builds clean (8.7 KB text); on-device verification pending user `make install run` |
+| 2 | Ship + steering | ⬜ not started |
+| 3 | 3D projection + obstacles | ⬜ not started |
+| 4 | Collision + game over | ⬜ not started |
+| 5 | Sun timer + shadow + boost | ⬜ not started |
+| 6 | Tris + multiplier | ⬜ not started |
+| 7 | Audio + volume keys | ⬜ not started |
+| 8 | Daily + custom seed + persistence | ⬜ not started (MVP complete after this phase) |
+| 9 | Pickups & attachments | ⬜ not started |
+| 10 | Regions | ⬜ not started |
+| 11 | Meta-progression UI | ⬜ not started |
+| 12 | Apocalypse mode | ⬜ not started |
+| 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
+
+**Open questions / parking lot:**
+- None — all major design questions resolved with the user (full 25-level
+  ladder, hand-coded perspective, RTC daily + custom seed, SFX from day
+  one, system-volume keys, sun-behind-mountains z-order, shadow slowdown,
+  pre-triangulation).
+
+**Conventions / decisions log** (append-only as new decisions are made):
+- 2026-05-07 — Project bootstrapped from `tanmatsu-template-grace`.
+- 2026-05-07 — Volume keys must update the launcher-shared `"system"` NVS
+  namespace, not a private one.
+- 2026-05-07 — Custom-seed runs do not award meta-progression.
+- 2026-05-07 — Synthwave shapes are pre-triangulated once at boot.
+- 2026-05-07 — Sun is drawn before mountains so it can sink behind them.
+- 2026-05-07 — Obstacles cast shadows that slow the ship.
+- 2026-05-07 — Game name finalized as **"Race the Synth"**.
+- 2026-05-07 — Input mapping locked in (see Input Mapping section):
+  polled D-pad/WASD steering, single pickup-use button (Space /
+  Gamepad-A), F1 = exit, volume keys are system-wide, barrel-roll
+  detection deferred to Phase 13.
+- 2026-05-07 — Added ESC (left) and Backspace (right) as ergonomic
+  thumb-rest steering keys, **modal**: only active during
+  `STATE_PLAYING`. In menus / seed-entry / pause they retain their
+  conventional cancel/edit roles. Pause moved from ESC to **F4** to
+  free ESC for steering.
+- 2026-05-07 — Build command is `make clean build` — single command
+  from project root. **Never** source `$IDF_PATH/export.sh` or other
+  IDF export scripts directly; the project Makefile handles its own
+  env plumbing.
+- 2026-05-07 — Phase 1 implementation landed: synthwave refactored into
+  layered draw functions in `main/synthwave.{c,h}`; main.c stripped to
+  init + vsync-paced main loop drawing the static backdrop + scrolling
+  grid + "Press F1 to exit" prompt. App slug set to
+  `at.cavac.racethesynth` in Makefile.
+
+---
+
+## Context
+
+We are building **Race the Synth**, a Tanmatsu graceloader app at
+`/home/cavac/src/tanmatsu/tanmatsu-synthracer-grace/`. The repo currently
+contains the unmodified template (`main/main.c` showing input events).
+
+The game is a clone of *Race The Sun* (Flippfly, 2013) reskinned in synthwave
+aesthetic. Player pilots a craft along a procedurally generated landscape;
+the sun is setting; speed boosts push it back up; obstacles kill on contact;
+the player chases score and a meta-progression of unlockables.
+
+The project must be **fully offline** — daily challenges and the daily world
+seed are derived from the device RTC, not a server. The visual backdrop
+reuses the launcher's existing synthwave drawing code so the game feels
+visually continuous with the boot animation.
+
+Scope confirmed with user:
+- **Full 25-level metaprogression ladder** mirroring the original.
+- **Hand-coded 3D-to-2D perspective projection** for obstacles and ship.
+- **RTC-driven daily seed** for world layout and challenges, **with an
+  optional custom-seed practice mode** so the player can replay the same
+  level deterministically.
+- **Simple SFX from day one** (PCM samples mixed via I2S task), no music.
+- **Volume keys must change device-wide volume** (mirroring launcher/videoplayer).
+- **Synthwave shapes are pre-triangulated once** at boot, redrawn per
+  frame via `pax_draw_shape_triang()`, so per-frame cost is just the
+  fill rasterization.
+- **Z-order**: sun is drawn before mountains so it can visually sink behind
+  them as `sun_seconds_left` runs out.
+- **Shadow gameplay**: obstacles between the ship and the sun cast
+  shadows; the ship loses speed (and the sun timer drains faster) while
+  shadowed.
+
+---
+
+## File Layout
+
+Following the multi-file action-game convention from `tanmatsu-placeinvaders-grace`:
+
+```
+main/
+  crt0.c              # unchanged — graceloader entry glue
+  main.c              # init (BSP, NVS, audio, vsync), state machine, top-level loop
+  game.h / game.c     # game state struct, fixed-step update, collision, scoring
+  world.h / world.c   # daily seed, region generation, obstacle/pickup pools, PRNG
+  render.h / render.c # 3D projection, scene draw, HUD, title/game-over screens
+  synthwave.h         # COPIED from tanmatsu-launcher/main/synthwave.{c,h}
+  synthwave.c         #  ↳ provides static backdrop + scrolling grid floor
+  meta.h / meta.c     # 25-level unlock table, challenges, NVS persistence
+  audio.h / audio.c   # I2S mixer task, sound trigger flags, system-volume handling
+  input.h / input.c   # event drain, polled steering, volume/jack handling
+  sfx.h               # embedded PCM sample arrays (xxd output)
+metadata/metadata.json   # update name/description/version
+CMakeLists.txt           # extend APP_SOURCES with the new .c files
+```
+
+`synthwave.c` from the launcher will be **copied and refactored**. The
+FreeRTOS animator task at lines 272–392 is removed (we own the frame loop).
+The two pure render functions stay, but are split into composable layers
+that respect the new render order:
+
+```
+synthwave_init()                  // pre-triangulate all polygons (once)
+synthwave_draw_sky(fb)            // background fill
+synthwave_draw_sun(fb, dy)        // 5 sun bands, vertically offset by dy
+synthwave_draw_mountains(fb)      // mountain silhouette + cyan wireframe
+synthwave_draw_top_grid(fb)       // top horizon line
+synthwave_step(fb)                // bottom grid floor (animated)
+```
+
+Per-frame draw order in `render.c`:
+sky → **sun** (with sink offset) → **mountains** (occlude sun) → mountain
+wireframe → top grid line → bottom grid (`synthwave_step`) → 3D scene
+(obstacles, pickups) → ship → HUD.
+
+This is the order needed so the sun visually disappears behind the mountains
+as it sets — the original launcher already used this z-order, but splitting
+the function makes it explicit and lets us animate the sun.
+
+---
+
+## Module Responsibilities
+
+### `synthwave.c` — pre-triangulated backdrop
+
+- All shape vertex arrays from `tanmatsu-launcher/main/synthwave.c` (sun0..sun4,
+  mountains) are kept as `static const pax_vec2f` arrays.
+- `synthwave_init()` runs once at boot. For each shape it calls
+  `pax_triang_concave(&indices, npts, points)` (declared at
+  `include/pax_shapes.h:99`) and stashes the returned malloc'd index
+  array in a static slot. Triangulation is allocated in PSRAM via
+  `heap_caps_malloc(... MALLOC_CAP_SPIRAM)` since it never frees.
+- `synthwave_draw_sun(fb, dy)` then iterates the 5 sun shapes calling
+  `pax_draw_shape_triang(fb, color, npts, points, ntris, indices)` with
+  the sun's `y` shifted by `dy`. We do **not** translate via the matrix
+  stack (`pax_push_2d` would also translate clip mask); instead we keep
+  a small mutable `pax_vec2f` scratch copy with `dy` baked in. Cheap —
+  ≤80 floats copied per frame.
+- The mountain wireframe is just `pax_simple_line()` calls — those are
+  already O(1) per line, no triangulation needed; copy the
+  `mountain_lines[]` table verbatim.
+- `synthwave_step(fb)` is unchanged from the launcher except its `j`
+  increment is parameterized (caller passes a delta) so we can scroll
+  the grid faster when ship speed is higher and slower when stalled.
+
+### `world.c` — daily seed, regions, content streams
+
+- `world_init(uint32_t daily_seed)` — seeds an xorshift32 PRNG state; chooses
+  region order/parameters for the day.
+- `world_advance(world_t*, float dt, float ship_speed)` — moves the
+  camera-z forward; spawns new obstacle slabs at far plane; despawns at
+  near plane.
+- Obstacles stored in a fixed pool (e.g. 64 entries) of
+  `{ x, y, z, w, h, kind }` so we never malloc during a run.
+- Pickup pool (32) of `{ x, y, z, kind }` — kinds: `TRI`, `BOOST`, `JUMP`,
+  `SHIELD`, `CHECKPOINT`.
+- 7 regions per run (mirrors the original). Each region is ~30s of game
+  time; difficulty/density/mutators are looked up from a static per-region
+  table indexed by region number, then perturbed with the PRNG.
+- **Seed sources** (priority order, picked at title screen):
+  1. **Daily seed** (default): `seed = year*10000 + month*100 + day` from
+     `time(NULL)` / `localtime()`. If the year is < 2024 the RTC is unset
+     — fall back to a stored "last known good" date in NVS so the player
+     can't farm yesterday's seed by rolling the clock backwards.
+  2. **Custom seed** (practice mode): player enters a seed on the title
+     screen via a "Custom Seed…" menu item. Used for replaying the same
+     world repeatedly. **No meta-progression is awarded in custom-seed
+     runs** (no challenge points, no level-up, no unlock toward
+     attachments) — but the highscore *for that specific seed* is tracked
+     in a small ring of recent custom-seed best scores. This prevents the
+     player from gaming the meta-progression by replaying easy seeds, but
+     still rewards mastery.
+- The seed mode is set by `world_init(seed, is_custom)`; downstream
+  modules (notably `meta.c`) check the `is_custom` flag before awarding
+  challenge progress.
+
+### `game.c` — gameplay update
+
+- `game_state_t game` holds run-time state: ship `{x, y, vx}`, current
+  speed, sun-time-remaining (seconds until sunset), score, multiplier,
+  pickup inventory (`jumps[3]`, `shields[2]`, `checkpoints[2]`), region
+  index, region-progress flags (was-perfect-region, only-left, only-right
+  for movement-restricted challenges).
+- Fixed timestep: 1/60 s. We compute `dt` from `esp_timer_get_time()` and
+  step the simulation in 16.67 ms chunks; rendering interpolates only if
+  surplus time.
+- Steering: ship `vx` accumulates left/right input each tick; integrated
+  with friction. Jump/Shield/Boost activated via spacebar / button (queued
+  events).
+- Collision: AABB in 3D world space against obstacle pool, plus pickup
+  proximity test that respects magnet upgrade range.
+- **Sun mechanic & shadow**: `sun_seconds_left` ticks down at 1.0/s in
+  light, 1.5/s in shadow. Each tick `game_step()` calls
+  `is_ship_in_shadow(world, ship)`:
+  - For every active obstacle, check three conditions:
+    - `obs.z_world > ship.z_world` (obstacle is between ship and sun, i.e.
+      ahead of the camera)
+    - `|obs.x_world - ship.x_world| < (obs.half_w + ship.half_w +
+      shadow_padding)` (lateral overlap with a small fudge — taller
+      obstacles cast wider shadows, so `shadow_padding` scales with
+      `obs.height`)
+    - `obs.height > shadow_min_height` (a low pyramid-pickup-sized object
+      doesn't block the sun)
+  - If any obstacle satisfies all three, the ship is shadowed for this
+    tick. While shadowed, `ship.speed *= 0.985` per tick (compounds to
+    a noticeable but recoverable slowdown over ~1 second of shadow).
+  - When the ship leaves shadow, `ship.speed` re-accelerates back toward
+    `base_speed` at a fixed `accel_per_sec`.
+  - Visual feedback: `render.c` reads the shadow flag and tints the ship
+    sprite ~30% darker plus dims a small region of the floor grid behind
+    the ship for that frame.
+- Crash: instant death unless a Shield is consumed. Boost adds N seconds to
+  `sun_seconds_left` AND clamps `ship.speed` back to `base_speed` so it
+  doubles as an "escape from a shadow stall" tool. Reaching `<= 0` ends
+  the run.
+- Multiplier: every 5 Tris collected → +1; crash drops by 5; floor is
+  determined by player level (lv6→2, lv12→3, lv23→4, lv24→max).
+
+### `render.c` — projection and scene draw
+
+- Frame entry, **explicit per-frame draw order** (matters for occlusion):
+  1. `synthwave_draw_sky(fb)` — purple background fill
+  2. `synthwave_draw_sun(fb, sun_dy)` — pre-triangulated sun bands, shifted
+     downward as the sun-timer drains. Drawn **before** mountains so the
+     mountain silhouette occludes the lower half of the sun naturally as
+     it sinks. `sun_dy = (1.0 - sun_seconds_left/SUN_MAX) * SINK_RANGE`.
+  3. `synthwave_draw_mountains(fb)` — pre-triangulated mountain polygon
+  4. `synthwave_draw_wireframe(fb)` — cyan mountain lines
+  5. `synthwave_draw_top_grid(fb)` — single magenta horizon line
+  6. `synthwave_step(fb)` — animated grid floor; scroll speed modulated by
+     ship speed (caller advances the internal `j` counter by a variable
+     amount so faster ship = faster lines).
+  7. 3D scene (obstacles, pickups, painter-sorted by z, back-to-front)
+  8. Ship sprite (with shadow tint applied if `game.in_shadow`)
+  9. HUD (score, multiplier, region, pickup inventory, optional volume bar)
+- 3D projection: pinhole camera at `(0, 1.0, 0)` looking down +Z. World
+  coordinates: x = lateral, y = vertical, z = depth (positive = forward).
+  Project: `sx = HALF_W + (x - cam_x) * f / z`, `sy = HALF_H - (y - cam_y)
+  * f / z`. `f` chosen so 800px-wide screen frames a comfortable lateral
+  FOV. Render obstacles as 4–8 triangles each (front face + sides),
+  back-to-front sorted by z (no z-buffer). Use `pax_simple_tri()` from
+  `include/shapes/pax_tris.h`.
+- Ship: rendered as 3 triangles in screen space (no projection — fixed at
+  bottom of screen, only its `x` moves).
+- HUD: top-right score + multiplier; top-left region indicator and
+  challenge progress; bottom-left pickup inventory icons. Use
+  `pax_font_saira_condensed` (faster) and `pax_clip()` so HUD doesn't fight
+  the synthwave overlay.
+- Title/game-over screens: synthwave backdrop + animator-style scrolling
+  grid + centered text, no scene rendering.
+- **Title screen menu** (selectable with up/down + space):
+  - "Play" — start a daily-seed run
+  - "Custom Seed…" — opens a small input dialog. The Tanmatsu has a real
+    QWERTY keyboard, so we read `INPUT_EVENT_TYPE_KEYBOARD` ASCII digits
+    into a `char buf[11]` (max 10 digits → fits a `uint32_t`), Backspace
+    to edit, Enter to confirm, Esc to cancel. Stored in NVS as
+    `last_custom_seed` for default-fill on next visit.
+  - "Stats" — show level, points to next, all-time highscore, today's
+    challenges + their progress.
+  - "Exit" — `bsp_device_restart_to_launcher()` (also bound to F1).
+
+### `meta.c` — levels, challenges, persistence
+
+- Static table `level_unlocks[26]` mapping level → unlock-flag enum
+  (BOOST_PICKUP, MULTIPLIER, JUMP, MAGNET, …, APOCALYPSE, etc.) per the
+  original-game research. Implemented as a `const struct { ... }`
+  initialized at file scope.
+- `challenge_template_t templates[~14]` — types: REACH_REGION, COLLECT_TRIS,
+  TRAVEL_DISTANCE, USE_PICKUP, REACH_MULTIPLIER, PERFECT_REGIONS,
+  ONLY_LEFT, ONLY_RIGHT, with `(min,max)` ranges per tier.
+- `meta.active[3]` — three concurrent challenges (1pt, 2pt, 3pt). On
+  completion: award points, reroll that slot from the **daily** PRNG
+  seeded by `today_seed * 7 + slot_index`. So challenges are also
+  date-stable.
+- Persistence (NVS namespace `synthracer`):
+  - `level` (u8) — current player level 1..25
+  - `points` (u8) — challenge points toward next level
+  - `unlocks` (u32) — bitmask of feature flags
+  - `attach1` / `attach2` (u8) — equipped attachment IDs
+  - `highscore` (u32) — all-time best (across all seed modes)
+  - `last_date` (u32) — last seen RTC date as `yyyymmdd`
+  - `ch_state` (blob, ~64B) — three challenge slots' current targets and
+    progress
+  - `daily_done_<date>` (u8) — bitmask of which challenges done today
+    (lazy-cleaned: when `last_date` rolls forward, drop the oldest key)
+  - `last_custom_seed` (u32) — most recent custom seed entered (UI default)
+  - `cs_best` (blob) — small ring of `{seed, score}` pairs (e.g. last 8
+    custom seeds played) so the title screen can show "Best on this
+    seed: 12345" when the player re-enters a seed they've played before.
+- **Custom-seed runs do NOT touch** `level`, `points`, `unlocks`, or
+  `ch_state` — only `highscore` (if beaten) and `cs_best`. `meta.c`'s
+  pickup/region callbacks check the `is_custom` flag and early-return.
+- API: `meta_load()`, `meta_save()`, `meta_on_pickup_collected()`,
+  `meta_on_region_complete()`, `meta_on_run_end(score)`,
+  `meta_reroll_for_date(seed)`.
+
+### `audio.c` — SFX + system volume
+
+- I2S mixer task pinned to core 1 (mirroring floppybird, lines 139–194).
+- Sample slots: 4 simultaneous voices, mono → stereo expansion.
+- Embedded SFX in `sfx.h` (generated by `xxd -i` from PCM raw 16-bit
+  16 kHz mono): `sfx_pickup_tri`, `sfx_pickup_special`, `sfx_crash`,
+  `sfx_boost`, `sfx_jump`, `sfx_shield`, `sfx_levelup`, `sfx_sunset`.
+  Total ~80 KB embedded.
+- System-volume handling, **mirroring `tanmatsu-launcher/main/global_event_handler.c`**:
+  - On boot: read audio-jack state via
+    `bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, …)`. Open
+    NVS namespace `"system"`, read `"speaker.volume"` or `"hp.volume"`
+    (default 50). Call `bsp_audio_set_amplifier(!hp_inserted)` and
+    `bsp_audio_set_volume(percent)`.
+  - On VOLUME_UP / VOLUME_DOWN navigation key (state=pressed): step ±5,
+    clamp 0..100, write back to the appropriate `"system"` NVS key, call
+    `bsp_audio_set_volume(percent)`. Optionally flash a small overlay
+    bar in `render.c` for a second.
+  - On `BSP_INPUT_ACTION_TYPE_AUDIO_JACK` action: update jack state,
+    re-read NVS for the new output, re-apply both volume and amplifier.
+  - **Important**: this writes to the launcher-shared `"system"`
+    namespace, so the volume change persists across apps — exactly what
+    the user wants.
+
+### `input.c` — event drain + polled steering
+
+- `input_drain()` non-blocking dequeue of all queued events; updates a
+  small `held_keys` struct.
+- Steering: poll `BSP_INPUT_NAVIGATION_KEY_LEFT` / `_RIGHT` each tick via
+  `bsp_input_read_navigation_key()` — gives smooth analog-feeling steering
+  without depending on event repeat rate.
+- Action button: spacebar (scancode `0x39`) for use-pickup; `F1` for
+  restart-to-launcher; `F2`/`F3` for backlight (matches template).
+- Volume keys handled inside the drain (delegated to `audio.c`).
+
+### `main.c` — top-level
+
+Replace the current event-printing demo with:
+
+1. NVS init, BSP init (RGB888 framebuffer, num_fbs=1 — same as template).
+2. `pax_buf_init` + orientation (template code already handles this).
+3. Tearing-effect / vsync semaphore setup
+   (`bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING)` and
+   `bsp_display_get_tearing_effect_semaphore`), like floppybird.
+4. Audio init: `bsp_audio_initialize(16000); bsp_audio_get_i2s_handle(...);
+   bsp_audio_set_amplifier(!hp); bsp_audio_set_volume(load_volume());`
+   then spawn the audio mixer task.
+5. `meta_load()`, choose daily seed from RTC, `world_init(seed)`,
+   `meta_reroll_for_date(seed)`.
+6. State machine: `STATE_TITLE` → `STATE_PLAYING` → `STATE_GAME_OVER` →
+   back to `STATE_TITLE`. Same pattern as floppybird (`main.c:559–648`).
+7. Per frame: drain input → fixed-step update(s) → render → blit → take
+   vsync semaphore (timeout 50 ms fallback).
+
+---
+
+## Input Mapping
+
+### Original *Race The Sun* controls
+
+| Action | Keyboard | Gamepad |
+|---|---|---|
+| Steer left | A / Left arrow | D-pad left / left stick |
+| Steer right | D / Right arrow | D-pad right / right stick |
+| Use pickup (jump / shield / boost) | Space | A (south button) |
+| Barrel roll (defensive) | Rapid alternating left↔right input | Same |
+| Pause | Esc | Start |
+| Menu confirm | Enter / Space | A |
+| Menu cancel / back | Esc | B |
+| Throttle | (none — automatic acceleration) | (none) |
+
+### Tanmatsu mapping (Race the Synth)
+
+The Tanmatsu has a full QWERTY keyboard, a D-pad/navigation cluster
+(LEFT/RIGHT/UP/DOWN), gamepad face buttons (A/B/X/Y), F1–F12, and
+volume keys. We use polled reads for steering (smoother than waiting on
+event repeats) and the event queue for everything else.
+
+| Action | Tanmatsu input | Read mode | Notes |
+|---|---|---|---|
+| Steer left | `BSP_INPUT_NAVIGATION_KEY_LEFT` **or** keyboard `a` **or** `BSP_INPUT_SCANCODE_ESC` (in-game only) | Polled (`bsp_input_read_navigation_key`) and polled scancode | Both edges accepted; held = continuous turn. ESC is the left thumb-rest key — ergonomic for long sessions. |
+| Steer right | `BSP_INPUT_NAVIGATION_KEY_RIGHT` **or** keyboard `d` **or** `BSP_INPUT_SCANCODE_BACKSPACE` (in-game only) | Polled | Backspace is the right thumb-rest key — ergonomic mirror to ESC. |
+| Use pickup | `BSP_INPUT_SCANCODE_SPACE` **or** `BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A` | Event (press edge) | Cycles through inventory: jump → shield → checkpoint, whichever the player has. Or we expose three slots — TBD; default to jump-first. |
+| Barrel roll | Detected in `input.c` from rapid LEFT-edge → RIGHT-edge (any of the three left/right bindings) within 250 ms | Event timing | Cosmetic + small dodge invulnerability frame. Optional polish — defer to Phase 13 if implementation is hairy. |
+| Pause | `BSP_INPUT_NAVIGATION_KEY_F4` | Event (press edge) | First press → pause overlay; second press resumes. **Note**: ESC was originally planned for pause, but is now reused as the left-steer thumb key during play; F4 is a free function key with no other role. |
+| Title-menu navigate | `BSP_INPUT_NAVIGATION_KEY_UP` / `_DOWN` | Event (press edge) | |
+| Title-menu confirm | `BSP_INPUT_SCANCODE_ENTER` **or** `_SPACE` **or** `GAMEPAD_A` | Event (press edge) | |
+| Title-menu cancel | `BSP_INPUT_SCANCODE_ESC` **or** `GAMEPAD_B` | Event (press edge) | ESC is steering only **during PLAYING**; in menus it reverts to its conventional cancel role. |
+| Custom-seed entry | Digit keys `0`–`9` from `INPUT_EVENT_TYPE_KEYBOARD.ascii` | Event (ASCII) | Backspace edits text, Enter confirms, Esc cancels — Backspace and Esc revert to their conventional roles inside the seed-entry dialog (no steering active there). |
+| Volume up | `BSP_INPUT_NAVIGATION_KEY_VOLUME_UP` | Event (press edge) | Updates `system/speaker.volume` or `system/hp.volume`, applies via `bsp_audio_set_volume()`, briefly shows a HUD volume bar |
+| Volume down | `BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN` | Event (press edge) | Same |
+| Audio-jack toggle | `BSP_INPUT_ACTION_TYPE_AUDIO_JACK` | Event (action) | Re-reads NVS for the new output, calls `bsp_audio_set_amplifier(!hp_inserted)` and `bsp_audio_set_volume()` |
+| Restart to launcher | `BSP_INPUT_NAVIGATION_KEY_F1` | Event (press edge) | Always available; matches template convention |
+| Backlight dim / bright | `F2` / `F3` | Event (press edge) | Matches template convention |
+| Power button | `BSP_INPUT_ACTION_TYPE_POWER_BUTTON` | Event (action) | Treated as exit-to-launcher (mirrors videoplayer) |
+
+### Modal binding: ESC and Backspace
+
+ESC and Backspace have **state-dependent meaning**, decided in
+`input.c` based on `game.state`:
+
+| State | ESC behavior | Backspace behavior |
+|---|---|---|
+| `STATE_TITLE` | menu cancel / back | (unbound, ignored) |
+| `STATE_MENU_SEED` (custom-seed dialog) | cancel dialog | edit / delete digit |
+| `STATE_PLAYING` | **steer left** (polled) | **steer right** (polled) |
+| `STATE_PAUSED` | resume play | (unbound) |
+| `STATE_GAME_OVER` | (unbound) | (unbound) |
+
+This is unambiguous — the player is never steering during a menu and
+never editing text mid-run, so the role swap never collides with itself.
+The modal logic lives entirely in `input.c`'s polled-read path:
+`is_steer_left = nav_left_held || a_held || (state==PLAYING && esc_held)`.
+
+### Mapping rationale
+
+- **Polled steering** matches `tanmatsu-placeinvaders-grace/main/main.c`
+  (`bsp_input_read_navigation_key()` for LEFT/RIGHT). Event-queued
+  steering depends on repeat-rate quirks and produces stutter.
+- **Three steering options per side** (D-pad, WASD, Esc/Backspace)
+  because the Tanmatsu's grip varies by player: D-pad for one-handed
+  play, WASD for keyboard-style two-handed grip, and Esc/Backspace as
+  thumb-rest keys at the corners of the keyboard for long-session
+  ergonomics. Cost is three polled reads per side per tick — trivial.
+- **Single "use pickup" button** mirrors the original — Race The Sun has
+  one action button that consumes whichever pickup is at the head of the
+  inventory queue. Cleaner than dedicated jump/shield/checkpoint keys.
+- **Barrel roll detection** is *not* on the critical path. Phase 1–8
+  ship without it; Phase 13 polish adds it if the timing window is
+  tunable enough to feel right.
+- **F1 always exits** — convention from template and every sibling
+  graceloader game. **Pause moved to F4** so ESC can serve as the
+  left-thumb steering key during play.
+- **Volume keys are global** — mirrors launcher and videoplayer; writes
+  to the shared `"system"` NVS namespace so the change persists across
+  apps. Confirmed by reading
+  `tanmatsu-launcher/main/global_event_handler.c:58–67` and the volume
+  helpers at
+  `tanmatsu-launcher/managed_components/nicolaielectronics__tanmatsu-settings/src/nvs_settings_hardware.c:32–46`.
+
+### Things deliberately NOT mapped
+
+- **Throttle / brake** — original has none, we don't either. Speed is
+  managed by the sun timer + boost pickups + shadow slowdown.
+- **Camera control** — fixed third-person chase camera. No swing.
+- **Joystick stick press** (`BSP_INPUT_NAVIGATION_KEY_JOYSTICK_PRESS`) —
+  reserved; ignored for now. Could map to "use pickup" as an alternate.
+- **Multi-button chords** — none. Every action is a single key.
+
+---
+
+## Critical Files & References
+
+Files to **modify** (this repo):
+
+- `main/main.c` — replace demo content
+- `main/crt0.c` — unchanged
+- `CMakeLists.txt` — extend `APP_SOURCES`
+- `metadata/metadata.json` — name "Race the Synth" (currently
+  "Race the Synth GL"), version 0.1.0, description, author already set
+
+Files to **create** (this repo):
+
+- `main/{game,world,render,meta,audio,input}.{c,h}`
+- `main/synthwave.{c,h}` (copied + trimmed)
+- `main/sfx.h` (generated from PCM with `xxd -i`)
+
+Key reference files (read-only, for patterns):
+
+- `tanmatsu-launcher/main/synthwave.{c,h}` — the synthwave backdrop +
+  scrolling grid (lines 15–270 are the pure-render functions we want; the
+  animator task at 272–392 is *not* needed since we own the loop).
+- `tanmatsu-launcher/main/global_event_handler.c:19–67` — the exact
+  volume up/down handling pattern (NVS namespace `"system"`, keys
+  `"speaker.volume"` / `"hp.volume"`, `bsp_audio_set_volume(percent)`).
+- `tanmatsu-floppybird-grace/main/main.c:139–230, 437–442, 509–527,
+  540–750` — game-loop, vsync, NVS high-score, audio task patterns.
+- `tanmatsu-placeinvaders-grace/main/{game,render,audio}.c` — multi-file
+  layout, sprite/sound embedding.
+- `include/pax_gfx.h, pax_text.h, shapes/pax_tris.h, pax_matrix.h` — the
+  PAX 2D drawing API.
+- `include/bsp/{display,input,audio,led}.h` — BSP entry points.
+- `include/nvs.h, nvs_flash.h` — persistence API.
+
+---
+
+## Implementation Phases
+
+Done in this order so each phase produces a runnable build:
+
+1. **Skeleton**: extend CMakeLists, create empty `.c/.h` stubs, copy and
+   refactor synthwave into the layered draw functions, run
+   `synthwave_init()` to pre-triangulate, render sky → sun → mountains →
+   wireframe → top-grid → bottom-grid + a "Press F1 to exit" prompt. Build,
+   install, run. Validates the build/install loop and the pre-triangulation
+   path (frame must hit ≥30 FPS already at this stage).
+2. **Ship + steering**: render a triangular ship at the bottom centre,
+   wire left/right polled input, integrate `vx` with friction. No
+   obstacles. F1 exits.
+3. **3D projection + obstacles**: implement `project()`. Spawn a single
+   stream of cuboid obstacles at fixed lateral lanes, advance them toward
+   the camera. Render as 1-colour triangles, painter-sorted by z.
+   Validates the 3D pipeline.
+4. **Collision + game over**: AABB collision. Crash → STATE_GAME_OVER →
+   back to STATE_TITLE on space.
+5. **Sun timer + shadow + boost pickups**: tick `sun_seconds_left`, sink
+   the visual sun (verify it disappears behind the mountain silhouette),
+   end run on sunset. Implement `is_ship_in_shadow()` and the speed
+   slowdown. Spawn boost pickups; collect → +time and speed reset.
+6. **Tris + multiplier**: pickup pool extended, draw blue triangles,
+   multiplier rule, score accumulator, HUD score readout.
+7. **Audio**: spawn mixer task, embed first 4 SFX, trigger on
+   pickup/crash/boost. Wire volume keys + audio-jack handling into the
+   event drain. Test that volume persists to launcher.
+8. **Daily seed + custom seed + persistence**: read RTC, derive daily
+   seed, persist highscore/level/points to NVS namespace `synthracer`.
+   Validate the "last known date" anti-cheat. Add the title-screen
+   "Custom Seed…" entry dialog + `last_custom_seed` / `cs_best`
+   persistence. Verify that custom-seed runs don't award meta-progression.
+9. **Pickups & attachments**: jump, shield, checkpoint pickups +
+   the attachment slots and magnet/battery upgrades.
+10. **Regions**: 7-region progression with mutators, perfect-region flag,
+    movement-restriction tracking.
+11. **Meta-progression**: level table, 3-slot challenge system,
+    challenge templates, level-up SFX & banner, unlock applications.
+12. **Apocalypse mode** (lv 11): faster speed, denser obstacles,
+    different region tints. Reuse the same render path.
+13. **Polish**: title screen art, game-over splash with daily challenge
+    summary, LED accents on side LEDs (e.g. red on near-collision flash,
+    green on multiplier-up), brightness via F2/F3.
+
+Phases 1–8 produce the **MVP** — playable game with persistent score,
+working volume, daily seed. Phases 9–13 deliver the full original-game
+experience.
+
+---
+
+## Verification
+
+For each phase:
+
+1. **Build**: `make clean build` from project root — single command, no
+   manual IDF env setup. **Do not** source `$IDF_PATH/export.sh` or any
+   other ESP-IDF export script directly; the Makefile handles all env
+   plumbing internally. Build must produce `build/app.so` without errors
+   and `make verify` must pass (all symbols satisfied by
+   `fakelib/liball.so`). Inspect `build/app.map` if size grows
+   unexpectedly.
+2. **Install + run**: `make install run` (assumes Tanmatsu connected on
+   `/dev/ttyACM0` and `tanmatsu-launcher` running graceloader). The app
+   should launch from the loader and render the synthwave backdrop. F1
+   returns to the launcher.
+3. **Smoke checklist** per phase:
+   - Phase 1: backdrop draws, grid scrolls, F1 exits.
+   - Phase 2: ship moves left/right, no jitter, friction feels sane.
+   - Phase 3: obstacles approach and pass under the ship.
+   - Phase 4: ship crashes on contact, game-over screen appears, space
+     restarts.
+   - Phase 5: sun visibly sinks; boosts raise it.
+   - Phase 6: score increases; collecting 5 Tris bumps the multiplier.
+   - Phase 7: SFX play; VOLUME_UP/VOLUME_DOWN change volume; quitting to
+     launcher and changing volume there shows our change persisted (read
+     `system/speaker.volume` from launcher settings UI).
+   - Phase 8: power-cycle the device; persisted highscore reappears;
+     advancing the system clock by one day reshuffles the world.
+   - Phase 9–13: tested as features land.
+4. **Daily seed determinism**: run the game twice on the same day → same
+   obstacle pattern in region 1. Force-set the date forward one day →
+   different pattern.
+5. **Custom seed determinism**: enter a fixed custom seed twice; verify
+   the world is identical (same obstacle/pickup placement region by
+   region). Verify a custom-seed run does NOT increment `points` or
+   `level` even after a long survive.
+6. **Sun occlusion**: drain the sun timer manually (or watch a long
+   run) and confirm the sun visually slides behind the mountain
+   silhouette rather than being clipped at a hard edge.
+7. **Shadow speed loss**: stand the ship behind a tall obstacle and
+   confirm `ship.speed` drops, then dodge clear and confirm it
+   re-accelerates.
+8. **Volume persistence**: change volume in our app, exit to launcher,
+   confirm launcher volume bar reflects the new value (launcher reads
+   the same NVS keys).
+9. **Memory**: check `make build` size output stays under ~3 MB so it
+   loads on graceloader's mapped window. PSRAM allocation for any
+   secondary buffer (and the cached triangulation index arrays) should
+   use `MALLOC_CAP_SPIRAM`.
+
+No automated test suite is in scope — Tanmatsu graceloader apps are
+validated on-device.
+
+---
+
+## Appendix A — Race The Sun Research Reference
+
+This is the offline-cached research summary from web sources, included so
+future sessions don't have to re-fetch. Sources cited at end.
+
+### Core gameplay loop
+
+- Player pilots a solar-powered craft along an endless, procedurally
+  generated landscape under a setting sun.
+- **Steer left/right only.** Acceleration is automatic; speed is constant
+  in direct sunlight.
+- **Speed decreases in shadow** (large obstacles, clouds). Stay shadowed
+  too long → stall.
+- The **sun continuously sets**. When it drops below the horizon, the
+  craft loses power and the run ends.
+- **Speed-boost pickups** push the sun back up briefly.
+- Optional advanced inputs: **jump** (consumable pickup), **barrel roll**
+  (rapid alternating left/right). Original used jump to clear obstacles.
+- **Direct collision = instant death** (unless a Shield is consumed).
+
+### Pickups
+
+| Pickup | Effect |
+|---|---|
+| Blue Tri (pyramid) | Multiplier +1 after every 5 collected. Crash drops it. |
+| Speed boost | Temporary speed up + raises sun. |
+| Jump | Single-use; ship hops up and floats down. Stackable up to 3 with upgrades. |
+| Shield / Emergency Portal | Single-use; absorbs one fatal hit and teleports forward/up. |
+| Checkpoint | (Late-game) checkpoint storage upgrade enables multiple. |
+
+### Scoring
+
+- Continuous accumulation while moving forward.
+- Multiplier driven by Tris (5 → +1×). Higher meta levels raise the
+  multiplier floor (lv6→2, lv12→3, lv23→4, lv24→max).
+- Crashing drops multiplier by ~5.
+
+### World structure
+
+- Pseudo-procedural regions (~7), each with distinct themes/obstacle sets
+  and difficulty mutators.
+- World layout is the **same for all players for the day** — daily seed,
+  shared leaderboards. Resets every 24 hours.
+- Modes: **Standard** (default), **Apocalypse** (faster, less forgiving,
+  unlocks at lv11), **Labyrinth** (top-down maze, unlocks at lv25).
+
+### Metaprogression
+
+Two intertwined progression layers:
+
+1. **Per-run** — sequential regions, increasing speed/density. Multiplier
+   builds over the run.
+2. **Persistent player level (1 → 25)** — each level grants a permanent
+   unlock; this is the meta layer.
+
+#### Challenge system
+
+- Always **3 active challenges**: 1-point, 2-point, 3-point.
+- Complete one → immediately replaced by a new one.
+- Procedural variations on a small template set:
+  - Reach region N
+  - Collect N Tris (sometimes "in one region", sometimes "air tris")
+  - Use pickup type X N times
+  - Travel total distance N
+  - Reach N× multiplier
+  - Perfect-region (no crash) — N regions in one run
+  - Movement-restricted ("only turn left", "only turn right")
+- Points required per level scales: ~3 at low levels, up to ~8 near top.
+
+#### Per-level unlocks (canonical 1–25 ladder)
+
+| Lvl | Unlock |
+|----|----|
+| 1  | (start) |
+| 2  | Speed-boost pickup |
+| 3  | Multiplier system (Tris → +1×) |
+| 4  | Jump pickup |
+| 5  | Magnet attachment |
+| 6  | Starting multiplier 2× |
+| 7  | Portal to easier alternate world |
+| 8  | Double jump storage |
+| 9  | Shield pickup |
+| 10 | Shield attachment |
+| 11 | **Apocalypse mode** (harder/faster) |
+| 12 | Starting multiplier 3× |
+| 13 | Second attachment slot |
+| 14 | Left-wing decal |
+| 15 | Double portal storage |
+| 16 | Checkpoint pickups |
+| 17 | Power-turning attachment |
+| 18 | Second power-turning attachment |
+| 19 | Triple jump storage |
+| 20 | Enhanced checkpoint storage |
+| 21 | Enhanced magnet |
+| 22 | Right-wing decal |
+| 23 | Starting multiplier 4× |
+| 24 | Final multiplier upgrade |
+| 25 | New mode (Labyrinth) + battery upgrade ("complete") |
+
+### Sources (research date: 2026-05-07)
+
+- https://en.wikipedia.org/wiki/Race_the_Sun_(video_game)
+- https://store.steampowered.com/app/253030/Race_The_Sun/
+- https://steamcommunity.com/sharedfiles/filedetails/?id=203298348 (basic guide)
+- https://steamcommunity.com/sharedfiles/filedetails/?id=207229205 (level unlocks)
+- https://www.gamespot.com/reviews/race-the-sun-review/1900-6413902/
+- https://portforward.com/games/walkthroughs/Race-The-Sun/The-Rest.htm
+- https://psnprofiles.com/guide/5414-race-the-sun-trophy-guide
+- http://flippfly.com/racethesun/releasenotes/
+
+---
+
+## Appendix B — Tanmatsu API Reference (cached)
+
+Cheat-sheet of the most relevant APIs found during exploration of the SDK
+headers under `tanmatsu-synthracer-grace/include/`. Cited so we don't have
+to re-grep next session.
+
+### PAX graphics (2D only — no 3D math, hand-rolled projection required)
+
+- `pax_buf_init(&fb, NULL, w, h, PAX_BUF_24_888RGB)` — `include/pax_gfx.h:94`
+- `pax_buf_set_orientation()`, `pax_buf_get_pixels()` — same header
+- 2D matrix stack: `pax_push_2d`, `pax_pop_2d`, `pax_apply_2d` — same header
+- `pax_simple_tri/rect/line/circle` — `include/shapes/`
+- `pax_draw_shape(buf, color, npts, points)` — triangulates each call.
+- `pax_triang_concave(&indices, npts, points)` →
+  `pax_draw_shape_triang(buf, color, npts, points, ntris, indices)` —
+  pre-triangulate path. `include/pax_shapes.h:99,108`.
+- `pax_draw_text`, `pax_center_text`, `pax_text_size` — `include/pax_text.h`
+- Built-in fonts: `pax_font_sky`, `pax_font_sky_mono`, `pax_font_marker`,
+  `pax_font_saira_condensed`, `pax_font_saira_regular` — `include/pax_fonts.h`
+- `pax_clip(buf, x, y, w, h)` / `pax_noclip(buf)` for HUD scissoring.
+
+### BSP — display, input, audio, LEDs
+
+- `bsp_device_initialize(cfg)`; `bsp_device_restart_to_launcher()` — `bsp/device.h`
+- `bsp_display_get_parameters()`, `bsp_display_blit(x,y,w,h,buf)` —
+  `bsp/display.h:36, 79`
+- Vsync: `bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING)` +
+  `bsp_display_get_tearing_effect_semaphore(&sem)` then
+  `xSemaphoreTake(sem, pdMS_TO_TICKS(50))`. Pattern from
+  `tanmatsu-floppybird-grace/main/main.c:519–527, 748`.
+- `bsp_input_get_queue(&q)` (event-driven), `bsp_input_read_navigation_key()`
+  / `bsp_input_read_scancode()` / `bsp_input_read_action()` (polled) —
+  `bsp/input.h:257, 273, 277, 281`.
+- Nav key constants: `BSP_INPUT_NAVIGATION_KEY_{LEFT,RIGHT,UP,DOWN,F1..F12,
+  GAMEPAD_A,B,X,Y,JOYSTICK_PRESS,VOLUME_UP,VOLUME_DOWN}` — `bsp/input.h:148–196`
+- Action types include `BSP_INPUT_ACTION_TYPE_AUDIO_JACK`,
+  `BSP_INPUT_ACTION_TYPE_SD_CARD`, `BSP_INPUT_ACTION_TYPE_POWER_BUTTON`.
+- `bsp_audio_initialize(rate)`, `bsp_audio_get_i2s_handle(&h)`,
+  `bsp_audio_set_amplifier(bool)`, `bsp_audio_set_volume(float pct)` —
+  `bsp/audio.h`.
+- `bsp_led_set_pixel(idx, rgb)`, `bsp_led_send()`, `bsp_led_set_mode(auto)`,
+  `bsp_led_set_brightness(pct)` — `bsp/led.h`.
+
+### NVS
+
+- `nvs_flash_init()` — `nvs_flash.h:78`
+- `nvs_open(ns, mode, &h)`, `nvs_close(h)`, `nvs_commit(h)` — `nvs.h:162, 590, 577`
+- `nvs_set_u8/u16/u32/u64/i32/str/blob` and matching `nvs_get_*` —
+  `nvs.h:233..501`. Key max 15 chars.
+- **Shared "system" namespace keys** (used by launcher; we must use these
+  for volume to integrate properly):
+  - `"speaker.volume"` (u8 percentage 0..100)
+  - `"hp.volume"` (u8 percentage 0..100, for headphones)
+  - Helpers in launcher source at
+    `tanmatsu-launcher/managed_components/nicolaielectronics__tanmatsu-settings/src/nvs_settings_hardware.c`.
+
+### Time
+
+- `time(NULL)` / `localtime()` / `clock_gettime(CLOCK_REALTIME, ...)` for
+  wall-clock. `time.h`.
+- `esp_timer_get_time()` returns int64 microseconds since boot —
+  `esp_timer.h:223`. Use for frame timing and PRNG fallback seed.
+
+### Reference projects (for patterns)
+
+- `tanmatsu-launcher/main/synthwave.{c,h}` — synthwave backdrop +
+  scrolling grid (we copy & refactor this).
+- `tanmatsu-launcher/main/global_event_handler.c:19–67` — exact volume +
+  audio-jack handling.
+- `tanmatsu-floppybird-grace/main/main.c` — game loop, vsync, NVS
+  highscore, audio mixer task, xorshift32 PRNG.
+- `tanmatsu-placeinvaders-grace/main/{game,render,audio}.c, sprites.h,
+  sounds.h` — multi-file layout, sprite/sound embedding.
+- `tanmatsu-thecube-grace/main/{main,renderer}.c` — software 3D-ish
+  rendering pattern, fixed-step pacing.
+- `tanmatsu-videoplayer/main/main.c:769–787` — alternate
+  volume-key handling pattern (in-app only).
+
+---
+
+## Appendix C — How to resume work in a new session
+
+1. Open this file. The **Current Status** table at the top is authoritative.
+2. Read the **Conventions / decisions log** for any post-plan decisions.
+3. Pick the next ⬜ phase from the table and follow its description in the
+   "Implementation Phases" section above.
+4. After completing a phase: flip its row to ✅, append any new design
+   decisions to the log, and commit (`DEVELOPMENT.md` lives in the repo).
+5. If a phase produces a non-trivial deviation from this plan, edit the
+   relevant Module Responsibilities section so the design stays current
+   instead of letting the doc rot.
+
