@@ -304,60 +304,110 @@ void synthwave_draw_top_grid(pax_buf_t* fb) {
     pax_simple_line(fb, 0xFFF71FF1, 0, horizon_y, 800, horizon_y);
 }
 
-void synthwave_step(pax_buf_t* fb, int dj) {
-    static int j = 0;
+// World-space floor parameters. Vertical lane lines and horizontal
+// scanlines are both projected with the same pinhole math as
+// render_project (FLOOR_F == RENDER_FOCAL_LEN, FLOOR_HALF_W ==
+// RENDER_HALF_W, the floor's horizon == RENDER_HORIZON_Y), so a
+// world-z step on the floor maps to the same screen-y delta as the
+// base of an obstacle at that z — the floor and obstacles move
+// together with no perspective drift.
+//
+// Horizontal scanlines are anchored to absolute world-z positions
+// k * FLOOR_LANE_L (same spacing as the lateral lane lines). They
+// don't have a "speed" parameter — the camera advances forward by
+// `dz_world` (= ship_speed_z * dt) each frame, exactly the same
+// amount obstacles' z_world decreases by, so a stripe and an
+// obstacle that share a world-z stay locked to the same screen-y
+// regardless of ship speed.
+#define FLOOR_Z_NEAR        2.0f
+#define FLOOR_Z_FAR        60.0f  // beyond this, projected sy is within ~8 px of the horizon
+#define FLOOR_LANE_L        1.0f
+#define FLOOR_F           450.0f
+#define FLOOR_HALF_W      400.0f
 
-    float const horizon_y    = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;        // top of perspective lines
-    float const rect_top_y   = horizon_y + 1.0f;                          // grid background starts 1px below
-    float const rect_height  = GRID_BOTTOM_Y - rect_top_y;
-    // Slope extrapolation factor: for each line we know its (x1, x2)
-    // at the original (354 → 480) endpoints; preserving slope while
-    // lifting the top by GRID_LIFT_PX shifts the top-x outward by this
-    // ratio of (x1 - x2).
-    float const slope_factor = GRID_LIFT_PX / (GRID_BOTTOM_Y - GRID_HORIZON_Y_BASE);
+void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
+    // Camera's absolute world-z position. Mirrors how `world_advance`
+    // tracks each obstacle's z_world: every frame the camera moves
+    // forward by dz_world, so a stripe at fixed world-z W appears at
+    // camera-relative depth (W - cam_z), which decreases at the same
+    // rate an obstacle's z_world does. We keep cam_z bounded by one
+    // stride so float precision stays good after a long run; this is
+    // safe because the stripe set is an infinite periodic pattern, so
+    // only the fractional part of cam_z affects which stripes are
+    // visible and where.
+    static float cam_z = 0.0f;
+    cam_z += dz_world;
+    while (cam_z >= FLOOR_LANE_L) cam_z -= FLOOR_LANE_L;
+    while (cam_z < 0.0f)          cam_z += FLOOR_LANE_L;
+
+    float const horizon_y   = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
+    float const rect_top_y  = horizon_y + 1.0f;
+    float const rect_height = GRID_BOTTOM_Y - rect_top_y;
 
     pax_simple_rect(fb, 0xFF5D0B8B, 0, rect_top_y, 800, rect_height);
 
-    // Vertical perspective lines extended along their original slope.
-    // The (x1, 354) → (x2, 480) pair came from the launcher's synthwave;
-    // we extrapolate the top point upward to (horizon_y) so each line's
-    // length grows but its angle is unchanged.
+    // Vertical lane lines in world space. Each line is the projection
+    // of a world-X-constant ray on the ground (y_w = 0) from z = ∞
+    // (the vanishing point) to z = FLOOR_Z_NEAR (just below screen).
     //
-    // Lifting the horizon also pulls all 17 of the original lines toward
-    // the vanishing point at the top, leaving empty wedges on the left
-    // and right of the new horizon. We solve for the i range that keeps
-    // x_top within [0, 800] and iterate over that, so the extra lines
-    // share the same generating function (same perspective angles) but
-    // sit outside the launcher's original 17.
-    float const a            = 800.0f / 17.0f;
-    float const c            = 800.0f;
-    float const b            = (800.0f + c) / 17.0f;
-    float const x_top_step   = a + (a - b) * slope_factor;     // x_top per (i+1) increment
-    float const x_top_offset = (c / 2.0f) * slope_factor;      // x_top at i+1 = 0
-    int   const k_min        = (int)floorf((0.0f   - x_top_offset) / x_top_step);
-    int   const k_max        = (int)ceilf ((800.0f - x_top_offset) / x_top_step);
+    // For a ray of constant world-X, the projection has
+    //     sx - HALF_W = F * (X - cam_x) / z
+    //     sy - HORIZON = F / z
+    // so sx and sy are both linear in 1/z — the projected ray is a
+    // straight line in screen space passing through the vanishing
+    // point (HALF_W, HORIZON). This means any obstacle at the same
+    // world-X lands exactly on this line at every z. Earlier we
+    // computed the top endpoint's sx at z=FLOOR_Z_TOP but its sy at
+    // z=∞ (the horizon), which broke that property and made
+    // obstacles drift off the lane lines. Anchoring the top at the
+    // true vanishing point and the bottom at FLOOR_Z_NEAR for both
+    // axes restores the alignment.
+    float const sy_bot = horizon_y + FLOOR_F / FLOOR_Z_NEAR;
 
-    for (int k = k_min; k <= k_max; k++) {
-        float x1    = a * (float)k;
-        float x2    = b * (float)k - (c / 2.0f);
-        float x_top = x1 + (x1 - x2) * slope_factor;
-        pax_simple_line(fb, 0xFFF71FF1, x_top, horizon_y, x2, GRID_BOTTOM_Y);
+    // World-X range whose lane line crosses the visible screen at any
+    // depth. The widest extent is at z=FLOOR_Z_NEAR where one screen
+    // pixel of horizontal offset corresponds to FLOOR_Z_NEAR/FLOOR_F
+    // world units, so the visible X range is ±(HALF_W * Z_NEAR / F)
+    // around cam_x.
+    float const half_w_world_at_near = (FLOOR_HALF_W / FLOOR_F) * FLOOR_Z_NEAR;
+    int   const kx_min               = (int)floorf((cam_x - half_w_world_at_near) / FLOOR_LANE_L) - 1;
+    int   const kx_max               = (int)ceilf ((cam_x + half_w_world_at_near) / FLOOR_LANE_L) + 1;
+
+    for (int k = kx_min; k <= kx_max; k++) {
+        float const X     = (float)k * FLOOR_LANE_L;
+        float const dx    = X - cam_x;
+        float const x_bot = FLOOR_HALF_W + FLOOR_F * dx / FLOOR_Z_NEAR;
+        pax_simple_line(fb, 0xFFF71FF1, FLOOR_HALF_W, horizon_y, x_bot, sy_bot);
     }
 
-    // Horizontal scanlines that march down to suggest forward motion.
-    // Density (20 px per band) preserved from the launcher; we just need
-    // enough bands to cover the now-taller grid area.
-    float const distance = 20.0f;
-    int const   band_count = (int)((GRID_BOTTOM_Y - horizon_y) / distance) + 1;
-    for (int i = 0; i < band_count; i++) {
-        int y = (int)horizon_y + (int)(distance * i) + j;
-        if (y > (int)GRID_BOTTOM_Y) {
-            y -= (int)(distance * i) + j;
-        }
-        pax_simple_line(fb, 0xFFF71FF1, 0, y, 800, y);
-    }
+    // Horizontal scanlines anchored to absolute world-z positions
+    // W = k * FLOOR_LANE_L. We project each visible one at its
+    // current camera-relative depth z = W - cam_z using the same
+    // sy = horizon_y + FLOOR_F / z used by render_obstacles for the
+    // base of an obstacle at world-y 0. Iterating the integer k range
+    // [ceil((cam_z+Z_NEAR)/L), floor((cam_z+Z_FAR)/L)] picks exactly
+    // the stripes whose current depth falls in [Z_NEAR, Z_FAR].
+    //
+    // Beyond z ≈ 20 adjacent stripes collapse to within 1 px of each
+    // other on screen, so we deduplicate by integer screen-y to skip
+    // redundant `pax_simple_line` calls (the iteration is monotonic
+    // in z, so consecutive duplicates are sufficient to filter all).
+    int const kz_min = (int)ceilf ((cam_z + FLOOR_Z_NEAR) / FLOOR_LANE_L);
+    int const kz_max = (int)floorf((cam_z + FLOOR_Z_FAR ) / FLOOR_LANE_L);
 
-    j += dj;
-    while (j > 20) j -= 20;
-    while (j < 0) j += 20;
+    // Keep sy as a float so it rasterizes the same way an obstacle's
+    // base does (render_obstacles passes a float sy_b directly to
+    // pax_simple_tri). Dedup is done on the integer-floor of sy so
+    // we still skip the redundant draws at high z where adjacent
+    // stripes collapse onto the same pixel row.
+    int last_sy_int = -1;
+    for (int k = kz_min; k <= kz_max; k++) {
+        float const z  = (float)k * FLOOR_LANE_L - cam_z;
+        float const sy = horizon_y + FLOOR_F / z;
+        if (sy <= horizon_y + 1.0f || sy > GRID_BOTTOM_Y) continue;
+        int const sy_int = (int)sy;
+        if (sy_int == last_sy_int) continue;
+        last_sy_int = sy_int;
+        pax_simple_line(fb, 0xFFF71FF1, 0, sy, 800, sy);
+    }
 }

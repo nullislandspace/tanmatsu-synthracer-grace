@@ -32,3 +32,8 @@ int  input_steering(void);
 // True for the frame where the "use pickup" button (Space or Gamepad-A)
 // was just pressed. Self-clears after one read.
 bool input_consume_pickup(void);
+
+// Returns the net speed-adjust delta accumulated since the last call:
+// +N for N UP-edge presses, -N for DOWN-edges, 0 if neither fired.
+// Self-clears after one read. Debug aid for tuning ship_speed_z.
+int  input_consume_speed_delta(void);

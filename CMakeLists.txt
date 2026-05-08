@@ -16,6 +16,8 @@ set(APP_SOURCES
     main/icons.c
     main/input.c
     main/game.c
+    main/world.c
+    main/render.c
 )
 
 # Include directories — add paths to your headers here

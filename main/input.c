@@ -10,6 +10,7 @@ static char const TAG[] = "input";
 static QueueHandle_t s_event_queue = NULL;
 static input_mode_t  s_mode        = INPUT_MODE_TITLE;
 static bool          s_pickup_edge = false;
+static int           s_speed_delta = 0;
 
 void input_init(void) {
     esp_err_t res = bsp_input_get_queue(&s_event_queue);
@@ -36,6 +37,10 @@ bool input_drain_events(void) {
                         exit_requested = true;
                     } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A) {
                         s_pickup_edge = true;
+                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_UP) {
+                        s_speed_delta += 1;
+                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
+                        s_speed_delta -= 1;
                     }
                 }
                 break;
@@ -83,4 +88,10 @@ bool input_consume_pickup(void) {
     bool e        = s_pickup_edge;
     s_pickup_edge = false;
     return e;
+}
+
+int input_consume_speed_delta(void) {
+    int d         = s_speed_delta;
+    s_speed_delta = 0;
+    return d;
 }

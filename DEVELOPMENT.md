@@ -10,14 +10,14 @@
 
 ## Current Status
 
-**Phase: Phase 2 complete; Phase 3 next**
+**Phase: Phase 3 complete; Phase 4 next**
 
 | Phase | Description | State |
 |-------|-------------|-------|
 | 0 | Research, design, plan | ✅ done — see this document |
 | 1 | Skeleton + synthwave backdrop | ✅ runs on-device; sun arch fixed, Hershey font, F-key icon hint, horizon lifted, grid floor extended with extra perspective lines on each side |
 | 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
-| 3 | 3D projection + obstacles | ⬜ not started |
+| 3 | 3D projection + obstacles | ✅ runs on-device after rework (slower, fewer, wider track, world-space ship + camera pan, world-space floor lanes) |
 | 4 | Collision + game over | ⬜ not started |
 | 5 | Sun timer + shadow + boost | ⬜ not started |
 | 6 | Tris + multiplier | ⬜ not started |
@@ -36,6 +36,14 @@
   perspective line set (~78 lines per frame), and the per-frame
   full-FB memcpy itself (1.15 MB at 60 fps = 69 MB/s of PSRAM
   bandwidth — measurable but should be fine).
+- **PPA / 2D-DMA / double-buffer** — checked: PPA HAL/LL headers are
+  present but no high-level `driver/ppa.h` symbols in fakelib;
+  `dma2d_*` symbols ARE in fakelib (PPA's transport, usable as a
+  hardware memcpy with non-trivial setup); `bsp_display_blit` takes
+  the user's buffer pointer with no swap API exposed. **Decision**:
+  punt on hardware accel for now. If the plain-memcpy backdrop ever
+  becomes the bottleneck, add high-level PPA bindings to graceloader
+  before touching the app — keeps the app code simple.
 - **Phase 5 sun re-cache** — when the sunset mechanic lands, the
   cached sun position becomes stale as `sun_dy` changes. Plan: track
   the dy used to render the cache, re-render only when the new dy
@@ -117,6 +125,44 @@
   `pax_buf_get_pixels` is intentional — pax's buffer is logically
   mutable, the const just communicates "don't muck with this via
   arbitrary writes". The memcpy is ~1.15 MB per frame on RGB888.
+- 2026-05-07 — Phase 3 implementation landed: `world.{c,h}` (fixed
+  pool of 64 obstacles, xorshift32 PRNG, randomized z-spawn cadence
+  in world units so spawn density is speed-independent) and
+  `render.{c,h}` (pinhole projection at horizon y=256, painter's
+  algorithm via insertion-sorted z-descending index list, front-face
+  triangle pair + cyan outline per obstacle). `synthwave_step` now
+  takes a float `scroll_pixels`, accumulates internally, and the main
+  loop drives it from `scroll_px_per_world_unit *
+  game.ship_speed_z * dt` — floor scroll and obstacle approach now
+  share the same forward-speed source. World seed is currently
+  derived from `esp_timer_get_time()`; Phase 8 will swap that for the
+  RTC-derived daily seed.
+- 2026-05-07 — Phase 3 playfield rework after first on-device
+  feedback (too many obstacles, too fast, faster than ground, no
+  off-screen movement):
+  * Cut `SHIP_BASE_SPEED_Z` from 30 → 12 u/s (8 s from spawn at
+    z=100 to ship plane).
+  * Cut spawn density: spawn cadence 6-14 → 12-22 z-units (≈0.5-1
+    obstacle/sec at the camera).
+  * Bumped `scroll_px_per_world_unit` from 2 → 4.5 so the floor's
+    visual speed matches the ground-point approach speed at z≈10
+    (the depth where most obstacle motion is read).
+  * **Ship moved from screen-px to world coords**: `ship_x_world ∈
+    [-5, +5]`, accel/maxvx re-tuned in world units. Game state
+    gains `cam_x` which locks to `ship_x_world` so the ship stays
+    centred on screen and the world pans around it. `render_project`
+    and `render_obstacles` take `cam_x`. `game_draw_ship` now
+    projects through `render_project` (placeholder triangles still
+    a fixed pixel size; phase 13 polish will perspective-scale them).
+  * **Floor lanes redrawn in world space**: replaced the launcher's
+    stylized fan with vertical lane lines anchored at world_X = k *
+    1.0 for integer k, projected from `FLOOR_Z_TOP=10` (just below
+    horizon) to `FLOOR_Z_NEAR=2` (bottom). cam_x panning now lives
+    in the projection naturally. Density at the top (~45 px between
+    adjacent lanes) approximates the launcher's original 17-line
+    look. Horizontal scanlines stay decorative, no x-pan.
+  * Track widened from `±1.5` → `±5` world units so obstacles spawn
+    across the full playfield (matching Race The Sun).
 
 ---
 

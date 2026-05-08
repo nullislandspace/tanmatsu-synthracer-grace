@@ -26,7 +26,17 @@ void synthwave_draw_wireframe(pax_buf_t* fb);
 // Draw the magenta horizon line at the top of the floor grid.
 void synthwave_draw_top_grid(pax_buf_t* fb);
 
-// Draw one frame of the scrolling grid floor. `dj` advances the internal
-// scroll counter by that many pixels — pass 1 for normal speed, larger
-// values for faster scroll, 0 to freeze.
-void synthwave_step(pax_buf_t* fb, int dj);
+// Draw one frame of the scrolling grid floor.
+//
+// `dz_world` is the world-z distance the camera advanced this frame
+// (typically `ship_speed_z * dt`). Both the horizontal scanlines and
+// the vertical lane lines are projected with the same pinhole math
+// as render_project, so the floor's apparent motion matches the
+// motion of obstacle bases — a unit step in world-z moves a floor
+// stripe by exactly the same screen-y delta as it moves an
+// obstacle's base at that z.
+//
+// `cam_x` is the camera's lateral world-x position. Vertical lane
+// lines are drawn in world space (anchored to the world, not the
+// screen) so they pan correctly as the ship moves laterally.
+void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x);

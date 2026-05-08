@@ -22,8 +22,10 @@
 #include "input.h"
 #include "nvs_flash.h"
 #include "pax_gfx.h"
+#include "render.h"
 #include "rendertext.h"
 #include "synthwave.h"
+#include "world.h"
 
 static char const TAG[] = "racethesynth";
 
@@ -43,6 +45,20 @@ static size_t                       backdrop_size        = 0;
 
 static void blit(void) {
     bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(&fb));
+}
+
+static void draw_speed_readout(float speed_z) {
+    // Top-right debug overlay. Tuning aid for matching the floor's
+    // visible motion to a comfortable forward speed; cursor up/down
+    // adjust ship_speed_z live. Use pax_buf_get_widthf so the offset
+    // respects the post-orientation logical width rather than the
+    // raw display_h_res, which is the un-rotated physical width.
+    char        buf[32];
+    snprintf(buf, sizeof(buf), "v=%.1f", speed_z);
+    float const text_h = 18.0f;
+    pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
+    float const x      = pax_buf_get_widthf(&fb) - sz.x - 12.0f;
+    rendertext_draw(&fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f, buf);
 }
 
 static void draw_exit_hint(void) {
@@ -166,9 +182,14 @@ void app_main(void) {
     game_state_t game;
     game_init(&game);
 
+    world_state_t world;
+    // Seed from boot time for now. Phase 8 will replace this with the
+    // RTC-derived daily seed (or the player's custom seed).
+    world_init(&world, (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu) | 1u);
+
     int64_t prev_us = esp_timer_get_time();
 
-    ESP_LOGI(TAG, "Race the Synth: Phase 2 ship+steering ready");
+    ESP_LOGI(TAG, "Race the Synth: Phase 3 obstacles ready");
 
     while (1) {
         if (input_drain_events()) {
@@ -182,8 +203,16 @@ void app_main(void) {
         // dim or a paged-out frame).
         if (dt > 0.1f) dt = 0.1f;
 
+        int sd = input_consume_speed_delta();
+        if (sd != 0) {
+            game.ship_speed_z += (float)sd * 1.0f;
+            if (game.ship_speed_z < 0.5f) game.ship_speed_z = 0.5f;
+            if (game.ship_speed_z > 60.0f) game.ship_speed_z = 60.0f;
+        }
+
         int steer = input_steering();
         game_step(&game, dt, steer);
+        world_advance(&world, dt, game.ship_speed_z);
 
         // Static synthwave layers come from the pre-rendered cache.
         // We bypass PAX's draw path with a single memcpy — the cache and
@@ -192,11 +221,19 @@ void app_main(void) {
         memcpy((void*)pax_buf_get_pixels(&fb), backdrop_pixels, backdrop_size);
 
         // Dynamic content drawn on top of the cached backdrop.
-        synthwave_step(&fb, 1);
+        // Floor scroll is coupled to forward speed so obstacles appear
+        // anchored to the floor texture as they approach. cam_x pans
+        // the floor's lane lines in world space.
+        synthwave_step(&fb, game.ship_speed_z * dt, game.cam_x);
+
+        // Obstacles render between the floor and the ship: floor goes
+        // behind everything, ship is always in front.
+        render_obstacles(&fb, &world, game.cam_x);
 
         game_draw_ship(&fb, &game);
 
         draw_exit_hint();
+        draw_speed_readout(game.ship_speed_z);
 
         blit();
 
