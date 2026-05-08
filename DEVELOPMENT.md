@@ -17,7 +17,7 @@
 | 0 | Research, design, plan | ✅ done — see this document |
 | 1 | Skeleton + synthwave backdrop | ✅ runs on-device; sun arch fixed, Hershey font, F-key icon hint, horizon lifted, grid floor extended with extra perspective lines on each side |
 | 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
-| 3 | 3D projection + obstacles | ✅ runs on-device after rework (slower, fewer, wider track, world-space ship + camera pan, world-space floor lanes) |
+| 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles now share a single pinhole projection (debug speed knob via cursor up/down + top-right `v=` readout) |
 | 4 | Collision + game over | ⬜ not started |
 | 5 | Sun timer + shadow + boost | ⬜ not started |
 | 6 | Tris + multiplier | ⬜ not started |
@@ -163,6 +163,61 @@
     look. Horizontal scanlines stay decorative, no x-pan.
   * Track widened from `±1.5` → `±5` world units so obstacles spawn
     across the full playfield (matching Race The Sun).
+- 2026-05-08 — Floor projection unified with the obstacle path so
+  every visual element shares one pinhole camera. Several iterations
+  on the same theme:
+  * **Horizontal scanlines now world-anchored**, not screen-anchored.
+    Replaced the launcher's evenly-spaced screen-y stripes (which
+    didn't perspective-compress with depth) with stripes at fixed
+    world-z = `k * FLOOR_LANE_L` projected via
+    `sy = horizon_y + FLOOR_F / (k*L - cam_z)` — identical formula
+    to `render_obstacles`'s base-y. `synthwave_step` now takes
+    `dz_world` (= `ship_speed_z * dt`) instead of `scroll_pixels`,
+    so the same world-z step that decrements every obstacle's
+    `z_world` advances the floor's `cam_z` accumulator. cam_z is
+    bounded modulo `LANE_L * FLOOR_HSTRIPE_DRAW_EVERY` for float
+    stability, with the wrap window deliberately a whole multiple
+    of the *drawn* stride so the modulo filter `k % DRAW_EVERY == 0`
+    keeps surviving stripes continuous across wraps.
+  * **Stripe density factor** `FLOOR_HSTRIPE_DRAW_EVERY = 3` — at
+    default speed the raw 1-stripe-per-world-unit cadence is
+    `ship_speed_z` Hz at the bottom of the screen which strobes;
+    drawing every 3rd stripe drops it to ~4 Hz without changing the
+    underlying world-z anchoring (an obstacle and a stripe at the
+    same world-z still align).
+  * **Vertical lane top-endpoint bug fixed**: the lane line was
+    being drawn from `(HALF_W + F*dx/Z_TOP, horizon_y)` to
+    `(HALF_W + F*dx/Z_NEAR, GRID_BOTTOM_Y)`. The top sx was
+    computed at z=10 but the top sy at z=∞ — projection
+    inconsistent with itself, so any obstacle at `world-X = X`
+    visibly drifted off the lane line as cam_x moved. A constant-X
+    ray on the ground projects to a *straight* screen-space line
+    through the vanishing point `(HALF_W, horizon_y)` (because
+    `sx-HALF_W = F*dx/z` and `sy-horizon = F/z` are both linear in
+    `1/z`). Fixed: top endpoint = vanishing point exactly, bottom
+    computed at `FLOOR_Z_NEAR` for *both* sx and sy. Now obstacles
+    at integer world-X land exactly on the corresponding lane line
+    at every depth.
+  * **Vertical lane kx range extended**: was capped at
+    `±(HALF_W * Z_NEAR / F)` ≈ ±1.78 world units, which left out
+    every lane that's only visible near the horizon. As cam_x
+    panned, those off-screen lanes "popped in" at the screen edges.
+    New cap is `±(HALF_W * Z_FAR / F)` ≈ ±53 world units —
+    `pax_simple_line` clips to the framebuffer when it actually
+    rasterizes, so the cost of the off-screen lines is small.
+  * **Debug speed knob** wired through `input_consume_speed_delta()`
+    + a `v=NN.N` readout in `main.c` so the floor/obstacle motion
+    can be inspected at arbitrary speeds. Cursor up/down step
+    `game.ship_speed_z` by ±1 u/s (clamped 0.5..60). Speed text is
+    positioned via `pax_buf_get_widthf(&fb)` so it sits flush at
+    the right edge of the orientation-corrected logical width
+    (using raw `display_h_res` puts it near screen centre because
+    that's the un-rotated physical width).
+  * **Stripe sy now float**, dedup on `int(sy)`. `pax_simple_tri`
+    used by obstacles takes float vertices, so keeping the floor
+    stripe's sy as a float (instead of int-floor before pass-down)
+    keeps the rasterized pixel rows identical between an obstacle's
+    base edge and a stripe at the same world-z.
 
 ---
 
@@ -267,9 +322,26 @@ the function makes it explicit and lets us animate the sun.
 - The mountain wireframe is just `pax_simple_line()` calls — those are
   already O(1) per line, no triangulation needed; copy the
   `mountain_lines[]` table verbatim.
-- `synthwave_step(fb)` is unchanged from the launcher except its `j`
-  increment is parameterized (caller passes a delta) so we can scroll
-  the grid faster when ship speed is higher and slower when stalled.
+- `synthwave_step(fb, dz_world, cam_x)` is now a full world-space
+  floor renderer, not a port of the launcher's screen-space scroller.
+  Both axes of grid lines share the obstacle projection
+  (FLOOR_F == RENDER_FOCAL_LEN, FLOOR_HALF_W == RENDER_HALF_W,
+  floor horizon == RENDER_HORIZON_Y):
+  * *Vertical lanes* — a constant-world-X ray projects to a straight
+    screen-space line through the vanishing point
+    `(HALF_W, horizon_y)`. Each lane is drawn from the vanishing
+    point to its endpoint at `FLOOR_Z_NEAR`. kx range covers
+    `±FLOOR_Z_FAR` world units of dx so lanes near the horizon are
+    always present (no popping at screen edges as cam_x pans).
+  * *Horizontal stripes* — anchored to fixed world-z =
+    `k * FLOOR_LANE_L`. The function tracks a `cam_z` accumulator
+    that advances by `dz_world` (the same step every obstacle's
+    z_world decreases by) and projects each surviving stripe at
+    `sy = horizon_y + FLOOR_F / (k*L - cam_z)`. Modulo filter
+    `k % FLOOR_HSTRIPE_DRAW_EVERY == 0` thins the set so the
+    bottom-of-screen cadence stays watchable at default speed; the
+    cam_z wrap window is `LANE_L * DRAW_EVERY` so the surviving
+    set is continuous across wraps.
 
 ### `world.c` — daily seed, regions, content streams
 

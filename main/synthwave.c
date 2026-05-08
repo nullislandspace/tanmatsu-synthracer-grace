@@ -319,11 +319,18 @@ void synthwave_draw_top_grid(pax_buf_t* fb) {
 // amount obstacles' z_world decreases by, so a stripe and an
 // obstacle that share a world-z stay locked to the same screen-y
 // regardless of ship speed.
-#define FLOOR_Z_NEAR        2.0f
-#define FLOOR_Z_FAR        60.0f  // beyond this, projected sy is within ~8 px of the horizon
-#define FLOOR_LANE_L        1.0f
-#define FLOOR_F           450.0f
-#define FLOOR_HALF_W      400.0f
+#define FLOOR_Z_NEAR             2.0f
+#define FLOOR_Z_FAR             60.0f  // beyond this, projected sy is within ~8 px of the horizon
+#define FLOOR_LANE_L             1.0f
+#define FLOOR_F                450.0f
+#define FLOOR_HALF_W           400.0f
+// Only every Nth horizontal stripe is drawn. With LANE_L=1 the raw
+// cadence at the bottom of the screen is ship_speed_z Hz (12 Hz at
+// the default speed), which strobes; skipping reduces it to
+// ship_speed_z / DRAW_EVERY Hz. Stripes that are skipped here are
+// still anchored at fixed world-z, so the surviving set stays
+// aligned with obstacle bases at those world-z positions.
+#define FLOOR_HSTRIPE_DRAW_EVERY  3
 
 void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     // Camera's absolute world-z position. Mirrors how `world_advance`
@@ -335,10 +342,16 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     // safe because the stripe set is an infinite periodic pattern, so
     // only the fractional part of cam_z affects which stripes are
     // visible and where.
+    // The wrap window has to be a whole number of *drawn* strides,
+    // i.e. FLOOR_LANE_L * FLOOR_HSTRIPE_DRAW_EVERY. Wrapping at a
+    // smaller window would relabel which `k` values survive the
+    // `k % FLOOR_HSTRIPE_DRAW_EVERY == 0` filter and produce a
+    // visible jump every wrap.
     static float cam_z = 0.0f;
+    float const  cam_z_wrap = FLOOR_LANE_L * (float)FLOOR_HSTRIPE_DRAW_EVERY;
     cam_z += dz_world;
-    while (cam_z >= FLOOR_LANE_L) cam_z -= FLOOR_LANE_L;
-    while (cam_z < 0.0f)          cam_z += FLOOR_LANE_L;
+    while (cam_z >= cam_z_wrap) cam_z -= cam_z_wrap;
+    while (cam_z < 0.0f)        cam_z += cam_z_wrap;
 
     float const horizon_y   = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
     float const rect_top_y  = horizon_y + 1.0f;
@@ -364,14 +377,19 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     // axes restores the alignment.
     float const sy_bot = horizon_y + FLOOR_F / FLOOR_Z_NEAR;
 
-    // World-X range whose lane line crosses the visible screen at any
-    // depth. The widest extent is at z=FLOOR_Z_NEAR where one screen
-    // pixel of horizontal offset corresponds to FLOOR_Z_NEAR/FLOOR_F
-    // world units, so the visible X range is ±(HALF_W * Z_NEAR / F)
-    // around cam_x.
-    float const half_w_world_at_near = (FLOOR_HALF_W / FLOOR_F) * FLOOR_Z_NEAR;
-    int   const kx_min               = (int)floorf((cam_x - half_w_world_at_near) / FLOOR_LANE_L) - 1;
-    int   const kx_max               = (int)ceilf ((cam_x + half_w_world_at_near) / FLOOR_LANE_L) + 1;
+    // World-X range we have to iterate. A lane at world-X always
+    // passes through the vanishing point on screen, so even at large
+    // |X - cam_x| it has a visible segment near the horizon — capping
+    // at the X visible at z=FLOOR_Z_NEAR (≈ ±1.78) leaves out lanes
+    // that have ~100 px of visible length at the upper part of the
+    // floor, which the user sees as lanes "popping in" at the screen
+    // edges as the ship moves laterally. Extending the cap to the
+    // X visible at z=FLOOR_Z_FAR (≈ ±53) covers every lane whose
+    // far-plane projection is still on-screen; pax_simple_line clips
+    // each one to the framebuffer when it actually rasterizes.
+    float const half_w_world_at_far = (FLOOR_HALF_W / FLOOR_F) * FLOOR_Z_FAR;
+    int   const kx_min              = (int)floorf((cam_x - half_w_world_at_far) / FLOOR_LANE_L) - 1;
+    int   const kx_max              = (int)ceilf ((cam_x + half_w_world_at_far) / FLOOR_LANE_L) + 1;
 
     for (int k = kx_min; k <= kx_max; k++) {
         float const X     = (float)k * FLOOR_LANE_L;
@@ -399,9 +417,15 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     // base does (render_obstacles passes a float sy_b directly to
     // pax_simple_tri). Dedup is done on the integer-floor of sy so
     // we still skip the redundant draws at high z where adjacent
-    // stripes collapse onto the same pixel row.
+    // stripes collapse onto the same pixel row. Modulo filtering on
+    // k thins the stripe set to one per FLOOR_HSTRIPE_DRAW_EVERY
+    // world units; the cam_z wrap window above guarantees the
+    // surviving subset is continuous across wraps.
     int last_sy_int = -1;
     for (int k = kz_min; k <= kz_max; k++) {
+        // Use floor-based modulo so negative k still filters correctly.
+        int const r = ((k % FLOOR_HSTRIPE_DRAW_EVERY) + FLOOR_HSTRIPE_DRAW_EVERY) % FLOOR_HSTRIPE_DRAW_EVERY;
+        if (r != 0) continue;
         float const z  = (float)k * FLOOR_LANE_L - cam_z;
         float const sy = horizon_y + FLOOR_F / z;
         if (sy <= horizon_y + 1.0f || sy > GRID_BOTTOM_Y) continue;
