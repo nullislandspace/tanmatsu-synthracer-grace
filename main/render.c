@@ -2,16 +2,22 @@
 
 #include "shapes/pax_tris.h"
 
-// Synthwave palette for obstacles. The front face is full magenta;
-// the side face is a halved variant so adjacent faces read as
-// differently-lit and the cube's depth is legible. The top face is
-// lighter (sunlit) and only drawn when the camera is above the cube
-// top, which never happens at the current OBSTACLE_HEIGHT=2 with
-// cam_y=1, but the code path is in place for future shorter types.
-#define OBSTACLE_FRONT_COLOR   0xFFF71FF1u
-#define OBSTACLE_SIDE_COLOR    0xFF7B1078u
-#define OBSTACLE_TOP_COLOR     0xFFFDAFECu
-#define OBSTACLE_OUTLINE_COLOR 0xFF31FBFBu
+// Per-obstacle dimensions and colours come from the obstacle_t
+// itself (world.c sets them at spawn time) so the renderer treats
+// every entry — dynamic obstacles, side-wall segments, future
+// pickups — uniformly. The cube has a square footprint when
+// half_w == half_d; non-square footprints (e.g. wall segments
+// running along z) work without any special-case code.
+//
+// Near-plane clipping. When the camera moves into a long obstacle's
+// z range (the front edge passes the camera before the back does)
+// the projection of the front face heads to infinity. We don't try
+// to render anything closer than NEAR_CLIP_Z; if the front edge is
+// past the clip plane we drop the front face entirely and clip the
+// side and top faces' front edges back to NEAR_CLIP_Z. The whole
+// cube is skipped if the back edge is also past the clip — by then
+// the obstacle's despawn condition will fire on the next frame.
+#define NEAR_CLIP_Z 0.5f
 
 void render_project(float x_w, float y_w, float z_w, float cam_x, float* out_sx, float* out_sy) {
     if (z_w < 0.01f) z_w = 0.01f;  // guard against /0 if a near-clip slips through
@@ -45,20 +51,22 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
     for (int k = 0; k < n; k++) {
         obstacle_t const* o = &w->obstacles[idx[k]];
 
-        // Cube footprint: square in plan, so depth half-extent equals
-        // lateral half-extent. z_world is treated as the cube's centre
-        // along z; front face sits at z_world - half_d, back at
-        // z_world + half_d. Clamp the front to a small positive z so a
-        // cube straddling the near plane (centre near the despawn
-        // threshold of 0.6 with half_d≈0.4) doesn't blow up the
-        // projection.
-        float const half_d = o->half_w;
+        // Cube extents come straight from the obstacle. z_world is
+        // the centre along z; front face sits at zF_raw, back at
+        // zB. If the back edge is already past the near clip the
+        // whole cube has nothing to draw — bail. Otherwise clip the
+        // front edge to NEAR_CLIP_Z; if zF_raw was further than the
+        // clip we keep the real front face, otherwise we drop the
+        // front face and the side/top faces use the clipped near
+        // edge instead of the geometric front.
         float const xL     = o->x_world - o->half_w;
         float const xR     = o->x_world + o->half_w;
-        float       zF     = o->z_world - half_d;
-        float const zB     = o->z_world + half_d;
+        float const zF_raw = o->z_world - o->half_d;
+        float const zB     = o->z_world + o->half_d;
         float const yT     = o->height;
-        if (zF < 0.05f) zF = 0.05f;
+        if (zB < NEAR_CLIP_Z) continue;
+        bool  const front_visible = (zF_raw >= NEAR_CLIP_Z);
+        float const zF            = front_visible ? zF_raw : NEAR_CLIP_Z;
 
         // Project the 6 corners we actually need (front face + the
         // back edge of the visible side + the back-top edge for the
@@ -87,45 +95,46 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         // front face overpaints any sliver of side/top that leaks
         // through to the front edge.
         if (show_left) {
-            pax_simple_tri(fb, OBSTACLE_SIDE_COLOR, sx_LBF, sy_LBF, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
-            pax_simple_tri(fb, OBSTACLE_SIDE_COLOR, sx_LBF, sy_LBF, sx_LTB, sy_LTB, sx_LBB, sy_LBB);
+            pax_simple_tri(fb, o->side_color, sx_LBF, sy_LBF, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
+            pax_simple_tri(fb, o->side_color, sx_LBF, sy_LBF, sx_LTB, sy_LTB, sx_LBB, sy_LBB);
         } else if (show_right) {
-            pax_simple_tri(fb, OBSTACLE_SIDE_COLOR, sx_RBF, sy_RBF, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
-            pax_simple_tri(fb, OBSTACLE_SIDE_COLOR, sx_RBF, sy_RBF, sx_RTB, sy_RTB, sx_RBB, sy_RBB);
+            pax_simple_tri(fb, o->side_color, sx_RBF, sy_RBF, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
+            pax_simple_tri(fb, o->side_color, sx_RBF, sy_RBF, sx_RTB, sy_RTB, sx_RBB, sy_RBB);
         }
 
         if (show_top) {
-            pax_simple_tri(fb, OBSTACLE_TOP_COLOR, sx_LTF, sy_LTF, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
-            pax_simple_tri(fb, OBSTACLE_TOP_COLOR, sx_LTF, sy_LTF, sx_RTB, sy_RTB, sx_LTB, sy_LTB);
+            pax_simple_tri(fb, o->top_color, sx_LTF, sy_LTF, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
+            pax_simple_tri(fb, o->top_color, sx_LTF, sy_LTF, sx_RTB, sy_RTB, sx_LTB, sy_LTB);
         }
 
-        // Front face (always visible for obstacles in front of the
-        // camera, which all active obstacles are by construction).
-        pax_simple_tri(fb, OBSTACLE_FRONT_COLOR, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF);
-        pax_simple_tri(fb, OBSTACLE_FRONT_COLOR, sx_LBF, sy_LBF, sx_RTF, sy_RTF, sx_LTF, sy_LTF);
+        if (front_visible) {
+            pax_simple_tri(fb, o->front_color, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF);
+            pax_simple_tri(fb, o->front_color, sx_LBF, sy_LBF, sx_RTF, sy_RTF, sx_LTF, sy_LTF);
+        }
 
-        // Cyan wireframe over the visible silhouette: front face
-        // edges plus the back-edge contour of the visible side and
-        // (when applicable) top, so the cube reads as a 3D shape
-        // even when the side colour is hard to distinguish from the
-        // backdrop.
-        pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LBF, sy_LBF, sx_RBF, sy_RBF);
-        pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LTF, sy_LTF, sx_RTF, sy_RTF);
-        pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LBF, sy_LBF, sx_LTF, sy_LTF);
-        pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_RBF, sy_RBF, sx_RTF, sy_RTF);
+        // Cyan wireframe — each of the cube's 12 edges is drawn
+        // exactly once, conditionally on whether it bounds any
+        // visible face. Bottom and back faces are never visible
+        // (camera is above ground and looking forward), so edges
+        // belonging only to those are silently skipped. Listing
+        // edge-by-edge avoids the bug where merging the front
+        // face's left/right verticals into the side-face branches
+        // would drop one of them whenever the camera saw only one
+        // side of a tall pillar.
+        if (front_visible)              pax_simple_line(fb, o->outline_color, sx_LBF, sy_LBF, sx_RBF, sy_RBF);
+        if (front_visible || show_top)  pax_simple_line(fb, o->outline_color, sx_LTF, sy_LTF, sx_RTF, sy_RTF);
+        if (front_visible || show_left) pax_simple_line(fb, o->outline_color, sx_LBF, sy_LBF, sx_LTF, sy_LTF);
+        if (front_visible || show_right)pax_simple_line(fb, o->outline_color, sx_RBF, sy_RBF, sx_RTF, sy_RTF);
+        if (show_top)                   pax_simple_line(fb, o->outline_color, sx_LTB, sy_LTB, sx_RTB, sy_RTB);
+        if (show_top || show_left)      pax_simple_line(fb, o->outline_color, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
+        if (show_top || show_right)     pax_simple_line(fb, o->outline_color, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
         if (show_left) {
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LBF, sy_LBF, sx_LBB, sy_LBB);
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LBB, sy_LBB, sx_LTB, sy_LTB);
-        } else if (show_right) {
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_RBF, sy_RBF, sx_RBB, sy_RBB);
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_RBB, sy_RBB, sx_RTB, sy_RTB);
+            pax_simple_line(fb, o->outline_color, sx_LBF, sy_LBF, sx_LBB, sy_LBB);
+            pax_simple_line(fb, o->outline_color, sx_LBB, sy_LBB, sx_LTB, sy_LTB);
         }
-        if (show_top) {
-            pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LTB, sy_LTB, sx_RTB, sy_RTB);
-            if (!show_left)  pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
-            if (!show_right) pax_simple_line(fb, OBSTACLE_OUTLINE_COLOR, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
+        if (show_right) {
+            pax_simple_line(fb, o->outline_color, sx_RBF, sy_RBF, sx_RBB, sy_RBB);
+            pax_simple_line(fb, o->outline_color, sx_RBB, sy_RBB, sx_RTB, sy_RTB);
         }
     }
 }

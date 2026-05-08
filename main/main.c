@@ -182,7 +182,10 @@ void app_main(void) {
     game_state_t game;
     game_init(&game);
 
-    world_state_t world;
+    // World state is ~5 KB at the current pool size — keep it off
+    // the app_main stack so we don't have to worry about IDF's
+    // default stack budget.
+    static world_state_t world;
     // Seed from boot time for now. Phase 8 will replace this with the
     // RTC-derived daily seed (or the player's custom seed).
     world_init(&world, (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu) | 1u);

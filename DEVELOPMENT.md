@@ -17,7 +17,7 @@
 | 0 | Research, design, plan | ✅ done — see this document |
 | 1 | Skeleton + synthwave backdrop | ✅ runs on-device; sun arch fixed, Hershey font, F-key icon hint, horizon lifted, grid floor extended with extra perspective lines on each side |
 | 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
-| 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles now share a single pinhole projection (debug speed knob via cursor up/down + top-right `v=` readout) |
+| 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles share one pinhole projection; obstacles render as 3D cubes with per-face culling and near-plane clipping; continuous side walls along the track edges, all stored in the same obstacle pool ready for collision in Phase 4 |
 | 4 | Collision + game over | ⬜ not started |
 | 5 | Sun timer + shadow + boost | ⬜ not started |
 | 6 | Tris + multiplier | ⬜ not started |
@@ -218,6 +218,62 @@
     stripe's sy as a float (instead of int-floor before pass-down)
     keeps the rasterized pixel rows identical between an obstacle's
     base edge and a stripe at the same world-z.
+- 2026-05-08 — Obstacles upgraded from flat front-face billboards to
+  full 3D cubes with per-obstacle geometry and palette, plus a
+  continuous side wall on each edge of the track:
+  * **`obstacle_t` now carries its own dimensions and colours**
+    (`half_w`, `half_d`, `height`, `front_color`, `side_color`,
+    `top_color`, `outline_color`). The renderer no longer special-
+    cases obstacle types — pickups, walls, future tall/short
+    variants are all the same draw path with different fields. The
+    old `OBSTACLE_*_COLOR` and `OBSTACLE_HEIGHT/HALF_W` constants
+    moved into `world.c` as defaults applied at spawn time.
+  * **Cube renderer**: each obstacle projects 8 corners and draws
+    front face plus one side face (left/right chosen by `cam_x`
+    relative to the cube's x extent) plus top face (only if
+    `RENDER_CAM_Y > height`, currently false at the default 2-unit
+    height with cam_y=1, but the path is in place for future low
+    pickups). Side colour is a halved-magenta variant of the front
+    colour so the depth reads as differently-lit faces.
+  * **Side walls** (`WALL_X_RIGHT/_LEFT = ±5.5`, half_w=0.5,
+    height = OBSTACLE_HEIGHT/3, half_d = 1.5). Each wall is a
+    chain of 3-world-unit-long segments stored as regular
+    `obstacle_t` entries — collision in Phase 4 will hit them
+    automatically. Segment length matches the floor's drawn-stripe
+    stride (`FLOOR_LANE_L * FLOOR_HSTRIPE_DRAW_EVERY`) and centres
+    are offset by half a stride so each segment runs from one
+    drawn grid line to the next. World tracks two per-side
+    `*_wall_far_z` cursors that get topped up deterministically as
+    the camera advances.
+  * **Pool bumped 64 → 128** to fit ~33 wall segments per side
+    plus ~30 dynamic obstacles plus headroom for Phase 9 pickups.
+    `world` moved to a `static` local in `app_main` so the ~5 KB
+    pool lives in bss instead of the IDF default stack.
+  * **Despawn now compares the back edge** (`z_world + half_d`)
+    against the threshold instead of the centre. The old centre-
+    based test fired while a long cube's back edge was still on
+    screen — short obstacles passed cleanly because their back
+    edge was already off-screen at the same `z_world`, but a 3-
+    unit wall segment despawned with its tail at sy≈470 and
+    flickered out. Comparing the back edge makes the rule depth-
+    invariant.
+  * **Near-plane clipping** at `NEAR_CLIP_Z = 0.5`. Long obstacles
+    that haven't despawned yet can have a negative `zF`; the old
+    `if (zF < 0.05) zF = 0.05` clamp made the projected front edge
+    enormous (F/0.05 = 9000 px/world-unit) which produced bogus
+    side-face triangles climbing the screen. Now: if `zB <
+    NEAR_CLIP_Z` the whole cube is dropped; if `zF_raw <
+    NEAR_CLIP_Z` we set `front_visible = false` (skipping the
+    front face) and use `zF = NEAR_CLIP_Z` for the side and top
+    faces' front edges so all projected vertices stay at well-
+    defined screen coords.
+  * **Outline drawn edge-by-edge**, not face-by-face. The 12
+    cube edges are listed explicitly with each edge gated on
+    whether it bounds any visible face. Earlier per-face logic
+    that put the front face's left/right verticals inside the
+    side-face branches dropped one of them whenever only one
+    side was visible — typical for tall pillars seen edge-on —
+    and the user noticed the missing back-vertical edges.
 
 ---
 
@@ -346,12 +402,28 @@ the function makes it explicit and lets us animate the sun.
 ### `world.c` — daily seed, regions, content streams
 
 - `world_init(uint32_t daily_seed)` — seeds an xorshift32 PRNG state; chooses
-  region order/parameters for the day.
+  region order/parameters for the day; immediately fills the side
+  walls so they're visible on the first frame.
 - `world_advance(world_t*, float dt, float ship_speed)` — moves the
-  camera-z forward; spawns new obstacle slabs at far plane; despawns at
-  near plane.
-- Obstacles stored in a fixed pool (e.g. 64 entries) of
-  `{ x, y, z, w, h, kind }` so we never malloc during a run.
+  camera-z forward; despawns obstacles whose *back edge* has crossed
+  the near threshold; tops up the side-wall cursors so each side
+  remains a continuous chain of segments out to the far spawn plane;
+  spawns dynamic obstacles on the randomized cadence.
+- Obstacles stored in a fixed pool (128 entries) of
+  `{ x, z, half_w, half_d, height, colors, active }`. Each entry
+  carries its own dimensions and four-colour palette — the
+  renderer doesn't distinguish dynamic obstacles from wall
+  segments from future pickups, they're all just cubes.
+- Side walls are stored as regular obstacles so a single AABB
+  collision pass covers both the dynamic stream and the track
+  edges. Segment length = `FLOOR_LANE_L * FLOOR_HSTRIPE_DRAW_EVERY`
+  (= 3) so each segment runs from one drawn floor stripe to the
+  next; segment centres are offset by half a stride so the joins
+  land on stripes rather than between them. Two per-side
+  `*_wall_far_z` cursors track where the next far-end segment
+  should spawn; each frame the cursor slides forward by `dz` and
+  any time it dips inside `WORLD_Z_FAR_SPAWN` we drop a fresh
+  segment in.
 - Pickup pool (32) of `{ x, y, z, kind }` — kinds: `TRI`, `BOOST`, `JUMP`,
   `SHIELD`, `CHECKPOINT`.
 - 7 regions per run (mirrors the original). Each region is ~30s of game
