@@ -274,6 +274,50 @@
     side-face branches dropped one of them whenever only one
     side was visible — typical for tall pillars seen edge-on —
     and the user noticed the missing back-vertical edges.
+- 2026-05-08 — Ship redesigned: bank-driven flight model + 3D
+  tetrahedron mesh.
+  * **Lateral physics**. `ship_vx_world` is gone. State now
+    carries a single signed `bank ∈ [-1, +1]` factor; lateral
+    velocity is purely `bank * SHIP_TURN_RATE` so a smoothly
+    ramping bank yields smoothly ramping turn — no friction
+    model needed. Each frame the bank moves toward
+    `target = (float)steer` at `BANK_ACTIVE_RATE = 3.5/s` when
+    any direction is held (including the opposite of the
+    current bank, so reversing snaps the ship over fast) and at
+    `BANK_PASSIVE_RATE = 1.0/s` when the stick is released. The
+    asymmetry is what makes "let go and drift back" feel
+    different from "pull the other way" — passive return takes
+    ~1.0 s for a full straighten while a stick reversal does
+    the full flip in ~0.57 s. Visual roll = `bank * MAX_BANK_RAD`
+    (= 0.55 rad ≈ 31°), kept moderate so the wing tips don't
+    clip the ground at SHIP_BASE_Y.
+  * **3D mesh**: the screen-space placeholder (3 flat triangles)
+    is replaced with a 4-vertex tetrahedron — nose lifted as the
+    apex, two wing tips and the tail at ground level. Projected
+    through the same pinhole camera as obstacles, with a roll
+    about the +z axis driven by `bank`. The first attempt used a
+    5-vertex flattened-diamond-with-cockpit, but the cockpit
+    vertex projected interior to the silhouette, which made the
+    two back-half tris span the entire left/right halves of the
+    silhouette and paint over the smaller front-half tris; only
+    the back tris were visible. Tetrahedral design has every
+    vertex on the silhouette, so the two roof panels split the
+    screen along the nose-tail centerline and never overlap.
+  * **Per-face shading**: left and right roof panels get
+    different yellows (sun-yellow + dimmer yellow), so the
+    centerline ridge reads as a sharp colour break without
+    needing an outline. Belly is magenta and only shows when
+    banking exposes the underside.
+  * **Cyan ridge + silhouette outlines** drawn over the fills:
+    nose↔Lwing↔tail↔Rwing perimeter plus the nose↔tail dorsal
+    ridge. Same cyan as the obstacle wireframe so the visual
+    style stays consistent across all 3D objects.
+  * **Position**: `SHIP_Z_PLANE` 2.5 → 2.0 (ship closer to
+    camera, bigger on screen but still small at 0.55× the
+    earlier mesh scale) and `SHIP_BASE_Y` 0.5 → 0.22, which
+    drops the projected tail from sy ≈ 436 to sy ≈ 470 — just
+    above the screen edge — exactly where the user wanted the
+    ship visually anchored.
 
 ---
 
@@ -448,17 +492,25 @@ the function makes it explicit and lets us animate the sun.
 
 ### `game.c` — gameplay update
 
-- `game_state_t game` holds run-time state: ship `{x, y, vx}`, current
-  speed, sun-time-remaining (seconds until sunset), score, multiplier,
-  pickup inventory (`jumps[3]`, `shields[2]`, `checkpoints[2]`), region
-  index, region-progress flags (was-perfect-region, only-left, only-right
-  for movement-restricted challenges).
+- `game_state_t game` holds run-time state: `ship_x_world`,
+  `ship_speed_z`, `bank` (-1..+1 signed banking factor), `cam_x`,
+  plus (in later phases) sun-time-remaining, score, multiplier,
+  pickup inventory, region index, region-progress flags.
 - Fixed timestep: 1/60 s. We compute `dt` from `esp_timer_get_time()` and
   step the simulation in 16.67 ms chunks; rendering interpolates only if
   surplus time.
-- Steering: ship `vx` accumulates left/right input each tick; integrated
-  with friction. Jump/Shield/Boost activated via spacebar / button (queued
-  events).
+- **Banking-driven steering**: each frame `bank` moves toward
+  `target = (float)steer` at `BANK_ACTIVE_RATE` while any
+  direction is held and at the slower `BANK_PASSIVE_RATE` when
+  the stick is released. Lateral velocity is purely
+  `bank * SHIP_TURN_RATE` — a smooth bank ramp gives a smooth
+  turn ramp, no separate friction model needed. The asymmetric
+  active/passive rates are what makes "release the key" feel
+  different from "press the opposite key": releasing drifts back
+  slowly, reversing snaps over at the full active rate. The
+  rendered roll = `bank * MAX_BANK_RAD` so the visible bank and
+  the actual turn rate are one and the same parameter.
+- Pickups (Phase 9+) activated via spacebar / button (queued events).
 - Collision: AABB in 3D world space against obstacle pool, plus pickup
   proximity test that respects magnet upgrade range.
 - **Sun mechanic & shadow**: `sun_seconds_left` ticks down at 1.0/s in
