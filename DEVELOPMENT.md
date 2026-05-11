@@ -493,6 +493,49 @@
   menu are still TODO. Trade-off: the seed is captured at
   boot, so playing across midnight keeps the old seed until
   app restart. Deliberate — no surprise mid-run.
+- 2026-05-11 — **Swept-z collision + kinematic classifier.**
+  Player reported flying through obstacles aimed dead-centre.
+  Root cause: the classifier looked at the obstacle's *current*
+  `z_world` only — when per-frame `dz = ship_speed_z * dt`
+  exceeded the AABB overlap window (~0.74 u for pixel cubes,
+  ~0.68 u for the ship), the obstacle could skip from "ahead
+  of ship" to "past ship centre" in a single frame. The
+  current-frame view then said "obstacle past ship → trailing
+  scrape" and the ship walked through it. At base speed
+  (12 u/s) the window only holds for perfect 60 fps timing;
+  one dropped frame, or any debug-knob speed bump, was enough
+  to tunnel.
+
+  Fix: `game_collide` now takes `dt` and does two things:
+  1. **Swept-z overlap**: the z range tested runs from the
+     obstacle's current near face (`z - half_d`) to its
+     *previous* far face (`z + half_d + dz`). Even if the
+     obstacle has fully passed the ship this frame, the swept
+     range still overlaps so collision fires. No tunneling
+     past the ship is silent any more.
+  2. **Kinematic head-on / scrape classifier**: head-on iff
+     `obs_zN_prev >= ship_zF` — the obstacle's near face was
+     still ahead of the ship's front face at the *start* of
+     this frame, i.e. the obstacle slammed into the ship from
+     ahead during the frame. Doesn't care where the obstacle
+     lands in the current frame, so a fast head-on dive that
+     skips the overlap window still classifies as fatal.
+     Trailing scrape only fires when the obstacle was already
+     overlapping or past last frame (the genuine "obstacle
+     drifting past us" case).
+
+  X-axis tunneling is not possible: the ship moves laterally
+  at ≤ SHIP_TURN_RATE * dt ≈ 0.058 u/frame, far smaller than
+  the lateral overlap window, so x_pen stays a current-frame
+  quantity and the push-out still resolves correctly. Only
+  the z axis got the swept treatment.
+
+  This supersedes the earlier "obstacle.z_world > SHIP_COLLISION_Z_C"
+  rule used in the previous decisions-log entry; the
+  per-obstacle kind tag is still the data-driven dispatcher,
+  the swept-z + kinematic test is the new geometry inside
+  the CUBE case. WALL still scrape-only, pickup/ramp stubs
+  still `continue`.
 
 ---
 
@@ -762,10 +805,16 @@ the function makes it explicit and lets us animate the sun.
   * `OBSTACLE_KIND_WALL` — scrape only. Set
     `scrape_left`/`scrape_right` and push the ship out along x
     by `x_pen` so it physically can't penetrate the wall.
-  * `OBSTACLE_KIND_CUBE` — head-on if the obstacle is still
-    ahead of `SHIP_COLLISION_Z_C` (returns true; caller flips
-    the app state to `GAME_OVER`); trailing-scrape if it has
-    already drifted past the ship's centre.
+  * `OBSTACLE_KIND_CUBE` — head-on iff the obstacle's near face
+    was still ahead of the ship's front face at the *start* of
+    this frame (i.e. it entered the ship's z range from ahead
+    during the frame). Returns true; caller flips the app state
+    to `GAME_OVER`. If the obstacle was already overlapping or
+    past the ship last frame, the contact is a trailing scrape.
+    The check uses the obstacle's reconstructed previous z
+    position (`z_world + speed*dt`) so it's robust to per-frame
+    z motion exceeding the overlap window — see the
+    2026-05-11 swept-z entry in the decisions log.
   * `OBSTACLE_KIND_PICKUP_*` / `OBSTACLE_KIND_RAMP` — stubs
     that `continue` for now. Phase 5 / 6 / 9 / future fill
     these in.
