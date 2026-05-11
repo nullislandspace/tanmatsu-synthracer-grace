@@ -377,19 +377,22 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     // axes restores the alignment.
     float const sy_bot = horizon_y + FLOOR_F / FLOOR_Z_NEAR;
 
-    // World-X range we have to iterate. A lane at world-X always
-    // passes through the vanishing point on screen, so even at large
-    // |X - cam_x| it has a visible segment near the horizon — capping
-    // at the X visible at z=FLOOR_Z_NEAR (≈ ±1.78) leaves out lanes
-    // that have ~100 px of visible length at the upper part of the
-    // floor, which the user sees as lanes "popping in" at the screen
-    // edges as the ship moves laterally. Extending the cap to the
-    // X visible at z=FLOOR_Z_FAR (≈ ±53) covers every lane whose
-    // far-plane projection is still on-screen; pax_simple_line clips
-    // each one to the framebuffer when it actually rasterizes.
-    float const half_w_world_at_far = (FLOOR_HALF_W / FLOOR_F) * FLOOR_Z_FAR;
-    int   const kx_min              = (int)floorf((cam_x - half_w_world_at_far) / FLOOR_LANE_L) - 1;
-    int   const kx_max              = (int)ceilf ((cam_x + half_w_world_at_far) / FLOOR_LANE_L) + 1;
+    // World-X range we draw: only inside the playfield walls. The
+    // walls live at world-x = ±FLOOR_PLAYFIELD_HALF_W; lane lines
+    // outside that range would be hidden behind the wall obstacles
+    // anyway and only cost rasterisation time. Bounded by a constant
+    // k range regardless of camera position, this also eliminates
+    // the "lanes pop in at screen edges" behaviour the previous wide
+    // far-plane cap was working around — the playfield is much
+    // narrower than the visible far-plane lateral extent, so the
+    // surviving set of lines is the same regardless of cam_x.
+    //
+    // Must match SHIP_X_MIN_WORLD / SHIP_X_MAX_WORLD in game.h (the
+    // wall positions). Hardcoded here to avoid pulling gameplay
+    // headers into the backdrop module.
+    #define FLOOR_PLAYFIELD_HALF_W 5.0f
+    int const kx_min = (int)ceilf (-FLOOR_PLAYFIELD_HALF_W / FLOOR_LANE_L);
+    int const kx_max = (int)floorf( FLOOR_PLAYFIELD_HALF_W / FLOOR_LANE_L);
 
     for (int k = kx_min; k <= kx_max; k++) {
         float const X     = (float)k * FLOOR_LANE_L;

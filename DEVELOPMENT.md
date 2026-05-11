@@ -30,27 +30,33 @@
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
 
 **Open questions / parking lot:**
-- **Framerate** — first on-device measurement landed
-  2026-05-11. Baseline at RGB888 was 9.5 FPS gameplay / 17.6 FPS
-  title; RGB565 switch brought that to 11.7 FPS / ~22 FPS. Per-phase
-  breakdown + remaining work in the 2026-05-11 "Performance baseline"
-  decisions-log entry. Next planned win: PPA-async backdrop copy
-  parallel with floor drawing; then a direct-RGB565 wireframe-line
-  rasterizer for `render_obstacles`.
-- **PPA / 2D-DMA / double-buffer** — re-evaluated 2026-05-11.
-  `driver/ppa.h` symbols (`ppa_register_client`,
-  `ppa_do_scale_rotate_mirror`, `ppa_do_blend`, `ppa_do_fill`) are
-  now exported by fakelib (PPA support landed in graceloader
-  upstream — see commit `13452dc Add PPA symbols` rebased in on
-  2026-05-11). Decision flipped: PPA is the next optimization to
-  implement, see "Performance baseline" decisions-log entry for
-  the pipeline plan.
-- **Phase 5 sun re-cache** — when the sunset mechanic lands, the
-  cached sun position becomes stale as `sun_dy` changes. Plan: track
-  the dy used to render the cache, re-render only when the new dy
-  differs by more than ~2 px. Most frames stay on the memcpy path.
-  Once PPA lands the same gating applies (re-render the cached sun
-  band, but the per-frame PPA SRM op carries it onward unchanged).
+- **Framerate** — currently **13.2 FPS gameplay** after the
+  RGB565 / PPA Option A / double-buffer / lane-narrow round
+  landed 2026-05-11. See the "Performance scoreboard end-of-day"
+  decisions-log entry. Next planned win: direct-RGB565 Bresenham
+  for the ~1000 obstacle wireframe lines per frame; `obs` is now
+  61% of the frame and untouched by any of the optimisations so far.
+- **PPA Option A 5 ms recovery** (parked) — two ways to claw back
+  the ~5 ms penalty from explicit SRM/BLEND serialisation:
+  (a) enlarge `sun_cache` to cover the full 800×257 sky region
+  with sky purple in the gaps, dropping the FILL op; (b) PPA
+  callback chaining (submit next op from ISR). Defer until after
+  the obstacle line rasterizer.
+- **Phase 5 sun movement** — the pipeline is ready: the SRM
+  destination `block_offset_y` becomes a function of `sun_dy`;
+  the FILL handles the newly-exposed sky above the sun; the
+  mountain BLEND is unchanged. No per-frame re-rasterisation
+  needed.
+- **`esp_cache_get_alignment`** — not in the SDK header
+  (`esp_cache.h` only declares `esp_cache_msync`). Hardcoded
+  128 (ESP32-P4 PSRAM L2 cache line) at the call sites. If we
+  ever care about other targets, swap to a runtime query.
+- **Single-buffer fallback** — `bsp_display_blit` takes a buffer
+  pointer, so DIY double-buffering Just Works. The BSP's own
+  `num_fbs = 2` path is unused. If we ever want to drop our
+  double-buffer (memory pressure, etc.), the single-buffer path
+  still tears unless `bsp_display_blit` itself can be made
+  synchronous — uninvestigated.
 
 **Conventions / decisions log** (append-only as new decisions are made):
 - 2026-05-07 — Project bootstrapped from `tanmatsu-template-grace`.
@@ -127,11 +133,13 @@
   fills + ~200 wireframe lines. The cast-away-const on
   `pax_buf_get_pixels` is intentional — pax's buffer is logically
   mutable, the const just communicates "don't muck with this via
-  arbitrary writes". The memcpy was ~1.15 MB / frame on RGB888;
-  after the 2026-05-11 RGB565 switch it is 768 KB / frame, and the
-  PPA-async plan in the same decisions-log entry will replace this
-  CPU memcpy with a non-blocking PPA SRM op covering only the
-  above-horizon region.
+  arbitrary writes". The memcpy was ~1.15 MB / frame on RGB888.
+  **Superseded 2026-05-11:** the single `backdrop_cache` was first
+  fed by a non-blocking PPA SRM (single-cache version), then split
+  into `sun_cache` + `mountain_cache` and driven by a 3-op PPA
+  FILL → SRM → BLEND pipeline so the sun can move independently
+  of the mountains for Phase 5. See the 2026-05-11 decisions-log
+  entries for the full history.
 - 2026-05-07 — Phase 3 implementation landed: `world.{c,h}` (fixed
   pool of 64 obstacles, xorshift32 PRNG, randomized z-spawn cadence
   in world units so spawn density is speed-independent) and
@@ -726,6 +734,174 @@
     ±53, producing ~108 line draws when only ~25 have
     meaningful visible length). Defer until after PPA + line
     rasterizer to see what's left.
+
+- 2026-05-11 — **PPA pipeline landed (single-cache version) + bugs.**
+  First-pass implementation kicked PPA SRM async at the start of
+  the frame and waited for the completion semaphore right before
+  the foreground passes. The CPU painted the floor in parallel
+  with the SRM copy.
+
+  Initial result: gameplay went from 11.8 FPS (RGB565 alone) to
+  **13.6 FPS**. The bg phase dropped from 34.6 ms (17.1 + 17.5)
+  to 22.1 ms — `bgwait=0.00` every frame meant PPA always finished
+  before the CPU floor work did, so the parallelism was fully
+  effective. `obs` was unchanged at 46 ms (unsurprising — PPA
+  doesn't help with the per-line CPU work in `render_obstacles`).
+
+  Boot quirk along the way: the first attempt allocated
+  `backdrop_cache` with
+  `heap_caps_aligned_alloc(128, …, MALLOC_CAP_SPIRAM |
+  MALLOC_CAP_DMA)`. On ESP32-P4 that combination is risky —
+  `MALLOC_CAP_DMA` historically maps to AHB-DMA-able internal
+  SRAM and doesn't combine cleanly with `MALLOC_CAP_SPIRAM`. The
+  app deadlocked at load time inside `mspi_timing_psram_tuning`
+  + `esp_pm/pm_impl.c` (Core 0 spinlock vs. Core 1 IPC, IWDT
+  fired). Dropping `MALLOC_CAP_DMA` and keeping plain
+  `MALLOC_CAP_SPIRAM` fixed it — on P4, PSRAM is AXI-DMA-
+  accessible by default and the cap flag isn't needed.
+
+- 2026-05-11 — **Backdrop split into separate layer caches
+  (PPA Option A pipeline).** The single-cache PPA backdrop works
+  for the current static sun but doesn't accommodate the moving
+  sun for Phase 5. Split into two PPA-driven caches with
+  per-frame FILL → SRM → BLEND:
+
+  - `sun_cache` (800×180 logical, RGB565): tight bbox of the sun
+    bands. Background is the sky purple so the SRM is harmless
+    in the gaps. Rendered at boot with `synthwave_draw_sun(…, +4)`
+    so the top band lands at cache y=0; Phase 5 will animate the
+    SRM destination offset.
+  - `mountain_cache` (800×163 logical, RGB565): tight bbox of the
+    visible mountain band. Background is a pure-green colour-key
+    (`0xFF00FF00` in ARGB, `0x07E0` in 565); mountains, wireframes,
+    and the horizon line are painted on top. PPA BLEND uses an
+    `fg_ck_rgb_low_thres = (0, 0xFC, 0)` /
+    `fg_ck_rgb_high_thres = (0, 0xFF, 0)` window so the key
+    catches the 565→888 expansion regardless of whether the
+    silicon does shift or replicate.
+  - Per-frame: PPA FILL covers the whole sky region with sky
+    purple (kills leftover obstacle pixels from the previous
+    frame), then PPA SRM lays down the sun, then PPA BLEND
+    composites the mountains.
+
+  The split adds a `heap_caps_aligned_alloc(128, …,
+  MALLOC_CAP_SPIRAM)` for each cache; both sizes are rounded up
+  to the 128-byte L2 line. Each cache is wrapped in its own
+  `pax_buf_t` with the same orientation/endianness as the main
+  fb. After PAX finishes drawing into each, one
+  `esp_cache_msync(C2M | TYPE_DATA)` flushes the cache to PSRAM
+  so PPA's DMA reads see the rasterised pixels.
+
+  **Orientation gotcha (caused the "no sun, no mountains, just
+  sky" symptom on first run):** `pax_buf_init` takes *raw*
+  dimensions, not logical. Under PAX_O_ROT_CW the raw layout is
+  the logical layout transposed. Passing
+  `pax_buf_init(&sun_cache, …, 800, 180, …)` (logical dims) gave
+  PAX an 800-wide × 180-tall raw buffer; after ROT_CW it
+  presented as a 180-wide × 800-tall *logical* surface, so all
+  the sun bands (x ∈ [294, 506]) clipped out of bounds.
+  Fix: pass `pax_buf_init(&sun_cache, …, SUN_CACHE_LOG_H,
+  SUN_CACHE_LOG_W, …)` — raw dims = logical dims transposed.
+  Same fix on `mountain_cache`.
+
+- 2026-05-11 — **DIY double-buffering.** With the layer caches
+  composed correctly, the left edge of the mountains started
+  flickering frame-to-frame. The classic symptom of the CPU/PPA
+  writing the framebuffer while the LCD's DMA is reading it.
+  Added DIY double-buffering — the BSP supports `num_fbs = 2`
+  but `bsp_display_blit` already takes a buffer pointer as an
+  argument, so we manage the two buffers ourselves:
+
+  - `fb_a_pixels` / `fb_b_pixels`: two
+    `heap_caps_aligned_alloc(128, …, MALLOC_CAP_SPIRAM)` PSRAM
+    buffers, full LCD-resolution RGB565.
+  - `fb_a` / `fb_b`: matching `pax_buf_t` wrappers with the same
+    format / orientation / endianness as before.
+  - `fb` (pointer): points at the current back buffer. All CPU
+    and PPA drawing targets `*fb`. Every `&fb` in the old code
+    became `fb` after the refactor (the underlying type is now
+    `pax_buf_t *` instead of a value).
+  - Per frame: draw into `*fb`, call
+    `bsp_display_blit(…, pax_buf_get_pixels(fb))`, take the
+    vsync semaphore, then swap `fb`/`fb_front`. The LCD scans
+    out whichever buffer was last blitted; the CPU + PPA only
+    ever touch the *other* one.
+
+  Cost: +768 KB PSRAM for the second framebuffer. The flicker
+  went away on the first install with this change.
+
+- 2026-05-11 — **PPA cross-client ordering: SRM/BLEND racing.**
+  After the orientation fix and double-buffering, parts of the
+  sun overwrote the mountains in some frames (and the mountain
+  band flickered). PPA is a single hardware engine but each *op
+  type* (SRM, BLEND, FILL) is registered as its own client; the
+  driver does **not** preserve submission order across client
+  boundaries. Empirically the BLEND of the mountain cache
+  occasionally landed *before* the SRM of the sun cache,
+  producing the visual race.
+
+  Fix: explicit `ppa_wait_one()` between every PPA submit, so
+  the ops are enforced FIFO. The CPU floor work stays in
+  parallel with the BLEND (the last and longest of the three
+  ops), so the bg-phase wallclock is
+  `FILL + SRM + max(BLEND, CPU_floor) ≈ 2 + 3 + 22 ≈ 27 ms`.
+  Penalty vs. the broken-but-parallel previous attempt: ~5 ms.
+
+  Two follow-ups parked in case we need the 5 ms back:
+  - Enlarge `sun_cache` to cover the full 800×257 sky region
+    (sky purple in all gaps). The SRM then overwrites the whole
+    sky band in one go and the FILL can be dropped — saves ~2 ms.
+  - PPA callback chaining: each `on_trans_done` callback submits
+    the next op from ISR context. Restores full parallelism but
+    needs cross-checking whether `ppa_do_xxx` is ISR-safe.
+
+- 2026-05-11 — **Narrowed lane-line range to the playfield.**
+  `synthwave_step` was iterating `kx_min..kx_max` derived from
+  the far-plane half-width (≈ ±53 world units, ~108 lines per
+  frame). The walls live at world-x = ±5, so every line outside
+  that band would have been occluded by a wall obstacle anyway.
+  Hardcoded `kx_min..kx_max = -5..+5` (11 lines, independent of
+  `cam_x`).
+
+  Smaller win than I expected: -3.7 ms on `bgflr` (18.4 → 14.7),
+  +0.7 FPS. The reason — the lines we *removed* are the ones at
+  large |k − cam_x|, which sweep nearly horizontally and exit
+  the screen quickly (short pixel runs). The lines we *kept* are
+  the near-vertical ones that span the full floor height (long
+  pixel runs). The per-line cost was always weighted toward the
+  long ones we still draw.
+
+- 2026-05-11 — **Performance scoreboard end-of-day.**
+
+  | Stage | FPS gameplay | bg total | obs |
+  |---|---|---|---|
+  | Baseline RGB888 | 9.5 | 54.4 | 47.0 |
+  | RGB565 | 11.8 | 34.6 | 46.0 |
+  | RGB565 + PPA single SRM | 13.6 | 22.1 | 46.4 |
+  | RGB565 + PPA Option A 3-op + DB | 12.5 | 29.0 | 45.9 |
+  | + narrowed lane range | **13.2** | **25.4** | **46.5** |
+
+  Net: **+39%** gameplay FPS from the original baseline, with
+  correct sun-behind-mountain layering, no tearing, and the
+  pipeline ready for the Phase 5 moving sun.
+
+  Frame budget at 60 Hz is 16.67 ms; we're at ~76 ms (13.2 FPS).
+  Phase composition of a typical gameplay frame now:
+  - `obs = 46 ms` (61%) — `pax_simple_line` × ~1000 wireframe
+    lines per frame, per-pixel function-pointer setter
+    dispatch. RGB565 didn't help because it's dispatch-bound,
+    not pixel-write-bound. **Next target.**
+  - `bg total = 25 ms` (33%) — PPA FILL+SRM+BLEND serialised +
+    CPU floor in parallel with BLEND.
+  - `fgrest + blit + input + phys ≈ 5 ms` (6%).
+
+  Plan: direct-RGB565 Bresenham line rasterizer for the obstacle
+  wireframes (same shape as the existing
+  `hershey_direct_draw_line` in `hershey_font_direct.h`),
+  lifted into a shared helper and called from
+  `render.c:render_obstacles` in place of `pax_simple_line`.
+  Triangle fills stay on PAX — `pax_range_setter_16bpp` is
+  already a tight `memset16` and faces aren't the bottleneck.
 
 ---
 
