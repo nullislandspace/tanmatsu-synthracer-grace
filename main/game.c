@@ -1,6 +1,7 @@
 #include "game.h"
 
 #include <math.h>
+#include <string.h>
 
 #include "pax_gfx.h"
 #include "render.h"
@@ -8,51 +9,43 @@
 
 // --- Lateral motion -----------------------------------------------------------
 
-#define SHIP_X_MIN_WORLD     -5.0f
-#define SHIP_X_MAX_WORLD      5.0f
+// SHIP_X_MIN_WORLD / SHIP_X_MAX_WORLD live in game.h because
+// game_collide consults them to tell boundary obstacles (side
+// walls) from playfield obstacles.
 
-// Visual maximum bank in radians (~31°). This is multiplied by the
-// signed bank factor in game_state_t, which itself is clamped to
-// [-1, +1]. Kept moderate so the wing tips don't clip into the
-// ground at SHIP_BASE_Y.
+// Visual maximum bank in radians (~31°). Multiplied by `bank` to
+// get the rendered roll angle.
 #define MAX_BANK_RAD          0.55f
 
-// How many bank-units per second the ship rolls toward the steer
-// target. ACTIVE applies whenever the player is holding any steer
-// direction — including the opposite of the current bank — so
-// reversing the stick snaps the ship over fast. PASSIVE is the
-// slower self-righting rate that takes over when the stick is
-// released; the asymmetry is what makes "let go and drift back"
-// feel different from "yank the stick the other way".
+// Bank ramp rates. ACTIVE applies whenever any steer direction is
+// held (so reversing the stick snaps the ship over fast); PASSIVE
+// is the slower self-righting rate when the stick is released.
 #define BANK_ACTIVE_RATE      3.5f
 #define BANK_PASSIVE_RATE     1.0f
 
-// Lateral world-units travelled per second at full bank
-// (|bank|=1.0). Lateral velocity scales linearly with bank, so the
-// longer the player holds a direction the sharper the turn — bank
-// ramps up over time, and the turn ramps with it. SHIP_X_MAX_WORLD
-// clamps the position; lateral velocity is otherwise unbounded by
-// itself.
+// Lateral world-units travelled per second at full bank.
 #define SHIP_TURN_RATE        3.5f
 
-// --- Visuals ------------------------------------------------------------------
+// --- Speed dynamics -----------------------------------------------------------
 
-// Tetrahedron mesh: the nose is the elevated apex, both wing tips
-// and the tail sit on the ship's ventral plane. From the camera's
-// chase angle (above-behind), the silhouette is a 4-point diamond
-// with no interior vertices, so the two visible roof panels split
-// the screen along the nose-tail centerline and never overlap each
-// other.
-//
-// Per-face palette: the two roof panels get slightly different
-// yellows — read as a sharp colour break along the central ridge,
-// which is the 3D cue the previous flattened-diamond design was
-// missing. The two belly faces are magenta and only become
-// visible when banking exposes the underside.
-#define SHIP_ROOF_LEFT_COLOR   0xFFFFFF6Bu  // sun-yellow
-#define SHIP_ROOF_RIGHT_COLOR  0xFFD8AA38u  // dimmer yellow
-#define SHIP_BELLY_COLOR       0xFFF71FF1u  // grid-magenta
-#define SHIP_RIDGE_COLOR       0xFF31FBFBu  // cyan accent
+// Scrape behaviour: while either scrape flag is set, ship_speed_z
+// ramps toward (base * SCRAPE_SPEED_FRAC) at SCRAPE_DECEL u/s².
+// When neither flag is set it ramps back up to base at the slower
+// SPEED_RECOVERY rate. Both transitions are continuous — never a
+// step change — so grazing a wall for a fraction of a second only
+// sheds a fraction of the full slowdown, and recovery is visible
+// over time. Recovery is deliberately slower than decel so scrapes
+// feel punishing.
+#define SCRAPE_SPEED_FRAC     0.55f
+#define SCRAPE_DECEL          5.0f
+#define SPEED_RECOVERY        2.5f
+
+// --- Ship mesh visuals --------------------------------------------------------
+
+#define SHIP_ROOF_LEFT_COLOR   0xFFFFFF6Bu
+#define SHIP_ROOF_RIGHT_COLOR  0xFFD8AA38u
+#define SHIP_BELLY_COLOR       0xFFF71FF1u
+#define SHIP_RIDGE_COLOR       0xFF31FBFBu
 
 typedef struct {
     float x, y, z;
@@ -60,9 +53,9 @@ typedef struct {
 
 static ship_vert_t const ship_verts[] = {
     [0] = {  0.00f,  0.30f,   0.32f},  // nose (elevated apex)
-    [1] = { -0.28f,  0.00f,  -0.10f},  // left  wing tip (ground level)
-    [2] = {  0.28f,  0.00f,  -0.10f},  // right wing tip (ground level)
-    [3] = {  0.00f,  0.00f,  -0.36f},  // tail (ground level)
+    [1] = { -0.28f,  0.00f,  -0.10f},  // left  wing tip
+    [2] = {  0.28f,  0.00f,  -0.10f},  // right wing tip
+    [3] = {  0.00f,  0.00f,  -0.36f},  // tail
 };
 
 typedef enum {
@@ -77,79 +70,228 @@ typedef struct {
 } ship_tri_t;
 
 static ship_tri_t const ship_tris[] = {
-    // Underside — front belly (nose to wing line) and back belly
-    // (wing line to tail). Drawn first; for normal upright flight
-    // the roof tris paint over them.
-    {0, 2, 1, SHIP_FACE_BELLY},  // nose / Rwing / Lwing
-    {1, 2, 3, SHIP_FACE_BELLY},  // Lwing / Rwing / tail
-    // Roof panels: each is a single triangle spanning nose → wing
-    // → tail along one side. They share the nose-tail ridge.
-    {0, 1, 3, SHIP_FACE_ROOF_LEFT},   // nose / Lwing / tail
-    {0, 3, 2, SHIP_FACE_ROOF_RIGHT},  // nose / tail / Rwing
+    {0, 2, 1, SHIP_FACE_BELLY},
+    {1, 2, 3, SHIP_FACE_BELLY},
+    {0, 1, 3, SHIP_FACE_ROOF_LEFT},
+    {0, 3, 2, SHIP_FACE_ROOF_RIGHT},
 };
 
-// Cyan accent lines: silhouette outline (nose → Lwing → tail →
-// Rwing → nose) plus the dorsal ridge (nose → tail). Drawing the
-// silhouette as well as the ridge reads as a clearer wire-frame
-// hull from the chase view.
 static uint8_t const ship_outline_edges[][2] = {
-    {0, 1},  // nose → Lwing
-    {1, 3},  // Lwing → tail
-    {3, 2},  // tail → Rwing
-    {2, 0},  // Rwing → nose
-    {0, 3},  // nose → tail (ridge)
+    {0, 1}, {1, 3}, {3, 2}, {2, 0}, {0, 3},
 };
 
 #define SHIP_VERT_COUNT    (sizeof(ship_verts) / sizeof(ship_verts[0]))
 #define SHIP_TRI_COUNT     (sizeof(ship_tris)  / sizeof(ship_tris[0]))
 #define SHIP_OUTLINE_COUNT (sizeof(ship_outline_edges) / sizeof(ship_outline_edges[0]))
 
+// --- Sparks -------------------------------------------------------------------
+
+// Wingtip world-z offset, so the burst origin sits at the leading
+// edge of the wing rather than the geometric centre of the ship.
+#define SPARK_EMIT_DZ      (-0.10f)
+// Lateral half-extent of the mesh wing tip (matches ship_verts[1].x
+// magnitude and SHIP_COLLISION_HALF_W). Used as the local x of the
+// emission point so the projected origin matches the rendered wing
+// tip after the bank rotation.
+#define SPARK_WING_HALF_W  0.28f
+// Lines drawn per scraping wingtip per frame.
+#define SPARK_LINES        5
+// Spark line length range in screen pixels. Bumped from the
+// original 5..10 because at game distance that read too small —
+// individual streaks were lost against the ship and floor.
+#define SPARK_LEN_MIN      10.0f
+#define SPARK_LEN_MAX      22.0f
+// Bright red — single colour, no fade or palette ramp. Stark
+// against both the ship's yellow roof and the floor stripes.
+#define SPARK_COLOR        0xFFFF3030u
+
+// PRNG state for the visual-only spark direction/length pick. Kept
+// at module scope rather than in game_state_t because the sparks
+// are pure ephemera — nothing in the game state needs to know about
+// them between frames.
+static uint32_t s_spark_rng = 0xC0FFEEu;
+
+static float spark_rand(void) {
+    uint32_t x = s_spark_rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    s_spark_rng = x ? x : 1u;
+    return (float)x / 4294967296.0f;
+}
+
+static void draw_wingtip_burst(pax_buf_t* fb, game_state_t const* g, int side) {
+    // The wing tip's world position has to match the rendered
+    // wing tip *after* the ship's bank rotation about the +z
+    // axis — same 2D rotation game_draw_ship applies to the
+    // mesh vertices. Without it, sparks emit from the level-
+    // flight position and visibly drift away from the wing when
+    // the ship is banking.
+    float const bank_angle = g->bank * MAX_BANK_RAD;
+    float const c          = cosf(bank_angle);
+    float const s          = sinf(bank_angle);
+    float const local_x    = (float)side * SPARK_WING_HALF_W;
+    // Wing tip's local y is 0; only the rotated x and -x*sin
+    // matter. Matches the projection math in game_draw_ship.
+    float const wx = local_x * c + g->ship_x_world;
+    float const wy = -local_x * s + SHIP_BASE_Y;
+    float const wz = SHIP_Z_PLANE + SPARK_EMIT_DZ;
+
+    float sx, sy;
+    render_project(wx, wy, wz, g->cam_x, &sx, &sy);
+
+    for (int i = 0; i < SPARK_LINES; i++) {
+        float const angle = spark_rand() * 6.28318531f;
+        float const len   = SPARK_LEN_MIN + spark_rand() * (SPARK_LEN_MAX - SPARK_LEN_MIN);
+        float const ex    = sx + cosf(angle) * len;
+        float const ey    = sy + sinf(angle) * len;
+        pax_simple_line(fb, SPARK_COLOR, sx, sy, ex, ey);
+    }
+}
+
 // --- Public API ---------------------------------------------------------------
 
 void game_init(game_state_t* g) {
-    g->ship_x_world = 0.0f;
-    g->ship_speed_z = SHIP_BASE_SPEED_Z;
-    g->bank         = 0.0f;
-    g->cam_x        = 0.0f;
+    memset(g, 0, sizeof(*g));
+    g->ship_speed_z      = SHIP_BASE_SPEED_Z;
+    g->ship_base_speed_z = SHIP_BASE_SPEED_Z;
 }
 
 void game_step(game_state_t* g, float dt, int steer) {
     if (dt <= 0.0f) return;
 
-    // Bank target is the steer direction itself: full bank when
-    // holding, zero target when released. The rate flips between
-    // the active and passive rates depending on whether any steer
-    // is being held — an opposite hold uses the active rate for
-    // the whole flip, which is the asymmetry the player feels.
-    float const target   = (float)steer;
-    float const rate     = (steer != 0) ? BANK_ACTIVE_RATE : BANK_PASSIVE_RATE;
-    float const max_step = rate * dt;
-    float       delta    = target - g->bank;
-    if (delta >  max_step) delta =  max_step;
-    if (delta < -max_step) delta = -max_step;
-    g->bank += delta;
+    // --- Bank dynamics ----------------------------------------------------
+    float const bank_target   = (float)steer;
+    float const bank_rate     = (steer != 0) ? BANK_ACTIVE_RATE : BANK_PASSIVE_RATE;
+    float const bank_max_step = bank_rate * dt;
+    float       bank_delta    = bank_target - g->bank;
+    if (bank_delta >  bank_max_step) bank_delta =  bank_max_step;
+    if (bank_delta < -bank_max_step) bank_delta = -bank_max_step;
+    g->bank += bank_delta;
 
-    // Lateral velocity is purely a function of bank. Smooth ramps in
-    // bank produce smooth lateral motion without needing a separate
-    // friction model.
+    // --- Lateral motion ---------------------------------------------------
     g->ship_x_world += g->bank * SHIP_TURN_RATE * dt;
     if (g->ship_x_world > SHIP_X_MAX_WORLD) {
         g->ship_x_world = SHIP_X_MAX_WORLD;
     } else if (g->ship_x_world < SHIP_X_MIN_WORLD) {
         g->ship_x_world = SHIP_X_MIN_WORLD;
     }
-
-    // Camera locked to the ship laterally — the ship stays centred on
-    // screen and the world pans around it.
     g->cam_x = g->ship_x_world;
 }
 
+bool game_collide(game_state_t* g, world_state_t const* w) {
+    g->scrape_left  = false;
+    g->scrape_right = false;
+    bool head_on    = false;
+
+    float const ship_zN = SHIP_COLLISION_Z_C - SHIP_COLLISION_HALF_D;
+    float const ship_zF = SHIP_COLLISION_Z_C + SHIP_COLLISION_HALF_D;
+
+    for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+        obstacle_t const* o = &w->obstacles[i];
+        if (!o->active) continue;
+
+        // Ship x bounds are recomputed each iteration because a
+        // previous push-out may have shifted ship_x_world.
+        float const ship_xL = g->ship_x_world - SHIP_COLLISION_HALF_W;
+        float const ship_xR = g->ship_x_world + SHIP_COLLISION_HALF_W;
+
+        float const obs_xL = o->x_world - o->half_w;
+        float const obs_xR = o->x_world + o->half_w;
+        float const obs_zN = o->z_world - o->half_d;
+        float const obs_zF = o->z_world + o->half_d;
+
+        float const x_pen = fminf(ship_xR, obs_xR) - fmaxf(ship_xL, obs_xL);
+        float const z_pen = fminf(ship_zF, obs_zF) - fmaxf(ship_zN, obs_zN);
+        if (x_pen <= 0.0f || z_pen <= 0.0f) continue;
+
+        // Classify the contact by the obstacle's lateral position
+        // relative to the playfield. This is shape-agnostic and
+        // robust under future obstacle types:
+        //
+        //   * Boundary obstacles — placed entirely beyond the
+        //     ship's lateral clamp (obs.xL ≥ SHIP_X_MAX_WORLD
+        //     or obs.xR ≤ SHIP_X_MIN_WORLD) — are scrape-only.
+        //     The ship can't position itself laterally inside
+        //     them by construction, so any contact is the side
+        //     face of the obstacle. Today these are the track's
+        //     side walls; the same rule fits any future surface
+        //     that sits outside the playable lane.
+        //   * Trailing contact — obstacle has drifted past the
+        //     ship's centre (obs.z_world ≤ SHIP_COLLISION_Z_C) —
+        //     is also a scrape. By the time we see overlap from
+        //     behind the ship's centre, the obstacle is no longer
+        //     in our path; pushing the ship laterally out is the
+        //     correct resolution.
+        //   * Otherwise — playfield obstacle still ahead of the
+        //     ship's centre, with any AABB overlap — is head-on.
+        //     The ship has run into something that was in its
+        //     path. No more "corner clip survives" — any contact
+        //     is fatal.
+        bool const is_boundary_obstacle = (obs_xL >= SHIP_X_MAX_WORLD)
+                                       || (obs_xR <= SHIP_X_MIN_WORLD);
+        bool const obstacle_ahead       = (o->z_world > SHIP_COLLISION_Z_C);
+        bool       is_scrape;
+        if (is_boundary_obstacle) {
+            is_scrape = true;
+        } else if (!obstacle_ahead) {
+            is_scrape = true;
+        } else {
+            is_scrape = false;
+        }
+
+        if (is_scrape) {
+            // Push the ship out of the obstacle laterally so it
+            // physically can't penetrate. Side is decided by
+            // which side of the ship the obstacle's centre lies
+            // on. This also handles the wall case naturally —
+            // any further bank-driven motion next frame will be
+            // re-pushed back out, so the ship stays pressed
+            // against the wall instead of going through it.
+            if (o->x_world > g->ship_x_world) {
+                g->scrape_right = true;
+                g->ship_x_world -= x_pen;
+            } else {
+                g->scrape_left = true;
+                g->ship_x_world += x_pen;
+            }
+            // Re-clamp inside the lateral bounds, in case the
+            // push-out shoved us past one of them.
+            if (g->ship_x_world > SHIP_X_MAX_WORLD) g->ship_x_world = SHIP_X_MAX_WORLD;
+            if (g->ship_x_world < SHIP_X_MIN_WORLD) g->ship_x_world = SHIP_X_MIN_WORLD;
+        } else {
+            head_on = true;
+        }
+    }
+
+    // Camera follows the resolved position.
+    g->cam_x = g->ship_x_world;
+    return head_on;
+}
+
+void game_after_collide(game_state_t* g, float dt) {
+    if (dt <= 0.0f) return;
+
+    // Speed dynamics — ramp ship_speed_z toward scrape floor or
+    // base speed, depending on whether any side is in contact.
+    bool  const scraping = g->scrape_left || g->scrape_right;
+    float const target   = scraping
+                              ? (g->ship_base_speed_z * SCRAPE_SPEED_FRAC)
+                              : g->ship_base_speed_z;
+    if (g->ship_speed_z > target) {
+        float const max_step = SCRAPE_DECEL * dt;
+        g->ship_speed_z -= max_step;
+        if (g->ship_speed_z < target) g->ship_speed_z = target;
+    } else if (g->ship_speed_z < target) {
+        float const max_step = SPEED_RECOVERY * dt;
+        g->ship_speed_z += max_step;
+        if (g->ship_speed_z > target) g->ship_speed_z = target;
+    }
+}
+
+// --- Drawing ------------------------------------------------------------------
+
 void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
-    // Roll about the forward (z) axis. Positive bank → right wing
-    // dips. The 2D rotation in the (x, y) plane is:
-    //     x' =  x cos θ + y sin θ
-    //     y' = -x sin θ + y cos θ
-    // with θ = bank * MAX_BANK_RAD.
     float const angle = g->bank * MAX_BANK_RAD;
     float const c     = cosf(angle);
     float const s     = sinf(angle);
@@ -179,7 +321,6 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
                        screen[t->c].x, screen[t->c].y);
     }
 
-    // Cockpit ridges as cyan accent lines on top of the fills.
     for (size_t i = 0; i < SHIP_OUTLINE_COUNT; i++) {
         uint8_t const a = ship_outline_edges[i][0];
         uint8_t const b = ship_outline_edges[i][1];
@@ -187,4 +328,9 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
                         screen[a].x, screen[a].y,
                         screen[b].x, screen[b].y);
     }
+}
+
+void game_draw_sparks(pax_buf_t* fb, game_state_t const* g) {
+    if (g->scrape_left)  draw_wingtip_burst(fb, g, -1);
+    if (g->scrape_right) draw_wingtip_burst(fb, g, +1);
 }

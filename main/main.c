@@ -1,8 +1,8 @@
 // Race the Synth — Tanmatsu graceloader app.
 //
-// Phase 2: synthwave backdrop + steerable ship at the bottom of the screen.
-// F1 exits to the launcher. No obstacles, scoring, or sun timer yet — those
-// come in later phases. See DEVELOPMENT.md for the full plan.
+// Phase 4: TITLE → PLAYING → GAME_OVER state machine with AABB
+// collision against the world's obstacle pool. F1 exits to the
+// launcher from any state. See DEVELOPMENT.md for the full plan.
 
 #include <stdio.h>
 #include <string.h>
@@ -43,16 +43,23 @@ static pax_buf_t                    backdrop_cache       = {0};
 static void*                        backdrop_pixels      = NULL;
 static size_t                       backdrop_size        = 0;
 
+typedef enum {
+    APP_STATE_TITLE = 0,
+    APP_STATE_PLAYING,
+    APP_STATE_GAME_OVER,
+} app_state_t;
+
 static void blit(void) {
     bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(&fb));
 }
 
+static void draw_centered(float cy, float h, pax_col_t color, char const* text) {
+    pax_vec2f sz = rendertext_size(NULL, h, text);
+    float const x = (pax_buf_get_widthf(&fb) - sz.x) * 0.5f;
+    rendertext_draw(&fb, color, NULL, h, x, cy, text);
+}
+
 static void draw_speed_readout(float speed_z) {
-    // Top-right debug overlay. Tuning aid for matching the floor's
-    // visible motion to a comfortable forward speed; cursor up/down
-    // adjust ship_speed_z live. Use pax_buf_get_widthf so the offset
-    // respects the post-orientation logical width rather than the
-    // raw display_h_res, which is the un-rotated physical width.
     char        buf[32];
     snprintf(buf, sizeof(buf), "v=%.1f", speed_z);
     float const text_h = 18.0f;
@@ -78,6 +85,26 @@ static void draw_exit_hint(void) {
         char const* fallback = "F1 to exit";
         rendertext_draw(&fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
     }
+}
+
+static void draw_title_overlay(void) {
+    float const fbh = pax_buf_get_heightf(&fb);
+    draw_centered(fbh * 0.30f, 64.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
+    draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to start");
+}
+
+static void draw_game_over_overlay(void) {
+    float const fbh = pax_buf_get_heightf(&fb);
+    draw_centered(fbh * 0.30f, 64.0f, 0xFFF71FF1u, "GAME OVER");
+    draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to retry");
+}
+
+static void start_run(game_state_t* game, world_state_t* world) {
+    game_init(game);
+    // Phase 8 will replace this with the RTC-derived daily seed.
+    uint32_t const seed = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu) | 1u;
+    world_init(world, seed);
+    input_set_mode(INPUT_MODE_PLAYING);
 }
 
 void app_main(void) {
@@ -144,11 +171,8 @@ void app_main(void) {
     synthwave_init();
     icons_load();
     input_init();
-    input_set_mode(INPUT_MODE_PLAYING);
+    input_set_mode(INPUT_MODE_TITLE);
 
-    // Allocate the backdrop cache in PSRAM (the main fb is also there).
-    // We keep our own pointer so we can memcpy into the main fb without
-    // going through PAX's per-pixel draw path.
     backdrop_size   = pax_buf_get_size(&fb);
     backdrop_pixels = heap_caps_malloc(backdrop_size, MALLOC_CAP_SPIRAM);
     if (backdrop_pixels == NULL) {
@@ -159,10 +183,6 @@ void app_main(void) {
     pax_buf_reversed(&backdrop_cache, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
     pax_buf_set_orientation(&backdrop_cache, orientation);
 
-    // Render static layers into the cache once. The sun's `dy` will
-    // start changing in Phase 5 (sunset mechanic); when it does, this
-    // call will need to be re-issued whenever dy moves enough to
-    // matter visually.
     synthwave_draw_sky(&backdrop_cache);
     synthwave_draw_sun(&backdrop_cache, 0.0f);
     synthwave_draw_mountains(&backdrop_cache);
@@ -179,20 +199,22 @@ void app_main(void) {
         vsync_sem = NULL;
     }
 
-    game_state_t game;
-    game_init(&game);
-
     // World state is ~5 KB at the current pool size — keep it off
     // the app_main stack so we don't have to worry about IDF's
     // default stack budget.
+    static game_state_t  game;
     static world_state_t world;
-    // Seed from boot time for now. Phase 8 will replace this with the
-    // RTC-derived daily seed (or the player's custom seed).
-    world_init(&world, (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu) | 1u);
+    game_init(&game);
+    // The title screen scrolls the floor with a fake speed so the
+    // scene reads as "live" instead of static. The world isn't
+    // advanced (no obstacles spawn yet) — start_run() initializes
+    // the world fresh each time PLAYING begins.
+    float const title_scroll_speed = 6.0f;
 
-    int64_t prev_us = esp_timer_get_time();
+    app_state_t app_state = APP_STATE_TITLE;
+    int64_t     prev_us   = esp_timer_get_time();
 
-    ESP_LOGI(TAG, "Race the Synth: Phase 3 obstacles ready");
+    ESP_LOGI(TAG, "Race the Synth: title screen up");
 
     while (1) {
         if (input_drain_events()) {
@@ -202,41 +224,85 @@ void app_main(void) {
         int64_t now_us = esp_timer_get_time();
         float   dt     = (float)(now_us - prev_us) / 1e6f;
         prev_us        = now_us;
-        // Cap dt to keep physics sane after a long stall (e.g. backlight
-        // dim or a paged-out frame).
         if (dt > 0.1f) dt = 0.1f;
 
+        // Debug speed knob acts on the *base* speed so the scrape
+        // ramps don't fight the player's tuning.
         int sd = input_consume_speed_delta();
         if (sd != 0) {
-            game.ship_speed_z += (float)sd * 1.0f;
-            if (game.ship_speed_z < 0.5f) game.ship_speed_z = 0.5f;
-            if (game.ship_speed_z > 60.0f) game.ship_speed_z = 60.0f;
+            game.ship_base_speed_z += (float)sd * 1.0f;
+            if (game.ship_base_speed_z < 0.5f) game.ship_base_speed_z = 0.5f;
+            if (game.ship_base_speed_z > 60.0f) game.ship_base_speed_z = 60.0f;
         }
 
-        int steer = input_steering();
-        game_step(&game, dt, steer);
-        world_advance(&world, dt, game.ship_speed_z);
+        bool const pickup_pressed = input_consume_pickup();
+        int  const steer          = input_steering();
 
-        // Static synthwave layers come from the pre-rendered cache.
-        // We bypass PAX's draw path with a single memcpy — the cache and
-        // the main fb share the same dimensions, format, orientation
-        // and endianness, so the byte layout is identical.
+        // Frame setup: start with the cached backdrop and draw the
+        // scrolling floor. The floor scroll speed depends on the
+        // app state — fixed in TITLE, ship-driven in PLAYING,
+        // frozen in GAME_OVER.
         memcpy((void*)pax_buf_get_pixels(&fb), backdrop_pixels, backdrop_size);
 
-        // Dynamic content drawn on top of the cached backdrop.
-        // Floor scroll is coupled to forward speed so obstacles appear
-        // anchored to the floor texture as they approach. cam_x pans
-        // the floor's lane lines in world space.
-        synthwave_step(&fb, game.ship_speed_z * dt, game.cam_x);
+        switch (app_state) {
+            case APP_STATE_TITLE: {
+                synthwave_step(&fb, title_scroll_speed * dt, 0.0f);
+                draw_title_overlay();
+                draw_exit_hint();
+                if (pickup_pressed) {
+                    start_run(&game, &world);
+                    app_state = APP_STATE_PLAYING;
+                }
+                break;
+            }
 
-        // Obstacles render between the floor and the ship: floor goes
-        // behind everything, ship is always in front.
-        render_obstacles(&fb, &world, game.cam_x);
+            case APP_STATE_PLAYING: {
+                // 1. Apply bank + lateral motion using this frame's
+                //    steer input.
+                // 2. Collide against the world: push the ship out
+                //    of any side-contact obstacle and set scrape
+                //    flags (or return head-on).
+                // 3. After-collide work that reads the flags:
+                //    ramp ship_speed_z, emit + advance sparks.
+                // Doing collide *after* motion makes the resolved
+                // position the one we render and the one that
+                // feeds the next world_advance.
+                game_step(&game, dt, steer);
+                bool const head_on = game_collide(&game, &world);
+                game_after_collide(&game, dt);
+                world_advance(&world, dt, game.ship_speed_z);
 
-        game_draw_ship(&fb, &game);
+                synthwave_step(&fb, game.ship_speed_z * dt, game.cam_x);
+                render_obstacles(&fb, &world, game.cam_x);
+                game_draw_ship(&fb, &game);
+                game_draw_sparks(&fb, &game);
+                draw_exit_hint();
+                draw_speed_readout(game.ship_speed_z);
 
-        draw_exit_hint();
-        draw_speed_readout(game.ship_speed_z);
+                if (head_on) {
+                    app_state = APP_STATE_GAME_OVER;
+                    input_set_mode(INPUT_MODE_GAME_OVER);
+                }
+                break;
+            }
+
+            case APP_STATE_GAME_OVER: {
+                // World frozen at the crash. No sparks here — they
+                // are a per-frame radial flash that only reads as
+                // a scrape indication during PLAYING.
+                synthwave_step(&fb, 0.0f, game.cam_x);
+                render_obstacles(&fb, &world, game.cam_x);
+                game_draw_ship(&fb, &game);
+                draw_game_over_overlay();
+                draw_exit_hint();
+
+                if (pickup_pressed) {
+                    start_run(&game, &world);
+                    app_state = APP_STATE_PLAYING;
+                }
+                break;
+            }
+        }
 
         blit();
 

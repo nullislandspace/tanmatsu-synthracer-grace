@@ -18,7 +18,7 @@
 | 1 | Skeleton + synthwave backdrop | ✅ runs on-device; sun arch fixed, Hershey font, F-key icon hint, horizon lifted, grid floor extended with extra perspective lines on each side |
 | 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
 | 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles share one pinhole projection; obstacles render as 3D cubes with per-face culling and near-plane clipping; continuous side walls along the track edges, all stored in the same obstacle pool ready for collision in Phase 4 |
-| 4 | Collision + game over | ⬜ not started |
+| 4 | Collision + game over | ✅ TITLE → PLAYING → GAME_OVER state machine; AABB collision against the unified obstacle pool with a boundary-obstacle position rule (scrape on side walls, head-on on any playfield obstacle ahead); push-out resolution + continuous scrape-floor/recovery speed dynamics; per-frame red radial-burst sparks at the banked wingtip while scraping |
 | 5 | Sun timer + shadow + boost | ⬜ not started |
 | 6 | Tris + multiplier | ⬜ not started |
 | 7 | Audio + volume keys | ⬜ not started |
@@ -318,6 +318,82 @@
     drops the projected tail from sy ≈ 436 to sy ≈ 470 — just
     above the screen edge — exactly where the user wanted the
     ship visually anchored.
+- 2026-05-11 — Phase 4 implementation landed. State machine in
+  `main.c`: `STATE_TITLE` / `STATE_PLAYING` / `STATE_GAME_OVER`,
+  with `input_set_mode` driving the modal ESC/Backspace bindings
+  and `input_consume_pickup` handling Space/Gamepad-A transitions.
+  Title and game-over screens reuse the cached synthwave backdrop
+  (gentle scroll on title, frozen on game-over) and draw centred
+  Hershey overlay text. Each PLAYING frame does
+  `game_step → game_collide → game_after_collide → world_advance`
+  in order — motion produces this frame's intent, collide resolves
+  it (push-out + flags + head-on return), after_collide reads the
+  resolved flags for speed dynamics, world then advances. The
+  debug speed knob now adjusts `ship_base_speed_z` (not the
+  current `ship_speed_z`) so the scrape decay/recovery doesn't
+  fight the player's tuning.
+- 2026-05-11 — Collision classifier ended up *position-based*, not
+  shape-based or axis-of-smallest-penetration. An obstacle is a
+  "boundary obstacle" if its x range sits entirely outside the
+  ship's lateral clamp (`obs.xL >= SHIP_X_MAX_WORLD` or
+  `obs.xR <= SHIP_X_MIN_WORLD`); the ship's centre can never enter
+  it by construction so any contact is by geometry on a side face.
+  Boundary obstacles always scrape. Playfield obstacles (anything
+  whose x range overlaps the ship's lateral range) are head-on on
+  any AABB overlap while still ahead of the ship's z centre;
+  trailing contact (obstacle has drifted past) is a scrape. The
+  earlier axis-of-smallest-penetration rule misfired on long wall
+  segments that had drifted past (z_pen shrunk below x_pen, faked
+  a head-on) and on cube corner clips (allowed survivable graze
+  past obstacles). An aspect-ratio shortcut was tried and
+  rejected — the user's call: future obstacle types/shapes should
+  support both behaviours based on the geometry of contact, not
+  the obstacle's identity. The boundary-obstacle position rule is
+  the cleanest shape-agnostic split available today; the trade-off
+  is that an in-playfield "ridable wall" can't be expressed by
+  position alone, but no such obstacle exists yet. When one is
+  needed we'll add an explicit `kind` tag on the obstacle struct.
+- 2026-05-11 — Collision model for Phase 4 derived from a
+  playtest of the original *Race The Sun*: head-on collisions
+  are fatal, but **scraping along a wall or the side of an
+  obstacle gradually slows the ship while contact lasts and
+  gradually re-accelerates back to base speed when contact is
+  lost — never a step change.** Phase 4 will classify each AABB
+  overlap by the axis of *smallest penetration*:
+  * smallest on x → side contact → set a `scraping` flag.
+    `ship_speed_z` ramps downward at a fixed deceleration (e.g.
+    a few world-units / s²) toward a scrape-floor (~0.5-0.6 ×
+    base). Releasing contact does not snap back — instead
+    `ship_speed_z` ramps *up* at a separate acceleration toward
+    `SHIP_BASE_SPEED_Z`. Both transitions are continuous, so
+    grazing a wall for half a second only sheds a fraction of
+    the full slowdown, and recovery is visible over time rather
+    than instant.
+  * smallest on z → head-on → STATE_GAME_OVER.
+  Walls (long in z, thin in x) produce x-axis contact by
+  geometry, so they're scrape-only without needing a special
+  case. Small cube obstacles can be either depending on
+  approach angle — clip a corner laterally and survive at
+  reduced speed; hit it square-on and die. The "current forward
+  speed" therefore becomes a value pushed around by several
+  effects (scrape decel, Phase 5 shadow decel, Phase 5 boost
+  reset, base-speed recovery accel) rather than a constant —
+  landing the "speed responds to game state" pattern in Phase 4
+  is a deliberate setup for Phase 5.
+
+  **Scrape sparks** — visual indication of the contact, also
+  landing in Phase 4 alongside the scrape model itself. Final
+  form: a per-frame radial burst (no particle physics). For
+  each scraping side, draw 5 red lines from the *rendered*
+  wing-tip in random screen-space directions with random
+  length 10-22 px. No pool, no lifetime, no advance — the
+  burst is a pure per-frame visual that exists exactly while
+  the scrape flag is set. The wing-tip world position has the
+  same `bank * MAX_BANK_RAD` rotation about z applied as the
+  ship's mesh, so the burst origin tracks the visible wing
+  tip when banking (an earlier version projected the level-
+  flight position and the sparks visibly drifted off the
+  rendered wing tip).
 
 ---
 
@@ -511,8 +587,29 @@ the function makes it explicit and lets us animate the sun.
   rendered roll = `bank * MAX_BANK_RAD` so the visible bank and
   the actual turn rate are one and the same parameter.
 - Pickups (Phase 9+) activated via spacebar / button (queued events).
-- Collision: AABB in 3D world space against obstacle pool, plus pickup
-  proximity test that respects magnet upgrade range.
+- Collision: `game_collide` does AABB in 3D world space against
+  every active entry of the obstacle pool (walls and dynamic
+  obstacles share the same pool). Classification is
+  position-based:
+  * *Boundary obstacle* — `obs.xL >= SHIP_X_MAX_WORLD` or
+    `obs.xR <= SHIP_X_MIN_WORLD`. Ship's centre can't enter
+    it laterally so any contact is on a side face. Always
+    scrape: set `scrape_left`/`scrape_right` and push the ship
+    out of the obstacle along x by `x_pen` so it physically
+    can't penetrate the wall.
+  * *Trailing contact* — obstacle is in the playfield but has
+    drifted past the ship's z centre (`obs.z_world ≤
+    SHIP_COLLISION_Z_C`). Treated as a scrape (the obstacle is
+    no longer in the ship's path).
+  * *Playfield obstacle ahead* — anything else with AABB
+    overlap. Head-on: `game_collide` returns true, the caller
+    flips the app state to `GAME_OVER`.
+  `game_after_collide` reads the resolved flags and ramps
+  `ship_speed_z` toward the scrape-floor (≈ 0.55 × base) at
+  `SCRAPE_DECEL` while scraping, or back up toward base speed at
+  the slower `SPEED_RECOVERY` when contact ends — both
+  transitions are continuous. Phase 9 will add a pickup
+  proximity test that respects the magnet upgrade range.
 - **Sun mechanic & shadow**: `sun_seconds_left` ticks down at 1.0/s in
   light, 1.5/s in shadow. Each tick `game_step()` calls
   `is_ship_in_shadow(world, ship)`:
@@ -821,8 +918,25 @@ Done in this order so each phase produces a runnable build:
    stream of cuboid obstacles at fixed lateral lanes, advance them toward
    the camera. Render as 1-colour triangles, painter-sorted by z.
    Validates the 3D pipeline.
-4. **Collision + game over**: AABB collision. Crash → STATE_GAME_OVER →
-   back to STATE_TITLE on space.
+4. **Collision + game over**: AABB overlap test against every
+   active entry in the obstacle pool (walls + dynamic obstacles
+   both). For each overlap, classify by smallest-axis penetration:
+   x-axis contact ⇒ scrape (set flag, *gradually* ramp
+   `ship_speed_z` down at a fixed deceleration toward a scrape-
+   floor ~0.5-0.6 × base while contact lasts; when contact ends,
+   *gradually* ramp back up at a separate acceleration toward
+   base speed — neither edge is a step change); z-axis contact ⇒
+   head-on ⇒ STATE_GAME_OVER → back to STATE_TITLE on
+   space/gamepad-A. Ship's collision AABB derived from the
+   tetrahedron extents at `SHIP_Z_PLANE` (roughly `half_w ≈ 0.28`,
+   `half_d ≈ 0.34`, `height ≈ 0.30`). State machine lands here too —
+   `STATE_TITLE` / `STATE_PLAYING` / `STATE_GAME_OVER`, with
+   `input_set_mode` driving the modal ESC/Backspace bindings.
+   Scrape sparks also land in this phase — fixed-size particle
+   pool emitting at the scraping wing-tip, world-anchored so
+   they drift back at `ship_speed_z`, projected through the
+   same camera as obstacles (see the 2026-05-11 decisions entry
+   for the model).
 5. **Sun timer + shadow + boost pickups**: tick `sun_seconds_left`, sink
    the visual sun (verify it disappears behind the mountain silhouette),
    end run on sunset. Implement `is_ship_in_shadow()` and the speed
