@@ -10,6 +10,8 @@
 
 #include "bsp/device.h"
 #include "bsp/display.h"
+#include "driver/ppa.h"
+#include "esp_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -27,6 +29,29 @@
 #include "rendertext.h"
 #include "synthwave.h"
 #include "world.h"
+
+// PPA SRM client + completion semaphore for the async per-frame
+// backdrop copy. The PPA op copies just the *above-horizon* region
+// of `backdrop_cache` (sky + sun + mountains + wireframe + top
+// horizon line) into the framebuffer, in parallel with the CPU
+// painting the floor area in `synthwave_step`. The semaphore is
+// given by the PPA "done" callback and taken before any code that
+// touches the sky region (currently `render_obstacles`, since
+// obstacles can extend above the horizon).
+static ppa_client_handle_t          ppa_client     = NULL;
+static SemaphoreHandle_t            ppa_done_sem   = NULL;
+static bool                         ppa_pending    = false;
+
+// ESP32-P4 PSRAM L2 cache line size. Used both for the aligned
+// allocation of `backdrop_cache` and for `esp_cache_msync` operations.
+#define PPA_PSRAM_CACHE_LINE 128
+
+// Horizon row in logical coordinates. `synthwave_draw_top_grid`
+// paints a magenta line at this y; `synthwave_step` starts the
+// floor rect at y = HORIZON_LOGICAL_Y + 1. PPA copies logical rows
+// [0, HORIZON_LOGICAL_Y] inclusive, so the horizon line itself is
+// carried over from the cached backdrop.
+#define HORIZON_LOGICAL_Y 256
 
 static char const TAG[] = "racethesynth";
 
@@ -52,6 +77,92 @@ typedef enum {
 
 static void blit(void) {
     bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(&fb));
+}
+
+// PPA "transaction done" callback. Runs in interrupt context; the
+// only thing we do here is give the semaphore so the main loop can
+// proceed past `bgwait`. Return value tells the PPA driver whether
+// a higher-priority task became ready (yes if xSemaphoreGiveFromISR
+// woke one).
+static bool ppa_on_trans_done(ppa_client_handle_t client, ppa_event_data_t *event_data, void *user_data) {
+    (void)client;
+    (void)event_data;
+    (void)user_data;
+    BaseType_t hpw = pdFALSE;
+    xSemaphoreGiveFromISR(ppa_done_sem, &hpw);
+    return hpw == pdTRUE;
+}
+
+// Submit the per-frame async backdrop copy. The source rect covers
+// logical rows [0, HORIZON_LOGICAL_Y] of `backdrop_cache`; the
+// destination rect is the matching region of `fb`. Returns true on
+// success — caller must call `ppa_wait_backdrop` exactly once per
+// successful submit before the floor or obstacle code touches the
+// sky region of `fb`.
+//
+// Orientation: the Tanmatsu LCD reports BSP_DISPLAY_ROTATION_270
+// (PAX orientation `PAX_O_ROT_CW`), so raw_w = display_h_res = 480
+// and the logical-y → raw-x mapping is `rx = raw_w - 1 - ly`. The
+// above-horizon strip therefore lives at raw columns
+// [raw_w - sky_rows, raw_w - 1] = [223, 479] = 257 columns, with
+// full raw_h = 800 rows. PPA SRM operates on the raw buffer.
+static bool ppa_submit_backdrop(void) {
+    int const sky_rows   = HORIZON_LOGICAL_Y + 1;        // 257 logical rows
+    int const raw_w      = (int)display_h_res;
+    int const raw_h      = (int)display_v_res;
+    int const rx_start   = raw_w - sky_rows;             // 480 - 257 = 223
+    if (rx_start < 0) return false;
+
+    ppa_srm_oper_config_t cfg = {
+        .in = {
+            .buffer         = backdrop_pixels,
+            .pic_w          = (uint32_t)raw_w,
+            .pic_h          = (uint32_t)raw_h,
+            .block_w        = (uint32_t)sky_rows,
+            .block_h        = (uint32_t)raw_h,
+            .block_offset_x = (uint32_t)rx_start,
+            .block_offset_y = 0,
+            .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer         = (void*)pax_buf_get_pixels(&fb),
+            .buffer_size    = backdrop_size,
+            .pic_w          = (uint32_t)raw_w,
+            .pic_h          = (uint32_t)raw_h,
+            .block_offset_x = (uint32_t)rx_start,
+            .block_offset_y = 0,
+            .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .rotation_angle    = PPA_SRM_ROTATION_ANGLE_0,
+        .scale_x           = 1.0f,
+        .scale_y           = 1.0f,
+        .mirror_x          = false,
+        .mirror_y          = false,
+        .rgb_swap          = false,
+        .byte_swap         = false,
+        .alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+        .mode              = PPA_TRANS_MODE_NON_BLOCKING,
+        .user_data         = NULL,
+    };
+    esp_err_t err = ppa_do_scale_rotate_mirror(ppa_client, &cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ppa_do_scale_rotate_mirror failed: %d", err);
+        return false;
+    }
+    ppa_pending = true;
+    return true;
+}
+
+// Take the completion semaphore. Returns true once the PPA op has
+// finished (or was never submitted this frame). 50 ms timeout is
+// generous — PPA SRM of 257×800 RGB565 should complete in well
+// under 5 ms.
+static void ppa_wait_backdrop(void) {
+    if (!ppa_pending) return;
+    if (xSemaphoreTake(ppa_done_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGW(TAG, "PPA backdrop wait timed out");
+    }
+    ppa_pending = false;
 }
 
 static void draw_centered(float cy, float h, pax_col_t color, char const* text) {
@@ -202,7 +313,15 @@ void app_main(void) {
     input_set_mode(INPUT_MODE_TITLE);
 
     backdrop_size   = pax_buf_get_size(&fb);
-    backdrop_pixels = heap_caps_malloc(backdrop_size, MALLOC_CAP_SPIRAM);
+    // Cache-line-aligned PSRAM so PPA can DMA-read directly. On
+    // ESP32-P4 PSRAM is AXI-DMA-accessible without MALLOC_CAP_DMA
+    // (which historically maps to AHB-DMA-able internal SRAM and
+    // doesn't combine cleanly with MALLOC_CAP_SPIRAM). The PPA
+    // driver requires 128-byte alignment on external memory; size
+    // (768000 bytes at 480×800 RGB565) is already a multiple of 128
+    // so no padding is needed.
+    backdrop_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, backdrop_size,
+                                              MALLOC_CAP_SPIRAM);
     if (backdrop_pixels == NULL) {
         ESP_LOGE(TAG, "Failed to allocate %u bytes for backdrop cache", (unsigned)backdrop_size);
         return;
@@ -216,6 +335,45 @@ void app_main(void) {
     synthwave_draw_mountains(&backdrop_cache);
     synthwave_draw_wireframe(&backdrop_cache);
     synthwave_draw_top_grid(&backdrop_cache);
+
+    // Backdrop is now fully rasterised by PAX into CPU cache; flush
+    // it to PSRAM so the PPA DMA engine sees the finished pixels.
+    // One-shot — the backdrop is never modified again, so subsequent
+    // frames need no further cache maintenance for the source.
+    esp_err_t cache_err = esp_cache_msync(backdrop_pixels, backdrop_size,
+                                          ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                                          ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    if (cache_err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_cache_msync(backdrop) failed: %d", cache_err);
+        return;
+    }
+
+    // PPA SRM client + per-frame completion semaphore. One pending
+    // transaction is enough because the main loop always waits on
+    // the previous frame's op before submitting the next.
+    ppa_done_sem = xSemaphoreCreateBinary();
+    if (ppa_done_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to create PPA semaphore");
+        return;
+    }
+    ppa_client_config_t const ppa_cfg = {
+        .oper_type             = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+        .data_burst_length     = PPA_DATA_BURST_LENGTH_128,
+    };
+    esp_err_t ppa_err = ppa_register_client(&ppa_cfg, &ppa_client);
+    if (ppa_err != ESP_OK) {
+        ESP_LOGE(TAG, "ppa_register_client failed: %d", ppa_err);
+        return;
+    }
+    ppa_event_callbacks_t const ppa_cbs = {
+        .on_trans_done = ppa_on_trans_done,
+    };
+    ppa_err = ppa_client_register_event_callbacks(ppa_client, &ppa_cbs);
+    if (ppa_err != ESP_OK) {
+        ESP_LOGE(TAG, "ppa_client_register_event_callbacks failed: %d", ppa_err);
+        return;
+    }
 
     SemaphoreHandle_t vsync_sem = NULL;
     esp_err_t         te_err    = bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING);
@@ -255,8 +413,9 @@ void app_main(void) {
     // approximately equal `window_us`.
     int64_t prof_input_us  = 0;
     int64_t prof_phys_us   = 0;
-    int64_t prof_bgcpy_us  = 0;
+    int64_t prof_bgkick_us = 0;
     int64_t prof_bgflr_us  = 0;
+    int64_t prof_bgwait_us = 0;
     int64_t prof_obs_us    = 0;
     int64_t prof_fgrest_us = 0;
     int64_t prof_blit_us   = 0;
@@ -309,15 +468,25 @@ void app_main(void) {
         }
         int64_t const t_after_phys = esp_timer_get_time();
 
-        // Background pass — restore the cached static backdrop and
-        // scroll the grid floor. Same work in every state.
-        memcpy((void*)pax_buf_get_pixels(&fb), backdrop_pixels, backdrop_size);
-        int64_t const t_after_bgcpy = esp_timer_get_time();
+        // Background pass — kick the PPA SRM copy of the above-
+        // horizon region (sky/sun/mountains/wireframe/top-grid)
+        // asynchronously, then paint the floor area on the CPU
+        // while PPA runs in parallel. The PPA writes the upper
+        // rows of `fb` directly to PSRAM; CPU writes the floor
+        // rows. The two regions don't overlap, so no write race.
+        // Same work in every state.
+        ppa_submit_backdrop();
+        int64_t const t_after_bgkick = esp_timer_get_time();
         float const floor_scroll = (app_state == APP_STATE_TITLE)      ? title_scroll_speed * dt
                                    : (app_state == APP_STATE_PLAYING)  ? game.ship_speed_z * dt
                                                                        : 0.0f;
         float const floor_cam_x  = (app_state == APP_STATE_TITLE) ? 0.0f : game.cam_x;
         synthwave_step(&fb, floor_scroll, floor_cam_x);
+        int64_t const t_after_bgflr = esp_timer_get_time();
+        // Block until PPA finishes — obstacles and HUD text can
+        // both write into the sky region, so the backdrop must be
+        // in place before any foreground rendering touches it.
+        ppa_wait_backdrop();
         int64_t const t_after_bg = esp_timer_get_time();
 
         // Foreground pass — state-dependent dynamic content.
@@ -381,14 +550,15 @@ void app_main(void) {
         }
         int64_t const t_after_vsync = esp_timer_get_time();
 
-        prof_input_us  += t_after_input - t_loop_start;
-        prof_phys_us   += t_after_phys  - t_after_input;
-        prof_bgcpy_us  += t_after_bgcpy - t_after_phys;
-        prof_bgflr_us  += t_after_bg    - t_after_bgcpy;
-        prof_obs_us    += t_after_obs   - t_after_bg;
-        prof_fgrest_us += t_after_fg    - t_after_obs;
-        prof_blit_us   += t_after_blit  - t_after_fg;
-        prof_vsync_us  += t_after_vsync - t_after_blit;
+        prof_input_us  += t_after_input  - t_loop_start;
+        prof_phys_us   += t_after_phys   - t_after_input;
+        prof_bgkick_us += t_after_bgkick - t_after_phys;
+        prof_bgflr_us  += t_after_bgflr  - t_after_bgkick;
+        prof_bgwait_us += t_after_bg     - t_after_bgflr;
+        prof_obs_us    += t_after_obs    - t_after_bg;
+        prof_fgrest_us += t_after_fg     - t_after_obs;
+        prof_blit_us   += t_after_blit   - t_after_fg;
+        prof_vsync_us  += t_after_vsync  - t_after_blit;
         prof_frames    += 1;
         prof_window_us  = t_after_vsync - prof_prev_us;
 
@@ -396,18 +566,19 @@ void app_main(void) {
             float const fps    = prof_frames * 1e6f / (float)prof_window_us;
             float const inv_fr = 1.0f / (float)prof_frames;
             ESP_LOGI(TAG,
-                     "FPS=%.1f  in=%.2fms phys=%.2fms bgcpy=%.2fms bgflr=%.2fms obs=%.2fms fgrest=%.2fms blit=%.2fms vsync=%.2fms",
+                     "FPS=%.1f  in=%.2f phys=%.2f bgkick=%.2f bgflr=%.2f bgwait=%.2f obs=%.2f fgrest=%.2f blit=%.2f vsync=%.2f ms",
                      fps,
                      (float)prof_input_us  * inv_fr / 1000.0f,
                      (float)prof_phys_us   * inv_fr / 1000.0f,
-                     (float)prof_bgcpy_us  * inv_fr / 1000.0f,
+                     (float)prof_bgkick_us * inv_fr / 1000.0f,
                      (float)prof_bgflr_us  * inv_fr / 1000.0f,
+                     (float)prof_bgwait_us * inv_fr / 1000.0f,
                      (float)prof_obs_us    * inv_fr / 1000.0f,
                      (float)prof_fgrest_us * inv_fr / 1000.0f,
                      (float)prof_blit_us   * inv_fr / 1000.0f,
                      (float)prof_vsync_us  * inv_fr / 1000.0f);
-            prof_input_us  = prof_phys_us = prof_bgcpy_us = prof_bgflr_us = 0;
-            prof_obs_us    = prof_fgrest_us = prof_blit_us = prof_vsync_us = 0;
+            prof_input_us  = prof_phys_us = prof_bgkick_us = prof_bgflr_us = 0;
+            prof_bgwait_us = prof_obs_us = prof_fgrest_us = prof_blit_us = prof_vsync_us = 0;
             prof_frames    = 0;
             prof_prev_us   = t_after_vsync;
         }
