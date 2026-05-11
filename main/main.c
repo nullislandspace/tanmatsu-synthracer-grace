@@ -30,28 +30,62 @@
 #include "synthwave.h"
 #include "world.h"
 
-// PPA SRM client + completion semaphore for the async per-frame
-// backdrop copy. The PPA op copies just the *above-horizon* region
-// of `backdrop_cache` (sky + sun + mountains + wireframe + top
-// horizon line) into the framebuffer, in parallel with the CPU
-// painting the floor area in `synthwave_step`. The semaphore is
-// given by the PPA "done" callback and taken before any code that
-// touches the sky region (currently `render_obstacles`, since
-// obstacles can extend above the horizon).
-static ppa_client_handle_t          ppa_client     = NULL;
-static SemaphoreHandle_t            ppa_done_sem   = NULL;
-static bool                         ppa_pending    = false;
+// PPA clients — one per operation type because the driver ties a
+// client handle to a single op. All three feed a shared counting
+// semaphore via their `on_trans_done` callbacks: every frame we
+// submit FILL+SRM+BLEND non-blocking, do CPU floor work, then take
+// the semaphore three times before any foreground rendering touches
+// the sky region. PPA is a single hardware engine, so the ops
+// execute sequentially in submission order even though we kick
+// them off in one burst.
+static ppa_client_handle_t          ppa_srm_client   = NULL;
+static ppa_client_handle_t          ppa_blend_client = NULL;
+static ppa_client_handle_t          ppa_fill_client  = NULL;
+static SemaphoreHandle_t            ppa_done_sem     = NULL;
+static int                          ppa_pending_n    = 0;
 
-// ESP32-P4 PSRAM L2 cache line size. Used both for the aligned
-// allocation of `backdrop_cache` and for `esp_cache_msync` operations.
+// ESP32-P4 PSRAM L2 cache line size. Used for the aligned allocation
+// of the layer caches and for `esp_cache_msync` operations.
 #define PPA_PSRAM_CACHE_LINE 128
 
-// Horizon row in logical coordinates. `synthwave_draw_top_grid`
-// paints a magenta line at this y; `synthwave_step` starts the
-// floor rect at y = HORIZON_LOGICAL_Y + 1. PPA copies logical rows
-// [0, HORIZON_LOGICAL_Y] inclusive, so the horizon line itself is
-// carried over from the cached backdrop.
+// Sky region in logical coordinates. `synthwave_draw_top_grid` paints
+// the magenta line at y = HORIZON_LOGICAL_Y; `synthwave_step` paints
+// the floor starting at y = HORIZON_LOGICAL_Y + 1. The PPA pipeline
+// touches logical rows [0, HORIZON_LOGICAL_Y], i.e. SKY_ROWS rows.
 #define HORIZON_LOGICAL_Y 256
+#define SKY_ROWS          (HORIZON_LOGICAL_Y + 1)
+
+// Sun cache: tight bounding box of the sun bands at their canonical
+// baseline. Bands span fb logical y = -4 (off-screen above) to ~174;
+// we render with y_bias = +4 so the topmost band lands at cache y=0
+// and the cache is exactly tall enough to hold the whole sun.
+#define SUN_CACHE_LOG_W   800
+#define SUN_CACHE_LOG_H   180
+#define SUN_RENDER_Y_BIAS 4.0f
+
+// Mountain cache: tight bounding box of the visible mountain band.
+// The band spans fb logical y = 94 (mountain peaks) down to 256
+// (horizon). The cache is rendered with y_bias = -94 so the top of
+// the visible mountain region lands at cache y=0, and the horizon
+// line at fb y=256 lands at cache y=162.
+#define MOUNTAIN_CACHE_LOG_W   800
+#define MOUNTAIN_CACHE_LOG_H   163
+#define MOUNTAIN_RENDER_Y_BIAS (-94.0f)
+#define MOUNTAIN_DEST_LOG_Y    94
+
+// Colour-key for the mountain cache background. Pure green never
+// appears in the synthwave palette (purples / pinks / cyans /
+// oranges / magentas), so a tight key around it can't false-match
+// any artwork pixel. The cache stores RGB565 (5-6-5); PPA expands
+// to RGB888 internally before comparing against the thresholds.
+// Whether the expansion is "shift" (g=0x3F → 0xFC) or "replicate"
+// (g=0x3F → 0xFF) varies by hardware revision, so the threshold
+// range covers both: low (0,0xFC,0) — high (0,0xFF,0).
+#define MOUNTAIN_KEY_PAX_COL 0xFF00FF00u
+
+// Sky colour for PPA FILL. Same purple PAX paints with
+// `pax_background(0xFF552075)`.
+#define SKY_PAX_COL 0xFF552075u
 
 static char const TAG[] = "racethesynth";
 
@@ -59,15 +93,41 @@ static size_t                       display_h_res        = 0;
 static size_t                       display_v_res        = 0;
 static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
 static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
-static pax_buf_t                    fb                   = {0};
-// Pre-rendered static synthwave layers (sky, sun, mountains, wireframe,
-// top horizon line). Copied wholesale into `fb` at the start of each
-// frame so the per-frame work skips the expensive triangulated polygon
-// fills + ~200 wireframe lines and only needs to redraw the dynamic
-// content (scrolling grid floor, ship, HUD).
-static pax_buf_t                    backdrop_cache       = {0};
-static void*                        backdrop_pixels      = NULL;
-static size_t                       backdrop_size        = 0;
+// Double-buffered framebuffer. The LCD's DMA reads `fb_front`
+// continuously while the CPU + PPA draw into `*fb` (the back buffer).
+// `bsp_display_blit` is called with the current back buffer pointer;
+// after the post-blit vsync wait, the two buffers swap so the buffer
+// just sent becomes the front (being scanned) and the previous front
+// becomes the back (next frame's draw target). This eliminates the
+// CPU-modifies-while-LCD-reads tearing that single-buffering caused.
+static pax_buf_t                    fb_a                 = {0};
+static pax_buf_t                    fb_b                 = {0};
+static pax_buf_t*                   fb                   = &fb_a;
+static pax_buf_t*                   fb_front             = &fb_b;
+static void*                        fb_a_pixels          = NULL;
+static void*                        fb_b_pixels          = NULL;
+static size_t                       fb_size              = 0;
+
+// Pre-rendered backdrop layers, split into two PPA-driven caches so
+// the sun can move independently of the mountains. The per-frame
+// pipeline is:
+//   1) PPA FILL — sky purple across the whole above-horizon region.
+//      Wipes any previous-frame obstacle pixels that drifted up
+//      into the sky area.
+//   2) PPA SRM  — copy `sun_cache` into fb at the sun's current
+//      vertical offset. Cache contents are sky-color in the gaps
+//      around the bands, so the SRM is harmless outside the bands
+//      (writes the same purple the FILL already wrote).
+//   3) PPA BLEND — composite `mountain_cache` over fb with a green
+//      colour-key so the sky/sun shows through outside the mountain
+//      silhouette. Mountain wireframes and the horizon line live in
+//      the same cache.
+static pax_buf_t                    sun_cache            = {0};
+static void*                        sun_pixels           = NULL;
+static size_t                       sun_size             = 0;
+static pax_buf_t                    mountain_cache       = {0};
+static void*                        mountain_pixels      = NULL;
+static size_t                       mountain_size        = 0;
 
 typedef enum {
     APP_STATE_TITLE = 0,
@@ -76,14 +136,14 @@ typedef enum {
 } app_state_t;
 
 static void blit(void) {
-    bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(&fb));
+    bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(fb));
 }
 
-// PPA "transaction done" callback. Runs in interrupt context; the
-// only thing we do here is give the semaphore so the main loop can
-// proceed past `bgwait`. Return value tells the PPA driver whether
-// a higher-priority task became ready (yes if xSemaphoreGiveFromISR
-// woke one).
+// PPA "transaction done" callback. Runs in interrupt context; gives
+// the shared counting semaphore once per completed op so the main
+// loop can proceed past `bgwait` after taking it N times. Return
+// value tells the PPA driver whether a higher-priority task became
+// ready (yes if xSemaphoreGiveFromISR woke one).
 static bool ppa_on_trans_done(ppa_client_handle_t client, ppa_event_data_t *event_data, void *user_data) {
     (void)client;
     (void)event_data;
@@ -93,44 +153,102 @@ static bool ppa_on_trans_done(ppa_client_handle_t client, ppa_event_data_t *even
     return hpw == pdTRUE;
 }
 
-// Submit the per-frame async backdrop copy. The source rect covers
-// logical rows [0, HORIZON_LOGICAL_Y] of `backdrop_cache`; the
-// destination rect is the matching region of `fb`. Returns true on
-// success — caller must call `ppa_wait_backdrop` exactly once per
-// successful submit before the floor or obstacle code touches the
-// sky region of `fb`.
+// PPA picture-block axis layout under PAX_O_ROT_CW. PPA operates on
+// raw memory; PAX rotates logical → raw by `rx = raw_w - 1 - ly`,
+// `ry = lx`. So a logical rectangle of (lx0..lx1, ly0..ly1) becomes
+// raw block (rx_start = raw_w - 1 - ly1, ry_start = lx0) with
+// block_w = ly1 - ly0 + 1 (height in logical → width in raw) and
+// block_h = lx1 - lx0 + 1 (width in logical → height in raw).
 //
-// Orientation: the Tanmatsu LCD reports BSP_DISPLAY_ROTATION_270
-// (PAX orientation `PAX_O_ROT_CW`), so raw_w = display_h_res = 480
-// and the logical-y → raw-x mapping is `rx = raw_w - 1 - ly`. The
-// above-horizon strip therefore lives at raw columns
-// [raw_w - sky_rows, raw_w - 1] = [223, 479] = 257 columns, with
-// full raw_h = 800 rows. PPA SRM operates on the raw buffer.
-static bool ppa_submit_backdrop(void) {
-    int const sky_rows   = HORIZON_LOGICAL_Y + 1;        // 257 logical rows
-    int const raw_w      = (int)display_h_res;
-    int const raw_h      = (int)display_v_res;
-    int const rx_start   = raw_w - sky_rows;             // 480 - 257 = 223
-    if (rx_start < 0) return false;
+// Both fb and the layer caches were created with the same orientation
+// + raw layout, so the rotation transform is identical on both sides.
+typedef struct {
+    uint32_t pic_w;
+    uint32_t pic_h;
+    uint32_t block_w;
+    uint32_t block_h;
+    uint32_t block_offset_x;
+    uint32_t block_offset_y;
+} ppa_raw_blk_t;
+
+// Convert a full-width logical row band [ly_top, ly_top + log_h)
+// into the corresponding raw block for a buffer of size raw_w × raw_h
+// with PAX_O_ROT_CW. The logical x range is always [0, 800), full
+// width.
+static ppa_raw_blk_t ppa_band_to_raw(uint32_t raw_w, uint32_t raw_h, int log_y_top, int log_h) {
+    ppa_raw_blk_t b;
+    b.pic_w          = raw_w;
+    b.pic_h          = raw_h;
+    b.block_w        = (uint32_t)log_h;          // logical-h → raw-w
+    b.block_h        = raw_h;                    // logical x range [0, 800) → full raw_h
+    b.block_offset_x = (uint32_t)((int)raw_w - log_y_top - log_h);
+    b.block_offset_y = 0;
+    return b;
+}
+
+// Submit PPA FILL: paint the sky region of fb with the sky purple.
+// Wipes any previous-frame obstacle pixels that drifted above the
+// horizon, so the sun and mountain layers compose onto a clean band.
+static bool ppa_submit_fill_sky(void) {
+    ppa_raw_blk_t const dst = ppa_band_to_raw((uint32_t)display_h_res, (uint32_t)display_v_res, 0, SKY_ROWS);
+    ppa_fill_oper_config_t cfg = {
+        .out = {
+            .buffer         = (void*)pax_buf_get_pixels(fb),
+            .buffer_size    = pax_buf_get_size(fb),
+            .pic_w          = dst.pic_w,
+            .pic_h          = dst.pic_h,
+            .block_offset_x = dst.block_offset_x,
+            .block_offset_y = dst.block_offset_y,
+            .fill_cm        = PPA_FILL_COLOR_MODE_RGB565,
+        },
+        .fill_block_w   = dst.block_w,
+        .fill_block_h   = dst.block_h,
+        .fill_argb_color = {.a = 0xFF, .r = (SKY_PAX_COL >> 16) & 0xFF,
+                            .g = (SKY_PAX_COL >>  8) & 0xFF,
+                            .b =  SKY_PAX_COL        & 0xFF},
+        .mode      = PPA_TRANS_MODE_NON_BLOCKING,
+        .user_data = NULL,
+    };
+    esp_err_t err = ppa_do_fill(ppa_fill_client, &cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ppa_do_fill failed: %d", err);
+        return false;
+    }
+    ppa_pending_n++;
+    return true;
+}
+
+// Submit PPA SRM: copy the sun cache onto fb starting at the sun's
+// current top y in logical coordinates. For now sun_dy is always 0
+// (the sunset mechanic lands in Phase 5); pass the desired top y
+// directly to drive the SRM destination.
+static bool ppa_submit_sun(int dest_top_log_y) {
+    uint32_t const fb_raw_w   = (uint32_t)display_h_res;
+    uint32_t const fb_raw_h   = (uint32_t)display_v_res;
+    uint32_t const sun_raw_w  = SUN_CACHE_LOG_H;   // ROT_CW transpose
+    uint32_t const sun_raw_h  = SUN_CACHE_LOG_W;
+
+    ppa_raw_blk_t const src = ppa_band_to_raw(sun_raw_w, sun_raw_h, 0, SUN_CACHE_LOG_H);
+    ppa_raw_blk_t const dst = ppa_band_to_raw(fb_raw_w, fb_raw_h, dest_top_log_y, SUN_CACHE_LOG_H);
 
     ppa_srm_oper_config_t cfg = {
         .in = {
-            .buffer         = backdrop_pixels,
-            .pic_w          = (uint32_t)raw_w,
-            .pic_h          = (uint32_t)raw_h,
-            .block_w        = (uint32_t)sky_rows,
-            .block_h        = (uint32_t)raw_h,
-            .block_offset_x = (uint32_t)rx_start,
-            .block_offset_y = 0,
+            .buffer         = sun_pixels,
+            .pic_w          = src.pic_w,
+            .pic_h          = src.pic_h,
+            .block_w        = src.block_w,
+            .block_h        = src.block_h,
+            .block_offset_x = src.block_offset_x,
+            .block_offset_y = src.block_offset_y,
             .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
         },
         .out = {
-            .buffer         = (void*)pax_buf_get_pixels(&fb),
-            .buffer_size    = backdrop_size,
-            .pic_w          = (uint32_t)raw_w,
-            .pic_h          = (uint32_t)raw_h,
-            .block_offset_x = (uint32_t)rx_start,
-            .block_offset_y = 0,
+            .buffer         = (void*)pax_buf_get_pixels(fb),
+            .buffer_size    = pax_buf_get_size(fb),
+            .pic_w          = dst.pic_w,
+            .pic_h          = dst.pic_h,
+            .block_offset_x = dst.block_offset_x,
+            .block_offset_y = dst.block_offset_y,
             .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle    = PPA_SRM_ROTATION_ANGLE_0,
@@ -144,31 +262,108 @@ static bool ppa_submit_backdrop(void) {
         .mode              = PPA_TRANS_MODE_NON_BLOCKING,
         .user_data         = NULL,
     };
-    esp_err_t err = ppa_do_scale_rotate_mirror(ppa_client, &cfg);
+    esp_err_t err = ppa_do_scale_rotate_mirror(ppa_srm_client, &cfg);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "ppa_do_scale_rotate_mirror failed: %d", err);
+        ESP_LOGW(TAG, "ppa_do_scale_rotate_mirror(sun) failed: %d", err);
         return false;
     }
-    ppa_pending = true;
+    ppa_pending_n++;
     return true;
 }
 
-// Take the completion semaphore. Returns true once the PPA op has
-// finished (or was never submitted this frame). 50 ms timeout is
-// generous — PPA SRM of 257×800 RGB565 should complete in well
-// under 5 ms.
-static void ppa_wait_backdrop(void) {
-    if (!ppa_pending) return;
-    if (xSemaphoreTake(ppa_done_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGW(TAG, "PPA backdrop wait timed out");
+// Submit PPA BLEND: composite the mountain cache over fb with a
+// colour-key on pure green so the sky/sun shows through outside the
+// mountain silhouette. Mountains and wireframes and the horizon line
+// are all baked into the same cache.
+static bool ppa_submit_mountains(void) {
+    uint32_t const fb_raw_w   = (uint32_t)display_h_res;
+    uint32_t const fb_raw_h   = (uint32_t)display_v_res;
+    uint32_t const m_raw_w    = MOUNTAIN_CACHE_LOG_H;
+    uint32_t const m_raw_h    = MOUNTAIN_CACHE_LOG_W;
+
+    ppa_raw_blk_t const fg  = ppa_band_to_raw(m_raw_w, m_raw_h, 0, MOUNTAIN_CACHE_LOG_H);
+    ppa_raw_blk_t const dst = ppa_band_to_raw(fb_raw_w, fb_raw_h, MOUNTAIN_DEST_LOG_Y, MOUNTAIN_CACHE_LOG_H);
+
+    ppa_blend_oper_config_t cfg = {
+        .in_bg = {
+            .buffer         = (void*)pax_buf_get_pixels(fb),
+            .pic_w          = dst.pic_w,
+            .pic_h          = dst.pic_h,
+            .block_w        = dst.block_w,
+            .block_h        = dst.block_h,
+            .block_offset_x = dst.block_offset_x,
+            .block_offset_y = dst.block_offset_y,
+            .blend_cm       = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .in_fg = {
+            .buffer         = mountain_pixels,
+            .pic_w          = fg.pic_w,
+            .pic_h          = fg.pic_h,
+            .block_w        = fg.block_w,
+            .block_h        = fg.block_h,
+            .block_offset_x = fg.block_offset_x,
+            .block_offset_y = fg.block_offset_y,
+            .blend_cm       = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer         = (void*)pax_buf_get_pixels(fb),
+            .buffer_size    = pax_buf_get_size(fb),
+            .pic_w          = dst.pic_w,
+            .pic_h          = dst.pic_h,
+            .block_offset_x = dst.block_offset_x,
+            .block_offset_y = dst.block_offset_y,
+            .blend_cm       = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .bg_rgb_swap          = false,
+        .bg_byte_swap         = false,
+        .bg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+        .fg_rgb_swap          = false,
+        .fg_byte_swap         = false,
+        .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+
+        // Foreground colour-key: when a foreground pixel's expanded
+        // RGB888 value falls in [low, high], that pixel is treated as
+        // transparent — the background passes through. The window
+        // covers both possible 565→888 expansion modes (shift gives
+        // g=0xFC, replicate gives g=0xFF) so we don't have to know
+        // which the silicon uses.
+        .fg_ck_en             = true,
+        .fg_ck_rgb_low_thres  = {.r = 0x00, .g = 0xFC, .b = 0x00},
+        .fg_ck_rgb_high_thres = {.r = 0x00, .g = 0xFF, .b = 0x00},
+        .bg_ck_en             = false,
+        .ck_rgb_default_val   = {.r = 0, .g = 0, .b = 0},
+        .ck_reverse_bg2fg     = false,
+
+        .mode      = PPA_TRANS_MODE_NON_BLOCKING,
+        .user_data = NULL,
+    };
+    esp_err_t err = ppa_do_blend(ppa_blend_client, &cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ppa_do_blend(mountains) failed: %d", err);
+        return false;
     }
-    ppa_pending = false;
+    ppa_pending_n++;
+    return true;
 }
+
+// Wait for one pending PPA op to complete. Used to enforce strict
+// submission order between ops on different clients (the driver does
+// not guarantee FIFO across client boundaries — observed empirically
+// as sun/mountain z-fighting when SRM and BLEND submissions race).
+static void ppa_wait_one(void) {
+    if (ppa_pending_n <= 0) return;
+    if (xSemaphoreTake(ppa_done_sem, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGW(TAG, "PPA wait_one timed out (%d pending)", ppa_pending_n);
+        return;
+    }
+    ppa_pending_n--;
+}
+
 
 static void draw_centered(float cy, float h, pax_col_t color, char const* text) {
     pax_vec2f sz = rendertext_size(NULL, h, text);
-    float const x = (pax_buf_get_widthf(&fb) - sz.x) * 0.5f;
-    rendertext_draw(&fb, color, NULL, h, x, cy, text);
+    float const x = (pax_buf_get_widthf(fb) - sz.x) * 0.5f;
+    rendertext_draw(fb, color, NULL, h, x, cy, text);
 }
 
 static void draw_speed_readout(float speed_z) {
@@ -176,8 +371,8 @@ static void draw_speed_readout(float speed_z) {
     snprintf(buf, sizeof(buf), "v=%.1f", speed_z);
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
-    float const x      = pax_buf_get_widthf(&fb) - sz.x - 12.0f;
-    rendertext_draw(&fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f, buf);
+    float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
+    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f, buf);
 }
 
 static void draw_exit_hint(void) {
@@ -191,22 +386,22 @@ static void draw_exit_hint(void) {
         int         icon_h = icons_height(ICON_F1);
         float       icon_y = y + prompt_h / 2.0f - (float)icon_h / 2.0f;
         float       text_x = x_margin + (float)icon_w + gap;
-        icons_blit(&fb, ICON_F1, x_margin, icon_y);
-        rendertext_draw(&fb, 0xFFFFFFFF, NULL, prompt_h, text_x, y, prompt);
+        icons_blit(fb, ICON_F1, x_margin, icon_y);
+        rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, text_x, y, prompt);
     } else {
         char const* fallback = "F1 to exit";
-        rendertext_draw(&fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
+        rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
     }
 }
 
 static void draw_title_overlay(void) {
-    float const fbh = pax_buf_get_heightf(&fb);
+    float const fbh = pax_buf_get_heightf(fb);
     draw_centered(fbh * 0.30f, 64.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
     draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to start");
 }
 
 static void draw_game_over_overlay(void) {
-    float const fbh = pax_buf_get_heightf(&fb);
+    float const fbh = pax_buf_get_heightf(fb);
     draw_centered(fbh * 0.30f, 64.0f, 0xFFF71FF1u, "GAME OVER");
     draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to retry");
 }
@@ -303,75 +498,135 @@ void app_main(void) {
             break;
     }
 
-    pax_buf_init(&fb, NULL, display_h_res, display_v_res, format);
-    pax_buf_reversed(&fb, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
-    pax_buf_set_orientation(&fb, orientation);
+    // Allocate both framebuffers in PSRAM with PPA-cache-line
+    // alignment. Each is wrapped in its own pax_buf_t so PAX rasterises
+    // straight into the raw layout the LCD (and PPA) will read. The
+    // `fb` pointer tracks the current back buffer; `fb_front` tracks
+    // the buffer last handed to bsp_display_blit (= currently being
+    // scanned out by the LCD). The two swap each frame after blit +
+    // vsync — at any moment the CPU and PPA only touch `*fb`, never
+    // the one the LCD is reading.
+    fb_size = (size_t)display_h_res * display_v_res * 2u;
+    size_t const aligned_fb_size = (fb_size + PPA_PSRAM_CACHE_LINE - 1) & ~(size_t)(PPA_PSRAM_CACHE_LINE - 1);
+    fb_a_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, aligned_fb_size, MALLOC_CAP_SPIRAM);
+    fb_b_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, aligned_fb_size, MALLOC_CAP_SPIRAM);
+    if (fb_a_pixels == NULL || fb_b_pixels == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate framebuffers (a=%p b=%p)", fb_a_pixels, fb_b_pixels);
+        return;
+    }
+
+    pax_buf_init(&fb_a, fb_a_pixels, display_h_res, display_v_res, format);
+    pax_buf_reversed(&fb_a, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_set_orientation(&fb_a, orientation);
+
+    pax_buf_init(&fb_b, fb_b_pixels, display_h_res, display_v_res, format);
+    pax_buf_reversed(&fb_b, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_set_orientation(&fb_b, orientation);
 
     synthwave_init();
     icons_load();
     input_init();
     input_set_mode(INPUT_MODE_TITLE);
 
-    backdrop_size   = pax_buf_get_size(&fb);
-    // Cache-line-aligned PSRAM so PPA can DMA-read directly. On
-    // ESP32-P4 PSRAM is AXI-DMA-accessible without MALLOC_CAP_DMA
-    // (which historically maps to AHB-DMA-able internal SRAM and
-    // doesn't combine cleanly with MALLOC_CAP_SPIRAM). The PPA
-    // driver requires 128-byte alignment on external memory; size
-    // (768000 bytes at 480×800 RGB565) is already a multiple of 128
-    // so no padding is needed.
-    backdrop_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, backdrop_size,
-                                              MALLOC_CAP_SPIRAM);
-    if (backdrop_pixels == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate %u bytes for backdrop cache", (unsigned)backdrop_size);
+    // Layer caches: tight bounding boxes for the sun bands and the
+    // visible mountain band. Both live in PSRAM, both are aligned to
+    // the PPA cache-line requirement (128 B on ESP32-P4 external mem).
+    // Allocation size is rounded *up* to the cache line so the
+    // tail of the buffer doesn't share a line with neighbouring
+    // allocations — picture dimensions stay tight regardless.
+    size_t const aligned_sun_size      = (((size_t)SUN_CACHE_LOG_W      * SUN_CACHE_LOG_H      * 2u)
+                                          + PPA_PSRAM_CACHE_LINE - 1) & ~(size_t)(PPA_PSRAM_CACHE_LINE - 1);
+    size_t const aligned_mountain_size = (((size_t)MOUNTAIN_CACHE_LOG_W * MOUNTAIN_CACHE_LOG_H * 2u)
+                                          + PPA_PSRAM_CACHE_LINE - 1) & ~(size_t)(PPA_PSRAM_CACHE_LINE - 1);
+    sun_size        = aligned_sun_size;
+    mountain_size   = aligned_mountain_size;
+    sun_pixels      = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, sun_size,      MALLOC_CAP_SPIRAM);
+    mountain_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, mountain_size, MALLOC_CAP_SPIRAM);
+    if (sun_pixels == NULL || mountain_pixels == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate layer caches (sun=%p mount=%p)", sun_pixels, mountain_pixels);
         return;
     }
-    pax_buf_init(&backdrop_cache, backdrop_pixels, display_h_res, display_v_res, format);
-    pax_buf_reversed(&backdrop_cache, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
-    pax_buf_set_orientation(&backdrop_cache, orientation);
+    // pax_buf_init takes *raw* dimensions; the logical shape comes
+    // out via pax_buf_set_orientation. Under PAX_O_ROT_CW the raw
+    // layout is the logical layout transposed, so a logical
+    // 800-wide × 180-tall cache needs a 180-wide × 800-tall raw
+    // buffer. Passing the logical dims here would give PAX an
+    // 800-wide × 180-tall raw buffer, then ROT_CW would swap them
+    // back to 180 logical wide × 800 logical tall — every sun-band
+    // x coordinate (294..506) would then clip out of bounds.
+    pax_buf_init(&sun_cache, sun_pixels, SUN_CACHE_LOG_H, SUN_CACHE_LOG_W, format);
+    pax_buf_reversed(&sun_cache, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_set_orientation(&sun_cache, orientation);
 
-    synthwave_draw_sky(&backdrop_cache);
-    synthwave_draw_sun(&backdrop_cache, 0.0f);
-    synthwave_draw_mountains(&backdrop_cache);
-    synthwave_draw_wireframe(&backdrop_cache);
-    synthwave_draw_top_grid(&backdrop_cache);
+    pax_buf_init(&mountain_cache, mountain_pixels, MOUNTAIN_CACHE_LOG_H, MOUNTAIN_CACHE_LOG_W, format);
+    pax_buf_reversed(&mountain_cache, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_set_orientation(&mountain_cache, orientation);
 
-    // Backdrop is now fully rasterised by PAX into CPU cache; flush
-    // it to PSRAM so the PPA DMA engine sees the finished pixels.
-    // One-shot — the backdrop is never modified again, so subsequent
-    // frames need no further cache maintenance for the source.
-    esp_err_t cache_err = esp_cache_msync(backdrop_pixels, backdrop_size,
+    // Sun cache: sky purple in the gaps + sun bands at their canonical
+    // baseline (top band lands at cache y=0 thanks to dy = +4).
+    synthwave_draw_sky(&sun_cache);
+    synthwave_draw_sun(&sun_cache, SUN_RENDER_Y_BIAS);
+
+    // Mountain cache: green colour-key background + mountain silhouette
+    // + wireframes + horizon line, all shifted up by 94 so the top of
+    // the visible mountain band sits at cache y=0.
+    pax_background(&mountain_cache, MOUNTAIN_KEY_PAX_COL);
+    synthwave_draw_mountains(&mountain_cache, MOUNTAIN_RENDER_Y_BIAS);
+    synthwave_draw_wireframe(&mountain_cache, MOUNTAIN_RENDER_Y_BIAS);
+    synthwave_draw_top_grid(&mountain_cache, MOUNTAIN_RENDER_Y_BIAS);
+
+    // Flush both caches to PSRAM so PPA's DMA reads see the finished
+    // pixels. One-shot at boot — neither cache changes after this.
+    esp_err_t cache_err = esp_cache_msync(sun_pixels, sun_size,
                                           ESP_CACHE_MSYNC_FLAG_DIR_C2M |
                                           ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
     if (cache_err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_cache_msync(backdrop) failed: %d", cache_err);
+        ESP_LOGE(TAG, "esp_cache_msync(sun) failed: %d", cache_err);
+        return;
+    }
+    cache_err = esp_cache_msync(mountain_pixels, mountain_size,
+                                ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                                ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    if (cache_err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_cache_msync(mountain) failed: %d", cache_err);
         return;
     }
 
-    // PPA SRM client + per-frame completion semaphore. One pending
-    // transaction is enough because the main loop always waits on
-    // the previous frame's op before submitting the next.
-    ppa_done_sem = xSemaphoreCreateBinary();
+    // PPA clients — one per op type. The same callback feeds the
+    // shared counting semaphore for all three; the main loop submits
+    // FILL+SRM+BLEND in order each frame and takes the semaphore
+    // three times before the foreground render passes start.
+    ppa_done_sem = xSemaphoreCreateCounting(8, 0);
     if (ppa_done_sem == NULL) {
         ESP_LOGE(TAG, "Failed to create PPA semaphore");
         return;
     }
-    ppa_client_config_t const ppa_cfg = {
-        .oper_type             = PPA_OPERATION_SRM,
+    ppa_event_callbacks_t const ppa_cbs = {.on_trans_done = ppa_on_trans_done};
+    ppa_client_config_t   const srm_cfg = {
+          .oper_type             = PPA_OPERATION_SRM,
+          .max_pending_trans_num = 1,
+          .data_burst_length     = PPA_DATA_BURST_LENGTH_128,
+    };
+    ppa_client_config_t const blend_cfg = {
+        .oper_type             = PPA_OPERATION_BLEND,
         .max_pending_trans_num = 1,
         .data_burst_length     = PPA_DATA_BURST_LENGTH_128,
     };
-    esp_err_t ppa_err = ppa_register_client(&ppa_cfg, &ppa_client);
-    if (ppa_err != ESP_OK) {
-        ESP_LOGE(TAG, "ppa_register_client failed: %d", ppa_err);
+    ppa_client_config_t const fill_cfg = {
+        .oper_type             = PPA_OPERATION_FILL,
+        .max_pending_trans_num = 1,
+        .data_burst_length     = PPA_DATA_BURST_LENGTH_128,
+    };
+    if (ppa_register_client(&srm_cfg,   &ppa_srm_client)   != ESP_OK ||
+        ppa_register_client(&blend_cfg, &ppa_blend_client) != ESP_OK ||
+        ppa_register_client(&fill_cfg,  &ppa_fill_client)  != ESP_OK) {
+        ESP_LOGE(TAG, "ppa_register_client failed");
         return;
     }
-    ppa_event_callbacks_t const ppa_cbs = {
-        .on_trans_done = ppa_on_trans_done,
-    };
-    ppa_err = ppa_client_register_event_callbacks(ppa_client, &ppa_cbs);
-    if (ppa_err != ESP_OK) {
-        ESP_LOGE(TAG, "ppa_client_register_event_callbacks failed: %d", ppa_err);
+    if (ppa_client_register_event_callbacks(ppa_srm_client,   &ppa_cbs) != ESP_OK ||
+        ppa_client_register_event_callbacks(ppa_blend_client, &ppa_cbs) != ESP_OK ||
+        ppa_client_register_event_callbacks(ppa_fill_client,  &ppa_cbs) != ESP_OK) {
+        ESP_LOGE(TAG, "ppa_client_register_event_callbacks failed");
         return;
     }
 
@@ -468,25 +723,35 @@ void app_main(void) {
         }
         int64_t const t_after_phys = esp_timer_get_time();
 
-        // Background pass — kick the PPA SRM copy of the above-
-        // horizon region (sky/sun/mountains/wireframe/top-grid)
-        // asynchronously, then paint the floor area on the CPU
-        // while PPA runs in parallel. The PPA writes the upper
-        // rows of `fb` directly to PSRAM; CPU writes the floor
-        // rows. The two regions don't overlap, so no write race.
-        // Same work in every state.
-        ppa_submit_backdrop();
+        // Background pass — FILL → SRM → BLEND, explicitly serialised.
+        // PPA's dispatch order across different clients is *not*
+        // guaranteed to match submission order: empirically the SRM
+        // (sun) and BLEND (mountain) ops raced and the sun
+        // overwrote the mountains in some frames. Adding a wait
+        // between each submit pins the order at the cost of losing
+        // CPU/PPA parallelism for the first two ops. The CPU floor
+        // work still runs in parallel with the BLEND (the longest
+        // single op besides the CPU work itself), so the bg-phase
+        // wallclock is FILL + SRM + max(BLEND, floor).
+        //
+        // FILL is the per-frame guarantee that no stale obstacle
+        // pixel from the previous frame remains in the sky band.
+        ppa_submit_fill_sky();
+        ppa_wait_one();
+        ppa_submit_sun(0);                  // sun_dy = 0 until Phase 5
+        ppa_wait_one();
+        ppa_submit_mountains();
         int64_t const t_after_bgkick = esp_timer_get_time();
         float const floor_scroll = (app_state == APP_STATE_TITLE)      ? title_scroll_speed * dt
                                    : (app_state == APP_STATE_PLAYING)  ? game.ship_speed_z * dt
                                                                        : 0.0f;
         float const floor_cam_x  = (app_state == APP_STATE_TITLE) ? 0.0f : game.cam_x;
-        synthwave_step(&fb, floor_scroll, floor_cam_x);
+        synthwave_step(fb, floor_scroll, floor_cam_x);
         int64_t const t_after_bgflr = esp_timer_get_time();
-        // Block until PPA finishes — obstacles and HUD text can
-        // both write into the sky region, so the backdrop must be
-        // in place before any foreground rendering touches it.
-        ppa_wait_backdrop();
+        // Wait for the BLEND op to finish — obstacles and HUD text
+        // can both write into the sky region, so the backdrop must
+        // be in place before any foreground render touches it.
+        ppa_wait_one();
         int64_t const t_after_bg = esp_timer_get_time();
 
         // Foreground pass — state-dependent dynamic content.
@@ -507,10 +772,10 @@ void app_main(void) {
             }
 
             case APP_STATE_PLAYING: {
-                render_obstacles(&fb, &world, game.cam_x);
+                render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
-                game_draw_ship(&fb, &game);
-                game_draw_sparks(&fb, &game);
+                game_draw_ship(fb, &game);
+                game_draw_sparks(fb, &game);
                 draw_exit_hint();
                 draw_speed_readout(game.ship_speed_z);
 
@@ -525,9 +790,9 @@ void app_main(void) {
                 // World frozen at the crash. No sparks here — they
                 // are a per-frame radial flash that only reads as
                 // a scrape indication during PLAYING.
-                render_obstacles(&fb, &world, game.cam_x);
+                render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
-                game_draw_ship(&fb, &game);
+                game_draw_ship(fb, &game);
                 draw_game_over_overlay();
                 draw_exit_hint();
 
@@ -549,6 +814,15 @@ void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(16));
         }
         int64_t const t_after_vsync = esp_timer_get_time();
+
+        // Swap back/front: the buffer we just blitted is now the
+        // front (the LCD scans it out); the previous front becomes
+        // the new back (next frame's draw target). Both PPA and CPU
+        // only ever touch `*fb`, so the LCD's scan-out buffer is
+        // never modified mid-flight — no more tearing.
+        pax_buf_t* tmp = fb;
+        fb             = fb_front;
+        fb_front       = tmp;
 
         prof_input_us  += t_after_input  - t_loop_start;
         prof_phys_us   += t_after_phys   - t_after_input;

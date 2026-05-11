@@ -279,11 +279,11 @@ void synthwave_draw_sun(pax_buf_t* fb, float dy) {
     }
 }
 
-void synthwave_draw_mountains(pax_buf_t* fb) {
+void synthwave_draw_mountains(pax_buf_t* fb, float y_bias) {
     pax_vec2f scratch[MOUNTAINS_NPTS];
     for (size_t i = 0; i < MOUNTAINS_NPTS; i++) {
         scratch[i].x = mountains_pts[i].x;
-        scratch[i].y = mountains_pts[i].y - MOUNTAIN_LIFT_PX;
+        scratch[i].y = mountains_pts[i].y - MOUNTAIN_LIFT_PX + y_bias;
     }
     if (mountains_idx != NULL) {
         pax_draw_shape_triang(fb, 0xFF340575, MOUNTAINS_NPTS, scratch, mountains_ntri, mountains_idx);
@@ -292,15 +292,15 @@ void synthwave_draw_mountains(pax_buf_t* fb) {
     }
 }
 
-void synthwave_draw_wireframe(pax_buf_t* fb) {
+void synthwave_draw_wireframe(pax_buf_t* fb, float y_bias) {
     for (size_t i = 0; i < MOUNTAIN_LINE_COUNT; i++) {
-        pax_simple_line(fb, 0xFF31FBFB, mountain_lines[i].x0, mountain_lines[i].y0 - MOUNTAIN_LIFT_PX,
-                        mountain_lines[i].x1, mountain_lines[i].y1 - MOUNTAIN_LIFT_PX);
+        pax_simple_line(fb, 0xFF31FBFB, mountain_lines[i].x0, mountain_lines[i].y0 - MOUNTAIN_LIFT_PX + y_bias,
+                        mountain_lines[i].x1, mountain_lines[i].y1 - MOUNTAIN_LIFT_PX + y_bias);
     }
 }
 
-void synthwave_draw_top_grid(pax_buf_t* fb) {
-    float const horizon_y = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
+void synthwave_draw_top_grid(pax_buf_t* fb, float y_bias) {
+    float const horizon_y = GRID_HORIZON_Y_BASE - GRID_LIFT_PX + y_bias;
     pax_simple_line(fb, 0xFFF71FF1, 0, horizon_y, 800, horizon_y);
 }
 

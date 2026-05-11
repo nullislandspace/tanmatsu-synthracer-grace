@@ -17,14 +17,21 @@ void synthwave_draw_sky(pax_buf_t* fb);
 // lower half of the sun naturally.
 void synthwave_draw_sun(pax_buf_t* fb, float dy);
 
-// Draw the filled mountain silhouette.
-void synthwave_draw_mountains(pax_buf_t* fb);
+// Draw the filled mountain silhouette. `y_bias` shifts every vertex by
+// that many pixels — pass 0 for the canonical position, a negative
+// value to render into a tighter cache buffer whose top row maps to
+// the mountain band's top in the final framebuffer.
+void synthwave_draw_mountains(pax_buf_t* fb, float y_bias);
 
-// Draw the cyan wireframe overlay on the mountains.
-void synthwave_draw_wireframe(pax_buf_t* fb);
+// Draw the cyan wireframe overlay on the mountains. `y_bias` follows
+// the same convention as `synthwave_draw_mountains`.
+void synthwave_draw_wireframe(pax_buf_t* fb, float y_bias);
 
 // Draw the magenta horizon line at the top of the floor grid.
-void synthwave_draw_top_grid(pax_buf_t* fb);
+// `y_bias` shifts the line vertically — same convention as the
+// mountain functions, so the horizon stays aligned when rendering
+// into a cache buffer with a non-zero top offset.
+void synthwave_draw_top_grid(pax_buf_t* fb, float y_bias);
 
 // Draw one frame of the scrolling grid floor.
 //
