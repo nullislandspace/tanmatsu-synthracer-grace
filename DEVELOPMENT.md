@@ -10,7 +10,7 @@
 
 ## Current Status
 
-**Phase: Phase 3 complete; Phase 4 next**
+**Phase: Phase 4 complete; stage/area world generation landed early (parts of Phase 10); Phase 5 next**
 
 | Phase | Description | State |
 |-------|-------------|-------|
@@ -22,7 +22,7 @@
 | 5 | Sun timer + shadow + boost | ⬜ not started |
 | 6 | Tris + multiplier | ⬜ not started |
 | 7 | Audio + volume keys | ⬜ not started |
-| 8 | Daily + custom seed + persistence | ⬜ not started (MVP complete after this phase) |
+| 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts); custom-seed menu, NVS anti-cheat last-known-good-date, and `cs_best` ring still TODO. MVP complete after the rest of this phase. |
 | 9 | Pickups & attachments | ⬜ not started |
 | 10 | Regions | ⬜ not started |
 | 11 | Meta-progression UI | ⬜ not started |
@@ -134,9 +134,9 @@
   takes a float `scroll_pixels`, accumulates internally, and the main
   loop drives it from `scroll_px_per_world_unit *
   game.ship_speed_z * dt` — floor scroll and obstacle approach now
-  share the same forward-speed source. World seed is currently
-  derived from `esp_timer_get_time()`; Phase 8 will swap that for the
-  RTC-derived daily seed.
+  share the same forward-speed source. (World seed source has
+  since moved to the RTC-derived daily seed — see the
+  2026-05-11 entries below.)
 - 2026-05-07 — Phase 3 playfield rework after first on-device
   feedback (too many obstacles, too fast, faster than ground, no
   off-screen movement):
@@ -403,6 +403,96 @@
   tip when banking (an earlier version projected the level-
   flight position and the sparks visibly drifted off the
   rendered wing tip).
+- 2026-05-11 — **Stage / area world generation.** The world is
+  split into `WORLD_STAGE_LENGTH_Z = 720` world-z stages (~60 s
+  of forward travel at base speed), each followed by a
+  `WORLD_REST_LENGTH_Z = 120` rest area (~10 s, no obstacles
+  today; future home of Phase 5 bonus pickups). Inside a stage
+  the world picks **obstacle areas** uniformly at random from
+  the types whose `min_stage <= current stage`; an area spawns
+  obstacles according to its own internal cadence until its
+  length budget is consumed, then the world picks the next one.
+  When the stage budget is exhausted *after* the current area
+  finishes, the rest area runs and the stage counter ticks
+  over. Areas always run to completion — stages may overshoot
+  the budget slightly so the player never sees a clipped area.
+
+  Determinism comes from a per-stage PRNG mixed from
+  `(level_seed, stage_index)` via xorshift, derived freshly at
+  each stage transition. A given run-seed reproduces every
+  stage identically. Re-running the same seed → identical
+  worlds in every stage.
+
+  Initial area-type set, all min_stage 1 (random uniform draw):
+  * `AREA_TYPE_PIXEL_FIELD` — the current small-magenta cube
+    stream. Min length 2 screens (116 u), max 4 screens (232).
+    Spawn interval 12-22 u at stage 1; scales -5% per stage
+    above 1 to a 0.5× floor (reached at stage 10).
+  * `AREA_TYPE_BIG_BLOCKS` — 2× lateral / 2× depth cubes,
+    grey palette, same height. Sparser cadence (20-35 u
+    base) to keep the track navigable. Otherwise identical
+    to pixel field — collides as `OBSTACLE_KIND_CUBE` so
+    head-on rules and rendering are unchanged.
+  * `AREA_TYPE_GATEWAYS` — wall slabs spanning the full
+    playfield width with a single ship-sized opening. Each
+    gate is two `OBSTACLE_KIND_CUBE` slabs (left + right of
+    the gap), amber palette, so head-on into a wall slab is
+    fatal. Gap width lerps 3.0× → 1.5× ship width over
+    stages 1-10 (clamped past 10); inter-gate / lead-in /
+    trailing pad lerps 30 → 10 u over the same range. Gate
+    count per area is a uniform 1..5 draw.
+  * `AREA_TYPE_REST` — internal-only, can't be picked by the
+    area picker; only the stage rollover inserts it.
+
+  Layout structure inside a gateway area:
+  `[settle][pad][gate][pad][gate]...[gate][pad]`. The
+  trailing pad falls out naturally from the length budget
+  after the last gate spawn. Inter-gate gap is exactly `pad`
+  because consecutive spawns are at the same far-plane z, so
+  one pad of camera travel between events leaves one pad of
+  empty world between the gates.
+
+  Big-block and pixel-field cubes are tagged
+  `OBSTACLE_KIND_CUBE` (not a new kind) — the only difference
+  is dimensions and colour, which the renderer already pulls
+  per-entry. Gateway slabs are also `OBSTACLE_KIND_CUBE` so
+  head-on death works without a new collision case.
+
+  Trade-off: lazy generation (area emits the next obstacle
+  only when its spawn cursor crosses zero) rather than eager
+  pre-queueing. Lazy is simpler, memory-bounded, and matches
+  what the earlier `next_spawn_z` cadence already did. Means
+  re-spawning the same `(seed, stage)` produces an identical
+  area sequence but not an identical pool state at any given
+  *world-z* — only at each area boundary. Acceptable.
+- 2026-05-11 — **Gateway settling pad.** The gateway area
+  starts with a `GATEWAY_SETTLE_Z = WORLD_Z_FAR_SPAWN` (100 u)
+  hard wait before the alignment pad begins counting. The
+  previous area can spawn its last obstacle right at the area
+  boundary, placing it at camera-z=100; one full far-plane
+  distance of camera travel guarantees that obstacle has
+  crossed the camera before the first gate spawns. So the
+  entire gateway area — including its lead-in pad — is free
+  of drifting leftovers and the player only has the gate
+  itself to focus on. Reads visually as a deliberate breath
+  before the alignment puzzle. (Earlier version without
+  settle had a soft guarantee: pad alone, with the previous
+  area's last obstacle potentially visible during the
+  approach. User asked for the hard guarantee.)
+- 2026-05-11 — **Daily seed source landed** (partial Phase 8).
+  `derive_daily_seed()` in main.c builds the world seed from
+  the RTC date — `year*10000 + month*100 + day` — captured
+  once at app boot. Same calendar day → same seed → identical
+  world across run-restarts and app reboots; only rolls over
+  at local midnight. The seed is hoisted out of `start_run()`
+  so it's stable across die-and-retry inside one session.
+  Fallback for an unset RTC (year < 2024) is a fixed constant
+  `1` — the user can still play, just deterministically, until
+  the clock is set. Phase 8's NVS anti-cheat (last-known-good
+  date, prevents farming yesterday's seed) and custom-seed
+  menu are still TODO. Trade-off: the seed is captured at
+  boot, so playing across midnight keeps the old seed until
+  app restart. Deliberate — no surprise mid-run.
 
 ---
 
@@ -528,26 +618,28 @@ the function makes it explicit and lets us animate the sun.
     cam_z wrap window is `LANE_L * DRAW_EVERY` so the surviving
     set is continuous across wraps.
 
-### `world.c` — daily seed, regions, content streams
+### `world.c` — daily seed, stages, areas, content streams
 
-- `world_init(uint32_t daily_seed)` — seeds an xorshift32 PRNG state; chooses
-  region order/parameters for the day; immediately fills the side
-  walls so they're visible on the first frame.
-- `world_advance(world_t*, float dt, float ship_speed)` — moves the
-  camera-z forward; despawns obstacles whose *back edge* has crossed
-  the near threshold; tops up the side-wall cursors so each side
-  remains a continuous chain of segments out to the far spawn plane;
-  spawns dynamic obstacles on the randomized cadence.
-- Obstacles stored in a fixed pool (128 entries) of
-  `{ kind, x, z, half_w, half_d, height, colors, active }`. The
-  `kind` enum (`obstacle_kind_t`) tags each entry as CUBE, WALL,
-  one of the pickup variants, or RAMP. Collision and render
-  dispatch on it — adding a new obstacle type means one enum
-  value + a case in each switch, no plumbing changes. Each entry
-  also carries its own dimensions and four-colour palette so the
-  renderer treats every entry uniformly (today: 3D cube draw for
-  CUBE + WALL; pickups/ramps will get their own draw functions
-  when those phases land).
+- `world_init(world_state_t*, uint32_t level_seed)` — stores the run
+  seed, clears the obstacle pool, fills the side walls so they're
+  visible on the first frame, and starts stage 1.
+- `world_advance(world_state_t*, float dt, float ship_speed)` —
+  advances the world by `dz = speed * dt`. Each frame: drift all
+  active obstacles toward the camera, despawn those whose *back
+  edge* has crossed the near threshold, top up the side-wall
+  cursors, then tick the active area through `area_tick` and
+  transition (next area / rest / next stage) when the active area
+  reports done.
+- Obstacles stored in a fixed pool of `WORLD_OBSTACLE_POOL_SIZE`
+  (= 128) entries of
+  `{ kind, x, z, half_w, half_d, height, four-colour palette,
+  active }`. The `obstacle_kind_t` enum tags each entry as `CUBE`,
+  `WALL`, one of the pickup variants, or `RAMP`. Collision (and
+  later render) dispatches on it — adding a new obstacle type
+  means one enum value + a case in each switch. The renderer
+  treats every entry uniformly (today: 3D cube draw for CUBE +
+  WALL; pickups/ramps will get their own draw functions when
+  those phases land).
 - Side walls are stored as regular obstacles so a single AABB
   collision pass covers both the dynamic stream and the track
   edges. Segment length = `FLOOR_LANE_L * FLOOR_HSTRIPE_DRAW_EVERY`
@@ -558,27 +650,89 @@ the function makes it explicit and lets us animate the sun.
   should spawn; each frame the cursor slides forward by `dz` and
   any time it dips inside `WORLD_Z_FAR_SPAWN` we drop a fresh
   segment in.
-- Pickup pool (32) of `{ x, y, z, kind }` — kinds: `TRI`, `BOOST`, `JUMP`,
-  `SHIELD`, `CHECKPOINT`.
-- 7 regions per run (mirrors the original). Each region is ~30s of game
-  time; difficulty/density/mutators are looked up from a static per-region
-  table indexed by region number, then perturbed with the PRNG.
+
+- **Stage / area state machine.** The world is split into
+  fixed-length stages of `WORLD_STAGE_LENGTH_Z` (= 720 u, ~60 s
+  at base speed) followed by `WORLD_REST_LENGTH_Z` (= 120 u, ~10
+  s) rest areas. Inside a stage the world picks **obstacle
+  areas** uniformly at random from the types whose
+  `min_stage <= current stage`; the active area's generator
+  populates the world until the area's length budget is
+  consumed, then the next area is picked. When the stage budget
+  is exhausted *after* the current area finishes, the rest area
+  inserts and the stage counter ticks over. Areas always run to
+  completion — stages may overshoot the budget slightly so the
+  player never sees a clipped area.
+
+- **Per-stage PRNG.** `stage_prng = mix_stage_seed(level_seed,
+  stage)` is re-derived at every stage transition (xorshift
+  rounds over the golden-ratio-mixed combination). A run-seed
+  reproduces every stage's content identically. The `level_seed`
+  field on `world_state_t` is preserved across stage rollovers;
+  `stage_prng` is the working state consumed by area picks,
+  obstacle x positions, gate counts, etc.
+
+- **Area types** (all `min_stage = 1` today; new types add an
+  entry to `pick_area_type` gated by their `min_stage`):
+  * `AREA_TYPE_PIXEL_FIELD` — the original small-magenta cube
+    stream. Length budget 116..232 u (2..4 screens). Spawn
+    interval 12-22 u at stage 1; scaled by `stage_interval_scale`
+    (-5%/stage down to a 0.5× floor reached at stage 10).
+  * `AREA_TYPE_BIG_BLOCKS` — 2× lateral / 2× depth cubes, grey
+    palette, same height. Sparser cadence (20-35 u base, same
+    per-stage scale). Tagged `OBSTACLE_KIND_CUBE`; the renderer
+    and collision treat them identically to pixel cubes — only
+    dimensions and palette differ.
+  * `AREA_TYPE_GATEWAYS` — wall slabs spanning the playfield
+    width with a single ship-sized opening. Each gate is two
+    `OBSTACLE_KIND_CUBE` slabs flanking the gap (amber palette);
+    head-on into a slab is fatal exactly like striking a pixel
+    cube. Gap width `lerp_by_stage(stage, 3*ship_w, 1.5*ship_w)`,
+    clamped past stage 10. Inter-gate / lead-in / trailing pad
+    `lerp_by_stage(stage, 30, 10)`. Gate count uniform 1..5.
+    Layout: `[settle][pad][gate][pad][gate]...[gate][pad]` —
+    total length `settle + (n+1)*pad + n*thick`. The `settle =
+    WORLD_Z_FAR_SPAWN` (= 100 u) prefix guarantees any
+    previous-area obstacle has crossed the camera before the
+    first gate's alignment lead-in begins counting.
+  * `AREA_TYPE_REST` — internal-only, not pickable by
+    `pick_area_type`; inserted only on stage rollover. Today
+    empty; Phase 5 will sprinkle bonus pickups here on a
+    separate cadence.
+
 - **Seed sources** (priority order, picked at title screen):
-  1. **Daily seed** (default): `seed = year*10000 + month*100 + day` from
-     `time(NULL)` / `localtime()`. If the year is < 2024 the RTC is unset
-     — fall back to a stored "last known good" date in NVS so the player
-     can't farm yesterday's seed by rolling the clock backwards.
-  2. **Custom seed** (practice mode): player enters a seed on the title
-     screen via a "Custom Seed…" menu item. Used for replaying the same
-     world repeatedly. **No meta-progression is awarded in custom-seed
-     runs** (no challenge points, no level-up, no unlock toward
-     attachments) — but the highscore *for that specific seed* is tracked
-     in a small ring of recent custom-seed best scores. This prevents the
-     player from gaming the meta-progression by replaying easy seeds, but
-     still rewards mastery.
-- The seed mode is set by `world_init(seed, is_custom)`; downstream
-  modules (notably `meta.c`) check the `is_custom` flag before awarding
-  challenge progress.
+  1. **Daily seed** (default, **landed**): `seed = year*10000 +
+     month*100 + day` from `time(NULL)` / `localtime_r()`,
+     captured once at app boot in `derive_daily_seed()`. If the
+     year is < 2024 the RTC is unset — Phase 8 will fall back
+     to a stored "last known good" date in NVS so the player
+     can't farm yesterday's seed by rolling the clock back;
+     until then the unset-RTC fallback is the fixed constant
+     `1`.
+  2. **Custom seed** (practice mode, **TODO**): player enters
+     a seed on the title screen via a "Custom Seed…" menu
+     item. Used for replaying the same world repeatedly. **No
+     meta-progression is awarded in custom-seed runs** (no
+     challenge points, no level-up, no unlock toward
+     attachments) — but the highscore *for that specific
+     seed* is tracked in a small ring of recent custom-seed
+     best scores. This prevents the player from gaming the
+     meta-progression by replaying easy seeds, but still
+     rewards mastery.
+- The seed mode is set by `world_init(seed)` plus a future
+  `is_custom` flag; downstream modules (notably `meta.c`)
+  check the flag before awarding challenge progress.
+
+- **Pickup pool** — Phase 9 will extend the existing
+  obstacle pool with `OBSTACLE_KIND_PICKUP_*` entries (stubs
+  already in the enum) rather than maintaining a parallel
+  pool. Same dimensions / colour fields, kind-dispatched
+  collision response.
+
+- **Regions** (Phase 10) — 7 regions per run, ~30 s each.
+  The current stage system is an early Phase 10 stand-in;
+  full regions will overlay per-region area-type weights,
+  mutators, and palette shifts on top of the stage machinery.
 
 ### `game.c` — gameplay update
 

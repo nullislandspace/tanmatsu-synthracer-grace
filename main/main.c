@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "bsp/device.h"
 #include "bsp/display.h"
@@ -99,10 +100,37 @@ static void draw_game_over_overlay(void) {
     draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to retry");
 }
 
-static void start_run(game_state_t* game, world_state_t* world) {
+// Build the daily seed from the RTC date — `year*10000 + month*100
+// + day`. Same date → same seed → identical world, regardless of
+// how many times the player restarts the run or the app. The seed
+// only ticks over when the calendar day rolls over. If the RTC is
+// unset (year < 2024) we fall back to a fixed constant so the run
+// is still reproducible within a boot; Phase 8's NVS anti-cheat
+// will replace that fallback with a stored last-known-good date.
+//
+// Phase 8 will also add an opt-in custom-seed menu on the title
+// screen; that path bypasses this function and passes its own seed
+// into start_run().
+static uint32_t derive_daily_seed(void) {
+    time_t    now = time(NULL);
+    struct tm lt  = {0};
+    localtime_r(&now, &lt);
+    int const year = lt.tm_year + 1900;
+    if (year < 2024) {
+        return 1u;
+    }
+    int const month = lt.tm_mon + 1;
+    int const day   = lt.tm_mday;
+    uint32_t  seed  = (uint32_t)year * 10000u + (uint32_t)month * 100u + (uint32_t)day;
+    return seed ? seed : 1u;
+}
+
+// Reset run state and (re-)seed the world. The seed is supplied by
+// the caller so the same world replays exactly on retry. The caller
+// owns the seed source — daily seed today, daily + custom seed once
+// Phase 8 lands.
+static void start_run(game_state_t* game, world_state_t* world, uint32_t seed) {
     game_init(game);
-    // Phase 8 will replace this with the RTC-derived daily seed.
-    uint32_t const seed = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu) | 1u;
     world_init(world, seed);
     input_set_mode(INPUT_MODE_PLAYING);
 }
@@ -205,6 +233,13 @@ void app_main(void) {
     static game_state_t  game;
     static world_state_t world;
     game_init(&game);
+
+    // Daily seed. Derived from today's calendar date so every run
+    // — across restarts, across app reboots — uses the same world
+    // layout until the next midnight rollover. Phase 8 will add an
+    // opt-in custom-seed menu and the anti-cheat fallback for an
+    // unset RTC.
+    uint32_t const run_seed = derive_daily_seed();
     // The title screen scrolls the floor with a fake speed so the
     // scene reads as "live" instead of static. The world isn't
     // advanced (no obstacles spawn yet) — start_run() initializes
@@ -250,7 +285,7 @@ void app_main(void) {
                 draw_title_overlay();
                 draw_exit_hint();
                 if (pickup_pressed) {
-                    start_run(&game, &world);
+                    start_run(&game, &world, run_seed);
                     app_state = APP_STATE_PLAYING;
                 }
                 break;
@@ -297,7 +332,7 @@ void app_main(void) {
                 draw_exit_hint();
 
                 if (pickup_pressed) {
-                    start_run(&game, &world);
+                    start_run(&game, &world, run_seed);
                     app_state = APP_STATE_PLAYING;
                 }
                 break;
