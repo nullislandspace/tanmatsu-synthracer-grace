@@ -30,24 +30,27 @@
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
 
 **Open questions / parking lot:**
-- **Framerate** — landed the backdrop cache (see decisions log
-  2026-05-07). On-device measurement still pending. If still slow,
-  next candidates: Hershey direct text per-pixel cost, the wide grid
-  perspective line set (~78 lines per frame), and the per-frame
-  full-FB memcpy itself (1.15 MB at 60 fps = 69 MB/s of PSRAM
-  bandwidth — measurable but should be fine).
-- **PPA / 2D-DMA / double-buffer** — checked: PPA HAL/LL headers are
-  present but no high-level `driver/ppa.h` symbols in fakelib;
-  `dma2d_*` symbols ARE in fakelib (PPA's transport, usable as a
-  hardware memcpy with non-trivial setup); `bsp_display_blit` takes
-  the user's buffer pointer with no swap API exposed. **Decision**:
-  punt on hardware accel for now. If the plain-memcpy backdrop ever
-  becomes the bottleneck, add high-level PPA bindings to graceloader
-  before touching the app — keeps the app code simple.
+- **Framerate** — first on-device measurement landed
+  2026-05-11. Baseline at RGB888 was 9.5 FPS gameplay / 17.6 FPS
+  title; RGB565 switch brought that to 11.7 FPS / ~22 FPS. Per-phase
+  breakdown + remaining work in the 2026-05-11 "Performance baseline"
+  decisions-log entry. Next planned win: PPA-async backdrop copy
+  parallel with floor drawing; then a direct-RGB565 wireframe-line
+  rasterizer for `render_obstacles`.
+- **PPA / 2D-DMA / double-buffer** — re-evaluated 2026-05-11.
+  `driver/ppa.h` symbols (`ppa_register_client`,
+  `ppa_do_scale_rotate_mirror`, `ppa_do_blend`, `ppa_do_fill`) are
+  now exported by fakelib (PPA support landed in graceloader
+  upstream — see commit `13452dc Add PPA symbols` rebased in on
+  2026-05-11). Decision flipped: PPA is the next optimization to
+  implement, see "Performance baseline" decisions-log entry for
+  the pipeline plan.
 - **Phase 5 sun re-cache** — when the sunset mechanic lands, the
   cached sun position becomes stale as `sun_dy` changes. Plan: track
   the dy used to render the cache, re-render only when the new dy
   differs by more than ~2 px. Most frames stay on the memcpy path.
+  Once PPA lands the same gating applies (re-render the cached sun
+  band, but the per-frame PPA SRM op carries it onward unchanged).
 
 **Conventions / decisions log** (append-only as new decisions are made):
 - 2026-05-07 — Project bootstrapped from `tanmatsu-template-grace`.
@@ -124,7 +127,11 @@
   fills + ~200 wireframe lines. The cast-away-const on
   `pax_buf_get_pixels` is intentional — pax's buffer is logically
   mutable, the const just communicates "don't muck with this via
-  arbitrary writes". The memcpy is ~1.15 MB per frame on RGB888.
+  arbitrary writes". The memcpy was ~1.15 MB / frame on RGB888;
+  after the 2026-05-11 RGB565 switch it is 768 KB / frame, and the
+  PPA-async plan in the same decisions-log entry will replace this
+  CPU memcpy with a non-blocking PPA SRM op covering only the
+  above-horizon region.
 - 2026-05-07 — Phase 3 implementation landed: `world.{c,h}` (fixed
   pool of 64 obstacles, xorshift32 PRNG, randomized z-spawn cadence
   in world units so spawn density is speed-independent) and
@@ -536,6 +543,189 @@
   the swept-z + kinematic test is the new geometry inside
   the CUBE case. WALL still scrape-only, pickup/ramp stubs
   still `continue`.
+
+- 2026-05-11 — **Performance baseline + RGB565 switch.** First
+  on-device frametime measurement. Added per-phase
+  instrumentation in `main.c`'s loop using
+  `esp_timer_get_time()`, summing microseconds over ~1 s
+  windows and logging FPS + phase breakdown. Phases: `input`
+  (event drain + polled steering), `phys`
+  (game_step/collide/after/world_advance, only in PLAYING),
+  `bgcpy` (full-FB memcpy from backdrop_cache to fb),
+  `bgflr` (synthwave_step — floor rect fill + lane lines +
+  horizontal stripes), `obs` (render_obstacles — 3D cubes +
+  wireframes), `fgrest` (ship + sparks + HUD text + state
+  overlays), `blit` (bsp_display_blit DMA queue),
+  `vsync` (semaphore wait — idle headroom).
+
+  **Baseline (RGB888, 800×480, 1.15 MB framebuffer):**
+
+  | Phase | Title ms | Gameplay ms |
+  |---|---|---|
+  | input  | 0.05 | 0.07 |
+  | phys   | 0.00 | 0.12 |
+  | bgcpy  | 27.7 | 27.7 |
+  | bgflr  | 26.7 | 26.7 |
+  | obs    | ~1.6 | 47.0 |
+  | fgrest | (in obs+rest) | 4.2 |
+  | blit   | 0.78 | 0.74 |
+  | vsync  | 0    | 0    |
+  | **FPS**| **17.6** | **9.5** |
+
+  Zero vsync headroom means the loop is fully CPU-bound — frame
+  time exceeds the 16.67 ms 60 Hz budget by ~5×.
+
+  Root-cause findings:
+  - `bgcpy=27.7ms` — 1.15 MB PSRAM→PSRAM memcpy. PSRAM
+    bandwidth bound (~41 MB/s effective for read+write).
+  - `bgflr=26.7ms` — `synthwave_step` does three things every
+    frame: (a) `pax_simple_rect(0xFF5D0B8B)` fill of the floor
+    base — 800 × ~224 px of 24bpp writes to PSRAM, ~10–12 ms
+    alone, (b) ~108 vertical lane lines (kx range derived from
+    far-plane half-width ±53 world units, mostly converging at
+    the vanishing point — many sub-pixel-wide segments and
+    off-screen draws clipped after edge-walking), (c) ~10
+    horizontal stripes.
+  - `obs=47ms` (gameplay) — ~80 active obstacles × (6 face
+    triangles + 12 wireframe lines) ≈ 480 triangles + ~1000
+    lines. Lines go through `pax_simple_line`'s per-pixel
+    setter (not the range-setter), so each wireframe pixel pays
+    a function-pointer call.
+  - PAX itself is **not** doing per-pixel format dispatch.
+    `pax_get_setter()` is called once per primitive and returns
+    a specialized 16/24-bpp setter; format conversion of the
+    `pax_col_t` happens once per primitive, not per pixel.
+
+  **First optimization: RGB565 framebuffer.** Single-line
+  change at `main.c:149` —
+  `requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565`.
+  Format dispatch at `main.c:165–175` already had the RGB565
+  branch wired up; `pax_buf_get_size` follows automatically;
+  `pax_buf_reversed` handles RGB565 endianness from
+  `display_data_endian`. Backdrop cache built fresh at boot in
+  the new format, so sun/mountain/wireframe rendering goes
+  straight into RGB565 with no extra source-code changes.
+
+  **After RGB565:**
+
+  | Phase | RGB888 | RGB565 | Δ |
+  |---|---|---|---|
+  | bgcpy  | 27.7 | 17.1 | -38% |
+  | bgflr  | 26.7 | 17.5 | -34% |
+  | obs    | 47.0 | 46.0 | ~0% |
+  | fgrest | 4.2  | 3.85 | -8% |
+  | **FPS gameplay** | **9.5** | **11.8** | **+24%** |
+
+  bgcpy + bgflr gains track halved bytes (PSRAM bandwidth and
+  16-bit halfword stores vs. misaligned 3-byte stores). `obs`
+  barely moved, which confirms that triangle/line rendering in
+  the obstacle path is dispatch-overhead-bound, not
+  pixel-write-bound — RGB565 doesn't help here because the
+  per-line function-pointer call cost dominates over the actual
+  store width.
+
+  **Hershey direct renderer made format-aware.** The original
+  `hershey_direct_set_pixel` in `main/hershey_font_direct.h`
+  hardcoded a `* 3` byte stride and a 3-byte write pattern,
+  which corrupted text rendering after the RGB565 switch.
+  Refactored to use a `hershey_native_color_t` struct that
+  carries both the RGB888 byte triple and a pre-packed RGB565
+  halfword (byte-swapped if `reverse_endianness`). The pack is
+  done **once per string** in `hershey_direct_draw_string`, not
+  per pixel; `set_pixel` branches on `buf->type` —
+  `PAX_BUF_16_565RGB` writes a uint16_t halfword to
+  `buf_16bpp`, otherwise writes 3 bytes to `buf_8bpp`. The
+  string-level pre-pack means the inner Bresenham loop pays
+  one halfword store per pixel — slightly faster than the old
+  RGB888 path even on 24bpp buffers.
+
+- 2026-05-11 — **PPA pipeline plan for backdrop (next step).**
+  PPA (Pixel Processing Accelerator) is the ESP32-P4 2D DMA
+  engine, exposed via `driver/ppa.h`: three ops (`SRM`
+  scale/rotate/mirror, `BLEND` alpha or color-key compositing,
+  `FILL` solid-rect fill). Symbols now exported by fakelib
+  after the upstream rebase. PPA cannot rasterize triangles or
+  lines — the obstacle pipeline stays on CPU — but it is well
+  suited to bulk framebuffer copies and rectangular fills.
+
+  **Goal**: replace the per-frame `memcpy(fb, backdrop_cache, ...)`
+  with an async PPA SRM op that copies only the
+  *above-horizon* region (logical y ∈ [0, 257), the sky / sun /
+  mountains / wireframe / top-grid band). The floor area
+  (y ≥ 257) is no longer copied — `synthwave_step` already
+  rewrites every pixel below the horizon with a rect fill +
+  lane lines, so the read+write traffic for the floor region
+  is pure waste. Per-frame bandwidth comparison:
+
+  | Approach | Floor traffic / frame | Notes |
+  |---|---|---|
+  | Current (memcpy + rect overpaint) | 540 KB read + 1080 KB write = 1.6 MB | 540 KB read is discarded |
+  | Bake floor into backdrop cache | 540 KB read + 540 KB write = 1.1 MB | simpler, no separate fill |
+  | PPA SRM above-horizon + CPU floor | 0 read + 540 KB write = 540 KB | least traffic; needs orientation-aware rect |
+
+  The "skip the floor in the copy" path is the bandwidth
+  optimum because the read side of the floor area is genuinely
+  wasted work. The Tanmatsu's display is mounted rotated 270°
+  (`PAX_O_ROT_CW`), so the above-horizon *logical* rectangle
+  is a vertical strip in raw memory — partial-memcpy is
+  awkward, but PPA SRM accepts logical-coordinate block configs
+  with picture and offset fields, so it handles the rotation
+  transparently. Tanmatsu raw dims with the LCD rotated:
+  raw_w=480, raw_h=800. Above-horizon raw rect: rx ∈ [223, 479]
+  (257 columns), ry ∈ [0, 800).
+
+  **Parallelism**: PPA is a separate hardware engine. With
+  `PPA_TRANS_MODE_NON_BLOCKING`, the CPU returns from
+  `ppa_do_scale_rotate_mirror` immediately and can paint the
+  floor while the PPA DMAs the sky. The two writers do not
+  overlap in the framebuffer, so no write-write race. A binary
+  semaphore given from the `on_trans_done` callback is taken
+  before `render_obstacles` (obstacles can extend above the
+  horizon, so the sky must be in place by then). Expected:
+  `bg` total wallclock = max(PPA, CPU floor) ≈ 12–15 ms
+  instead of the current 17 + 17 = 34 ms.
+
+  **Cache coherency**: PPA reads/writes PSRAM via DMA,
+  bypassing the CPU's L1/L2 cache. Two coherency points to
+  handle:
+  1. **Stale source** — CPU populates `backdrop_cache` at boot
+     via PAX; the writes sit in cache until eventual
+     writeback. Solution: one `esp_cache_msync(...,
+     ESP_CACHE_MSYNC_FLAG_DIR_C2M)` writeback after the
+     backdrop is fully drawn, before the first PPA op.
+  2. **Stale destination** — PPA writes the fb's above-horizon
+     region directly to PSRAM; CPU cache lines for that region
+     may be stale. The CPU does not read the fb except via
+     `bsp_display_blit` (which goes through DMA from PSRAM and
+     is unaffected). If we ever read fb from CPU, add an
+     invalidate on the PPA-written region.
+
+  **Alignment**: PPA requires source and destination pointers
+  + sizes aligned to L1 / L2 cache line size (128 B on
+  ESP32-P4 PSRAM). The BSP-allocated fb is already
+  DMA-capable. The backdrop_cache must switch from
+  `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)` to
+  `heap_caps_aligned_alloc(128, ..., MALLOC_CAP_SPIRAM |
+  MALLOC_CAP_DMA)`. Current size 480 × 800 × 2 = 768000 bytes
+  is already a multiple of 128, so no padding needed.
+
+  **Why this is the right next step before custom rasterizers**:
+  PPA hinges entirely on the screen format being something the
+  PPA engine supports natively — RGB565 / RGB888 / ARGB8888 —
+  which is why the RGB565 switch had to land first. Now that
+  the format is settled, the backdrop pipeline gets the biggest
+  remaining single win without touching any drawing code.
+
+  Pending after PPA lands:
+  - Direct-565 line rasterizer for obstacle wireframes (the
+    47 ms `obs` cost is dominated by `pax_simple_line`'s
+    per-pixel function-pointer dispatch over ~1000 lines per
+    frame).
+  - Tighten the vertical-lane iteration in `synthwave_step`
+    (`kx_min..kx_max` currently spans ±half_w_world_at_far ≈
+    ±53, producing ~108 line draws when only ~25 have
+    meaningful visible length). Defer until after PPA + line
+    rasterizer to see what's left.
 
 ---
 
@@ -969,7 +1159,9 @@ the function makes it explicit and lets us animate the sun.
 
 Replace the current event-printing demo with:
 
-1. NVS init, BSP init (RGB888 framebuffer, num_fbs=1 — same as template).
+1. NVS init, BSP init (RGB565 framebuffer since 2026-05-11 — see
+   the "Performance baseline" decisions-log entry; num_fbs=1 — same
+   as template).
 2. `pax_buf_init` + orientation (template code already handles this).
 3. Tearing-effect / vsync semaphore setup
    (`bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING)` and
