@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "magicnumbers.h"
+
 // Phase 3+: a stream of cuboid obstacles approaches the camera at
 // the ship's forward speed, plus a continuous wall on each side of
 // the track.
@@ -24,10 +26,13 @@
 // plus headroom for dynamic obstacles and future pickups.
 #define WORLD_OBSTACLE_POOL_SIZE 128
 
-// Stage / rest budgets, world-z units. At SHIP_BASE_SPEED_Z = 12 u/s
-// these correspond to ~60 s of stage play and ~10 s of rest between.
-#define WORLD_STAGE_LENGTH_Z     720.0f
-#define WORLD_REST_LENGTH_Z      120.0f
+// Stage / rest budgets, world-z units. Derived from the tunable
+// `GAME_STAGE_SECONDS` / `GAME_REST_SECONDS` × `GAMEPLAY_CRUISE_SPEED`
+// in magicnumbers.h. With the current defaults (60s / 10s at cruise
+// speed 12 u/s) these come out to 720 / 120 — unchanged numerically
+// from the old hardcoded values, but now retunable from one place.
+#define WORLD_STAGE_LENGTH_Z     GAME_STAGE_LENGTH_Z
+#define WORLD_REST_LENGTH_Z      GAME_REST_LENGTH_Z
 
 // What an obstacle pool entry actually *is* — drives collision
 // response and (later) custom rendering. Today only CUBE and WALL

@@ -19,7 +19,7 @@
 | 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
 | 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles share one pinhole projection; obstacles render as 3D cubes with per-face culling and near-plane clipping; continuous side walls along the track edges, all stored in the same obstacle pool ready for collision in Phase 4 |
 | 4 | Collision + game over | ✅ TITLE → PLAYING → GAME_OVER state machine; AABB collision against the unified obstacle pool with a boundary-obstacle position rule (scrape on side walls, head-on on any playfield obstacle ahead); push-out resolution + continuous scrape-floor/recovery speed dynamics; per-frame red radial-burst sparks at the banked wingtip while scraping |
-| 5 | Sun timer + shadow + boost | ⬜ not started |
+| 5 | Sun timer + shadow + boost | 🟡 partial — sun, shadows, stall, full-sunset landed; boost pickups still TODO |
 | 6 | Tris + multiplier | ⬜ not started |
 | 7 | Audio + volume keys | ⬜ not started |
 | 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts); custom-seed menu, NVS anti-cheat last-known-good-date, and `cs_best` ring still TODO. MVP complete after the rest of this phase. |
@@ -30,18 +30,13 @@
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
 
 **Open questions / parking lot:**
-- **Framerate** — currently **13.2 FPS gameplay** after the
-  RGB565 / PPA Option A / double-buffer / lane-narrow round
-  landed 2026-05-11. See the "Performance scoreboard end-of-day"
-  decisions-log entry. Next planned win: direct-RGB565 Bresenham
-  for the ~1000 obstacle wireframe lines per frame; `obs` is now
-  61% of the frame and untouched by any of the optimisations so far.
-- **PPA Option A 5 ms recovery** (parked) — two ways to claw back
-  the ~5 ms penalty from explicit SRM/BLEND serialisation:
-  (a) enlarge `sun_cache` to cover the full 800×257 sky region
-  with sky purple in the gaps, dropping the FILL op; (b) PPA
-  callback chaining (submit next op from ISR). Defer until after
-  the obstacle line rasterizer.
+- **Framerate** — currently **28.3 FPS gameplay** after the
+  full optimisation round landed 2026-05-11 (RGB565 + PPA
+  Option A 3-op + double-buffer + narrowed lane lines +
+  direct_565 line and triangle rasterizers). 3× the original
+  9.5 FPS baseline. See the "Future FPS improvements" section
+  for the catalogue of parked optimisations available if a
+  future feature pushes the frame budget over.
 - **Phase 5 sun movement** — the pipeline is ready: the SRM
   destination `block_offset_y` becomes a function of `sun_dy`;
   the FILL handles the newly-exposed sky above the sun; the
@@ -847,13 +842,18 @@
   `FILL + SRM + max(BLEND, CPU_floor) ≈ 2 + 3 + 22 ≈ 27 ms`.
   Penalty vs. the broken-but-parallel previous attempt: ~5 ms.
 
-  Two follow-ups parked in case we need the 5 ms back:
-  - Enlarge `sun_cache` to cover the full 800×257 sky region
-    (sky purple in all gaps). The SRM then overwrites the whole
-    sky band in one go and the FILL can be dropped — saves ~2 ms.
+  One follow-up parked in case we need the 5 ms back:
   - PPA callback chaining: each `on_trans_done` callback submits
     the next op from ISR context. Restores full parallelism but
     needs cross-checking whether `ppa_do_xxx` is ISR-safe.
+
+  *Note: "enlarge sun_cache to cover the full sky region and drop
+  FILL" was considered and rejected. Once the sun starts moving
+  in Phase 5 the SRM destination range slides with sun_dy, so no
+  fixed cache size guarantees the SRM covers every sky pixel —
+  and the FILL also has a second job (wiping stale obstacle
+  pixels that drifted above the horizon in the previous frame).
+  The FILL stays.*
 
 - 2026-05-11 — **Narrowed lane-line range to the playfield.**
   `synthwave_step` was iterating `kx_min..kx_max` derived from
@@ -902,6 +902,415 @@
   `render.c:render_obstacles` in place of `pax_simple_line`.
   Triangle fills stay on PAX — `pax_range_setter_16bpp` is
   already a tight `memset16` and faces aren't the bottleneck.
+
+- 2026-05-11 — **`magicnumbers.h` + `direct_565.h` shared helpers.**
+  Pulled display geometry (`DISPLAY_RAW_W/H`, `DISPLAY_LOG_W/H`,
+  `DISPLAY_RAW_STRIDE`) into a single header so the custom
+  rasterizers can hardcode rotation, resolution and stride at
+  compile time while keeping the numbers portable to other
+  displays. Replaced literal `800` / `480` screen-dim references
+  in `synthwave.c`, `render.h`, and `main.c`'s cache-dim defines
+  with the new constants. Pre-baked artwork coordinates (sun /
+  mountain polygon vertex tables) left alone — those are art
+  assets, not display dims.
+
+  `direct_565.h` is header-only, all `static inline`:
+  - `direct_565_pack` / `direct_565_pack_for` — ARGB8888 → RGB565
+    halfword, once per primitive, byte-swap-aware.
+  - `direct_565_logical_index(lx, ly)` — ROT_CW logical → raw index.
+  - `direct_565_set_pixel(...)` — bounds-checked single pixel.
+  - `direct_565_line(...)` — Bresenham carrying a `uint16_t*`
+    instead of recomputing the raw index per pixel. Steps are
+    `±1` (for ly±1) and `±DISPLAY_RAW_STRIDE` (for lx±1) —
+    constant under the hardcoded rotation, no multiplies per
+    pixel.
+
+  Also rewrote `hershey_font_direct.h` to use the shared helpers
+  — eliminated its own orientation switch and 24bpp branch, and
+  removed the `hershey_native_color_t` struct. Hershey now packs
+  the color once per *string* and the inner Bresenham is the
+  same code path as everything else.
+
+- 2026-05-11 — **Direct-565 line rasterizer — small win.** Wired
+  `direct_565_line` into `synthwave_step` (the floor's 11 lane
+  lines + ~10 horizontal stripes) and `render_obstacles` (the
+  ~720 cube wireframe edges per frame).
+
+  | Phase | Before | After | Δ |
+  |---|---|---|---|
+  | bgflr | 14.7 | 13.7 | -1.0 ms |
+  | obs   | 46.5 | 46.0 | -0.5 ms |
+  | FPS   | 13.2 | 13.3 | ~noise |
+
+  Honest result: much smaller than I'd predicted. I'd assumed
+  PAX's `pax_simple_line` was paying a per-pixel function-pointer
+  setter cost; the numbers say it isn't (or PAX has a specialised
+  line path that's already close to a direct halfword store). The
+  ~1.5 ms total savings is per-call setup avoided (color
+  conversion + getter/setter lookup), not per-pixel cost.
+
+  Important implication for the next step: if pixel writes
+  weren't the bottleneck in `obs`, and lines aren't either,
+  then the cost has to be in `pax_simple_tri`'s *per-triangle
+  setup* — vertex sort, edge slopes, clip-rect intersection,
+  range-setter lookup, all done per call. With ~480 triangles
+  per frame this dominates the actual fill.
+
+- 2026-05-11 — **Direct-565 triangle rasterizer — the big win.**
+  Built on the line work: `direct_565_tri` in `direct_565.h`,
+  used by `render_obstacles` for every cube face (front / side /
+  top). Color packed once per face (cube has up to 3 colors:
+  side, top, front).
+
+  Two design choices that matter:
+  1. **Scan in logical-X direction**, not Y. Under PAX_O_ROT_CW
+     a "logical horizontal scanline" (constant ly, varying lx)
+     maps to a *strided* raw write — each pixel hits a different
+     cache line, PSRAM-hostile. A "logical vertical scanline"
+     (constant lx, varying ly) maps to a *contiguous* raw byte
+     range, so the whole scanline lives in one or two cache
+     lines and the inner loop is decrement-pointer + store.
+  2. **Zero per-call setup beyond what we genuinely need**: 3
+     conditional vertex swaps, 3 edge slopes, then straight into
+     the per-column scanline loop. No clip-rect intersection
+     (handled by the per-pixel clamping in `direct_565_vrun`),
+     no getter/setter dispatch, no `pax_col_t` conversion (color
+     is pre-packed by the caller).
+
+  Edge rule: simple `ceilf(yt)` / `floorf(yb)` snapping. Shared
+  cube-face edges might occasionally drop or duplicate a 1-px
+  row but the cyan wireframe overlay hides any seam. If we ever
+  go wireframe-free, a half-space rasteriser with top-left rule
+  would fix it.
+
+  | Phase | Before | After | Δ |
+  |---|---|---|---|
+  | bgkick | 10.61 | 10.61 | — |
+  | bgflr  | 13.7  | 14.1  | +0.4 (noise) |
+  | obs    | **46.0** | **5.4** | **-40.6 ms (-88%)** |
+  | fgrest | 3.9   | 4.1   | ~ |
+  | blit   | 0.7   | 0.7   | — |
+  | **FPS gameplay** | **13.3** | **28.3** | **+15.0 (+113%)** |
+
+  This single change is the largest perf win of the session —
+  confirms `pax_simple_tri` was setup-overhead-bound for the
+  small-triangle case. Our custom rasterizer with no per-call
+  bookkeeping and cache-friendly scanlines hits ~5 ms for ~480
+  triangles per frame.
+
+- 2026-05-11 — **End-of-day final scoreboard.**
+
+  | Stage | FPS gameplay | bg total | obs |
+  |---|---|---|---|
+  | Baseline RGB888 | 9.5 | 54.4 | 47.0 |
+  | RGB565 | 11.8 | 34.6 | 46.0 |
+  | RGB565 + PPA single SRM | 13.6 | 22.1 | 46.4 |
+  | RGB565 + PPA Option A 3-op + DB | 12.5 | 29.0 | 45.9 |
+  | + narrowed lane range | 13.2 | 25.4 | 46.5 |
+  | + direct_565 lines | 13.3 | 24.3 | 46.0 |
+  | **+ direct_565 triangles** | **28.3** | **24.7** | **5.4** |
+
+  **3× the original baseline.** Frame composition at 28.3 FPS
+  (~35 ms/frame):
+  - `bgkick + bgflr = 24.7 ms` (70%) — PPA pipeline + CPU floor
+  - `obs = 5.4 ms` (15%) — obstacles
+  - `fgrest + blit + input + phys ≈ 5 ms` (15%)
+
+  Background pipeline (PPA serialisation + CPU floor work) is
+  the dominant cost now. To hit 60 Hz we'd need another ~18 ms,
+  most of it from `bg` and `bgflr`. See "Future FPS improvements"
+  section below for the parked options.
+
+  Decision: **pause perf work and resume the phase plan**. The
+  optimisation headroom from 9.5 → 28 FPS is enough to absorb
+  the upcoming Phase 5 (sun + shadow) and Phase 6 (tris +
+  multiplier) feature work without dropping below playable
+  framerates. If a future feature blows the frame budget,
+  revisit the parked options.
+
+- 2026-05-11 — **Phase 5 design: position-coupled sun + shadow
+  stall.** The Phase 5 plan in the Module Responsibilities
+  section below describes a *timer*-based sun (`sun_seconds_left`
+  ticks down at 1.0/s or 1.5/s in shadow). Revised after user
+  clarification 2026-05-11: the mechanic is **position-based with
+  ship-speed coupling** — there is no separate countdown. The
+  sun's vertical position is the run's primary state; how fast it
+  sinks depends on ship speed.
+
+  **Sun motion.** At cruise speed the sun travels
+  `GAME_SUN_SINK_RANGE_PX = 120` logical pixels from baseline
+  (high) to fully behind the mountains in
+  `GAME_SUNSET_SECONDS_AT_CRUISE = 70` s. Off-cruise the rate
+  scales:
+
+      base_rate       = GAME_SUN_SINK_RANGE_PX / GAME_SUNSET_SECONDS_AT_CRUISE
+      speed_influence = base_rate / GAMEPLAY_CRUISE_SPEED
+      d(sun_y)/dt     = base_rate - speed_influence * (ship_speed - cruise)
+
+  At cruise → `base_rate`. Slower → faster sinking. Faster (boost)
+  → slower sinking, possibly negative (sun *rises*, player catches
+  up). All four tuning knobs live in `magicnumbers.h`.
+
+  **Shadow length.** Linear interpolation on sun position:
+
+      sun_norm     = clamp(sun_y / GAME_SUN_SINK_RANGE_PX, 0, 1)
+      factor       = lerp(GAME_SHADOW_LEN_FACTOR_MIN,   // 0.5
+                          GAME_SHADOW_LEN_FACTOR_MAX,   // 2.0
+                          sun_norm)
+      shadow_len_z = obstacle.height * factor
+
+  Sun high (start of run) → shadows half the obstacle's height.
+  Sun about to set → shadows twice the obstacle's height. Past
+  sunset (`sun_y >= GAME_SUN_SINK_RANGE_PX`) the whole world is
+  treated as in shadow regardless of geometry.
+
+  **Shadow detection (per frame).** For each active CUBE
+  obstacle the ship is shadowed iff:
+
+      obs.z_world > ship.z_world                            // ship behind obstacle
+      (obs.z_world - obs.half_d) - shadow_len_z
+              < ship.z_world                                // shadow reaches ship
+      |obs.x_world - ship.x_world|
+              < obs.half_w + ship.half_w                    // lateral overlap
+
+  Plus an unconditional "in shadow" branch when the sun has
+  fully set.
+
+  **Shadow stall (the gameplay consequence).** While in shadow
+  the ship decelerates *linearly* — from cruise to zero in
+  `GAME_SHADOW_STALL_SECONDS = 6` s. The decel rate is
+  `cruise / GAME_SHADOW_STALL_SECONDS = 2 u/s²`. Out of shadow,
+  the existing speed-recovery dynamics (from the Phase 4 scrape
+  recovery) ramp speed back toward cruise. **The run ends only
+  when ship speed actually reaches zero** — so a player coasting
+  to a halt in full sunset can still grab a boost pickup, recover
+  speed, push the sun back up, and survive. Provides a real
+  comeback window.
+
+  **The feedback loop.** Slow ship → sun sinks faster → shadows
+  longer → ship more often shadowed → slower. Boost ship → sun
+  rises → shadows shorter → easier to maintain speed. Same
+  shape as the original Race The Sun, but expressed through a
+  single integrated state (sun_y) instead of two coupled
+  timers.
+
+  **Shadow rendering.** New draw pass between `synthwave_step`
+  and `render_obstacles`. Each shadow is a flat trapezoid on
+  the y=0 ground plane, world-space rectangle projected through
+  the existing `render_project` and drawn as two triangles via
+  `direct_565_tri`. Solid darker-purple fill
+  (`GAME_SHADOW_FLOOR_COLOR`) — no alpha blending, no
+  read-modify-write. Compound overlaps just paint the same
+  dark color over each other, which is the correct visual.
+
+  After full sunset the floor base color switches to the
+  shadow color (the FILL rect, and any other floor paint, uses
+  `GAME_SHADOW_FLOOR_COLOR` instead of the purple base). The
+  per-obstacle shadows become uniform across the whole floor
+  at that point so painting them individually would be wasted
+  work.
+
+  **Tunables added to magicnumbers.h** (2026-05-11):
+  `GAMEPLAY_CRUISE_SPEED`, `GAME_SUN_SINK_RANGE_PX`,
+  `GAME_SUNSET_SECONDS_AT_CRUISE`, `GAME_SHADOW_STALL_SECONDS`,
+  `GAME_SHADOW_LEN_FACTOR_MIN/MAX`, `GAME_STAGE_SECONDS`,
+  `GAME_REST_SECONDS`. Derived: `GAME_STAGE_LENGTH_Z`,
+  `GAME_REST_LENGTH_Z`. `SHIP_BASE_SPEED_Z` and
+  `WORLD_STAGE_LENGTH_Z` / `WORLD_REST_LENGTH_Z` now derive
+  from these to keep distance and time in sync.
+
+  **What this supersedes:** the timer-based "Sun mechanic &
+  shadow" bullet in the `game.c` module description below. The
+  position-coupled model fits the "chase the sun" theme more
+  naturally and removes the need for a separate
+  `sun_seconds_left` countdown — sun position *is* the timer.
+
+- 2026-05-11 — **Phase 5 first pass landed (sun + shadows + stall).**
+  All the sun/shadow geometry and physics from the revised design
+  is on-device:
+
+  - `game.sun_y` integrated each frame from ship speed
+    differential vs cruise. Clamped to `[0, GAME_SUN_SINK_RANGE_PX]`.
+  - PPA SRM destination Y wired to `(int)game.sun_y`; sun visibly
+    sinks during a run, the FILL handles the newly-exposed sky.
+  - Per-cube shadow detection via `is_ship_in_shadow` logic inside
+    `game_after_collide`. CUBE obstacles only; walls / pickups
+    skipped.
+  - Shadow quads on the floor via the new `render_shadows`
+    function — flat trapezoids on the y=0 plane using
+    `direct_565_tri`, color = `GAME_SHADOW_FLOOR_COLOR`.
+  - Floor paint split into `synthwave_step_base` (rect) and
+    `synthwave_step_lines` (lane lines + stripes) so shadow
+    quads can paint between them; lane lines stay bright magenta
+    on top of shadows with no per-pixel blend math.
+  - Post-sunset state: `synthwave_step_base` paints the whole
+    floor with the shadow colour instead of the regular purple,
+    `render_shadows` early-outs, and the ship is treated as
+    permanently in_shadow.
+  - Shadow stall: ship decelerates linearly to zero in
+    `GAME_SHADOW_STALL_SECONDS` while in_shadow. Game-over fires
+    when speed reaches 0, same end-of-run code path as a head-on
+    collision.
+  - Debug controls: Q nudges `sun_y` toward sunset, A nudges back
+    toward zenith (10 px per press). Live `sun=NNN` readout under
+    the speed `v=NNN` readout. Also removed the dead WASD steering
+    bindings while wiring up the new scancodes.
+
+  **Tuning pass after on-device playtesting (2026-05-11):**
+
+  | Constant | Initial | Final | Reason |
+  |---|---|---|---|
+  | `GAME_SUN_SINK_RANGE_PX` | 120 | **160** | parts of the sun still peeked through mountain valleys at 120; 160 (found visually with the Q/A nudge) fully hides every band |
+  | `GAME_SHADOW_LEN_FACTOR_MIN` | 0.5 | **1.0** | shadows too short at the start of a run; 1.0 = "shadow equals obstacle height" reads as actual shadow geometry |
+  | `GAME_SHADOW_LEN_FACTOR_MAX` | 2.0 | **6.0** | shadows too short near sunset; 6.0 produces dramatic long bars across the floor as the sun lowers |
+  | `GAME_SHADOW_STALL_SECONDS` | 6.0 | **8.0** | 6 s wasn't enough recovery window for the upcoming boost pickup; 8 s gives more time to grab a boost |
+  | `GAMEPLAY_CRUISE_SPEED` | 12 | **20** | wanted a more frenetic pace; world-z stage budgets auto-scale to keep stage seconds constant |
+  | `GAME_SUN_SPEED_INFLUENCE` | (hard-coded 1.0) | **3.0** | promoted to tunable; 3.0 makes 2× cruise (40 u/s) produce a sun *rising* at 2× base rate — boost will visibly catch up the sun |
+
+  **Newly added tunables in magicnumbers.h:**
+  - `GAME_SUN_SPEED_INFLUENCE` — sensitivity of sun rate to
+    speed deviation from cruise. Default 3.0. Freeze speed
+    formula: `cruise × (1 + 1/INFLUENCE)`.
+  - `GAME_SHADOW_FLOOR_COLOR` — solid dark purple painted under
+    obstacle shadows and across the whole floor post-sunset.
+
+  **Still TODO in Phase 5** (in suggested order):
+  1. Boost pickups — spawn `OBSTACLE_KIND_PICKUP_BOOST` in rest
+     areas and sparingly in obstacle areas. Collection sets
+     `ship_speed_z` to a tunable boost target (above the sun's
+     freeze speed of ~27 u/s) for a tunable duration. Without
+     this, every run ends in sunset — there's no recovery loop.
+  2. Boost-active HUD indicator (small).
+  3. Run-end polish (fade as ship_speed → 0, or just live with
+     the current freeze).
+
+- 2026-05-11 — **Ship shadow visual feedback partially landed.**
+  - Implemented: ship sprite tints 30% darker when
+    `game.in_shadow` (tunable `GAME_SHIP_SHADOW_TINT`). Dim
+    happens once per frame on the four ship colours; per-pixel
+    cost is zero.
+  - **Not implemented (tried and reverted):** rendering the
+    ship's own shadow on the floor. The ship sits very close to
+    the camera (`SHIP_Z_PLANE = 2.0`, ship near-face at z≈1.66)
+    so the projected shadow lands at the very bottom of the
+    screen — almost entirely below the visible floor area — and
+    isn't readable. Removed the `render_ship_shadow` function,
+    the call site, and `GAME_SHIP_SHADOW_HEIGHT`. Per-obstacle
+    shadows on the floor + the ship sprite tint together
+    provide enough "you are in a shadow now" signal.
+
+---
+
+## Future FPS improvements
+
+Catalogue of viable optimisations parked at the 28 FPS plateau
+(2026-05-11). Sorted roughly by expected wallclock-saved-per-unit-effort.
+Estimated wins are rough — measure before committing.
+
+### Background pipeline (`bgkick + bgflr ≈ 25 ms`)
+
+1. **PPA FILL for the floor base** (-7 to -10 ms `bgflr`,
+   medium effort). The floor's purple base rect
+   (`pax_simple_rect`, 800×224 px) is currently CPU work — about
+   10 ms in `bgflr`. Replace with a fourth PPA op
+   (`ppa_do_fill`) covering the below-horizon region. Adds one
+   more PPA op to the serial chain (~2 ms), nets ~7–8 ms saved.
+   Trade-off: more PPA op ordering complexity, one more wait.
+
+2. **PPA callback chaining** (-5 to -8 ms `bgkick`, high
+   effort, risky). The current serial waits between FILL → SRM
+   → BLEND cost ~5 ms of pure idle time. Submit each op
+   non-blocking; in the `on_trans_done` callback (ISR context)
+   submit the next op directly. Restores full PPA-vs-CPU
+   parallelism. Risk: calling `ppa_do_xxx` from ISR may not be
+   safe in this IDF version — needs validation. Fallback: a
+   high-priority FreeRTOS task that wakes on completion and
+   submits the next op.
+
+3. **Specialised direct_565 horizontal/vertical line fast
+   paths** (-1 to -2 ms `bgflr`, low effort). `direct_565_line`
+   uses a general Bresenham; for axis-aligned lines (the 10
+   horizontal floor stripes, and many short obstacle wireframe
+   edges) we can skip the branching and just stride-fill. The
+   horizontal stripes especially — they're 800 px wide and
+   currently pay full Bresenham overhead per pixel.
+
+4. **Tighten the vertical-lane-line distribution** (-1 ms
+   `bgflr`, low effort). The 11 lane lines from the vanishing
+   point are weighted toward the near-vertical case (long pixel
+   runs). Replacing the Bresenham with a direct pinhole-projected
+   integer stride per row would skip the branching cost on
+   every pixel. Small but cheap to do.
+
+### Obstacle pipeline (`obs ≈ 5 ms`)
+
+5. **Z-buffer rasterisation** (variable, medium-high effort).
+   Add a 1-byte-per-pixel depth buffer. Triangles write depth +
+   color, skipping pixels behind already-written content. Big
+   help if the scene ever produces significant overdraw (the
+   user's expectation: 3-4× obstacle count plus pickups,
+   particles, etc.). Per-pixel cost goes from "always write"
+   to "test, maybe write" — wins when overdraw factor > ~2.
+   Memory cost: ~384 KB for a 800×480 8-bit depth buffer.
+
+6. **Per-cube LOD** (-1 to -2 ms `obs`, low effort). Drop
+   wireframes for cubes farther than ~25 world units, and drop
+   side/top faces when the cube projects to <8 px. The visual
+   impact is small (those cubes are 1–4 px wide near the
+   horizon) and they currently cost full per-triangle setup.
+
+7. **Tile-based screen binning** (variable, high effort).
+   Split the screen into ~32×32 px tiles. During the sort pass
+   compute which obstacles touch each tile. Per tile, only
+   rasterise the obstacles in that tile's list. Caps per-pixel
+   work at the cost of a bookkeeping pass. Pairs well with #5
+   for very crowded scenes.
+
+8. **Half-space triangle rasterisation** (correctness only,
+   not perf). Current `direct_565_tri` uses ceil/floor edge
+   snapping which can produce occasional 1-px gaps or
+   double-writes at triangle edges (currently masked by the
+   wireframe overlay). If we ever want a wireframe-free style,
+   switch to half-space rasterisation with the top-left rule.
+
+### Architectural
+
+9. **Disable PSRAM cache for the framebuffer** (variable,
+   experimental). The fb is mostly written, not read. The CPU
+   cache on PSRAM acts as a write-back buffer for our pixel
+   stores — useful for cache-friendly scanlines, less useful
+   for strided writes (lane lines, etc.). An uncached fb might
+   speed up some patterns. Risky — could regress others.
+
+10. **Drop double-buffering and rely on TE-vsync** (-768 KB
+    RAM, no FPS gain, possibly visual regression). If RAM ever
+    gets tight we could try going back to single-buffer with
+    careful vsync pacing. Tearing would likely return — the
+    user already established this empirically.
+
+11. **Raycasting / screen-space rendering** (variable, very
+    high effort). Discussed 2026-05-11. Constant per-pixel cost
+    regardless of scene complexity, no overdraw, clean fit for
+    overlapping geometry and procedural effects. But the
+    pixel × per-pixel-scene-test work is huge without spatial
+    acceleration structures (BVH, grid, tile binning).
+    Wireframe stylisation also doesn't fit naturally. Not the
+    right pivot for the current cube-parade game; revisit if a
+    future game design has heavy overdraw or volumetric content.
+
+### Things deliberately NOT in the catalogue
+
+- *Enlarge sun_cache to skip PPA FILL.* The FILL covers two
+  jobs: filling sky around the sun, and wiping stale obstacle
+  pixels that drifted above the horizon in the previous frame.
+  Once sun_dy is non-zero the SRM destination doesn't cover the
+  full sky region, so the FILL is required regardless of cache
+  size.
+
+- *Switch back to PAX for triangles/lines.* Confirmed: PAX's
+  per-call setup is the bottleneck for high-frequency
+  small-primitive workloads on this hardware. Going back loses
+  the entire `obs` win.
 
 ---
 

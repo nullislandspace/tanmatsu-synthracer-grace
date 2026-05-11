@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "magicnumbers.h"
 #include "pax_gfx.h"
 #include "world.h"
 
@@ -11,7 +12,10 @@
 // scrape decay/recovery mechanic for the sun-shadow slowdown.
 #define SHIP_Z_PLANE      2.0f
 #define SHIP_BASE_Y       0.22f
-#define SHIP_BASE_SPEED_Z 12.0f
+// Ship cruise speed (world units / s). Driven from magicnumbers.h
+// so the world generator's stage/rest distance budgets and the
+// game's default speed stay in sync.
+#define SHIP_BASE_SPEED_Z GAMEPLAY_CRUISE_SPEED
 
 // Ship collision AABB. The tetrahedron mesh runs from local
 // z = -0.36 (tail) to +0.32 (nose), so the AABB is centred at
@@ -33,6 +37,19 @@ typedef struct {
     float ship_base_speed_z;  // unhindered target speed. Adjustable via debug knob.
     float bank;               // -1..+1 signed banking factor
     float cam_x;              // camera follows ship laterally
+
+    // Phase 5: sun position drives the run length. 0 = sun high
+    // (start of run); GAME_SUN_SINK_RANGE_PX = fully behind the
+    // mountains. Driven each frame by `sun_y += dt × rate`, where
+    // rate depends on ship speed: at cruise → base sink rate;
+    // slower → faster sun; faster → slower / negative (sun rises
+    // back up).
+    float sun_y;
+
+    // Set each frame by game_step. True if any obstacle currently
+    // shadows the ship, OR the sun is fully set. Drives the speed
+    // decel and a darker ship sprite tint.
+    bool  in_shadow;
 
     // Set by game_collide each frame. game_after_collide reads
     // these to pick the speed target; game_draw_sparks reads them
@@ -71,12 +88,29 @@ void game_step(game_state_t* g, float dt, int steer);
 //     ship on contact. Phase 5 / 6 / 9 will fill these in.
 bool game_collide(game_state_t* g, world_state_t const* w, float dt);
 
-// Speed dynamics + spark emission/advance. Reads scrape_left/
-// scrape_right (set by game_collide) to ramp ship_speed_z toward
-// the appropriate target and emit sparks from the wing tips on the
-// scraping side(s). Call after game_collide so the speed and the
-// emitted sparks reflect this frame's contact state.
-void game_after_collide(game_state_t* g, float dt);
+// Sun + shadow + speed dynamics. Returns `true` when the run
+// should end because the ship has coasted to a stop in shadow.
+//
+// Three things happen here:
+//
+// 1. Sun integration. `sun_y` ticks forward by
+//    `(base_rate - speed_influence * (ship_speed - cruise)) * dt`,
+//    clamped to `[0, GAME_SUN_SINK_RANGE_PX]`. Slower ship → faster
+//    sunset; faster ship → slower sunset or even rising.
+//
+// 2. Shadow detection. `in_shadow` becomes true when any active
+//    cube obstacle ahead of the ship casts a shadow long enough
+//    to reach the ship, or when the sun has fully set
+//    (everything in shadow).
+//
+// 3. Speed dynamics. In-shadow takes priority over scrape: linear
+//    decel from cruise to zero in `GAME_SHADOW_STALL_SECONDS`.
+//    Otherwise the existing scrape/recovery dynamics run.
+//
+// Returns true iff `ship_speed_z` has reached zero — caller flips
+// the app state to GAME_OVER (same end-of-run path as a head-on
+// collision).
+bool game_after_collide(game_state_t* g, world_state_t const* w, float dt);
 
 // Render the ship as a 3D mesh, banked by `g->bank`.
 void game_draw_ship(pax_buf_t* fb, game_state_t const* g);

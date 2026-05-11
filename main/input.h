@@ -37,3 +37,11 @@ bool input_consume_pickup(void);
 // +N for N UP-edge presses, -N for DOWN-edges, 0 if neither fired.
 // Self-clears after one read. Debug aid for tuning ship_speed_z.
 int  input_consume_speed_delta(void);
+
+// Returns the net sun-position delta accumulated since the last call:
+// +N for N Q-edge presses (push sun toward sunset),
+// -N for N A-edge presses (push sun back toward zenith).
+// Self-clears. Debug aid for tuning GAME_SUN_SINK_RANGE_PX and
+// previewing shadow lengths without waiting for the natural
+// sunset to advance.
+int  input_consume_sun_delta(void);

@@ -376,6 +376,15 @@ static void draw_speed_readout(float speed_z) {
     rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f, buf);
 }
 
+static void draw_sun_readout(float sun_y) {
+    char        buf[32];
+    snprintf(buf, sizeof(buf), "sun=%.1f", sun_y);
+    float const text_h = 18.0f;
+    pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
+    float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
+    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + text_h + 4.0f, buf);
+}
+
 static void draw_exit_hint(void) {
     char const* prompt   = "to exit";
     float const prompt_h = 18.0f;
@@ -703,6 +712,17 @@ void app_main(void) {
             if (game.ship_base_speed_z > 60.0f) game.ship_base_speed_z = 60.0f;
         }
 
+        // Debug sun-position nudge (Q / A). 10 px per press is
+        // ~4% of GAME_SUN_SINK_RANGE_PX — coarse enough to feel
+        // each press, fine enough to dial in the "fully behind
+        // mountains" threshold.
+        int const sun_d = input_consume_sun_delta();
+        if (sun_d != 0) {
+            game.sun_y += (float)sun_d * 10.0f;
+            if (game.sun_y < 0.0f)                     game.sun_y = 0.0f;
+            if (game.sun_y > GAME_SUN_SINK_RANGE_PX)   game.sun_y = GAME_SUN_SINK_RANGE_PX;
+        }
+
         bool const pickup_pressed = input_consume_pickup();
         int  const steer          = input_steering();
 
@@ -719,7 +739,12 @@ void app_main(void) {
             //    emit + advance sparks.
             game_step(&game, dt, steer);
             head_on = game_collide(&game, &world, dt);
-            game_after_collide(&game, dt);
+            // game_after_collide runs sun integration, shadow
+            // detection, and speed dynamics. Returns true when the
+            // ship has coasted to a halt in shadow — same end-of-run
+            // signal as a head-on collision.
+            bool const stalled = game_after_collide(&game, &world, dt);
+            head_on            = head_on || stalled;
             world_advance(&world, dt, game.ship_speed_z);
         }
         int64_t const t_after_phys = esp_timer_get_time();
@@ -739,15 +764,36 @@ void app_main(void) {
         // pixel from the previous frame remains in the sky band.
         ppa_submit_fill_sky();
         ppa_wait_one();
-        ppa_submit_sun(0);                  // sun_dy = 0 until Phase 5
+        // PPA SRM destination Y comes from game.sun_y, which the
+        // physics step integrates each frame. In TITLE / GAME_OVER
+        // states sun_y is wherever the last run left it (0 at start,
+        // frozen at end of run).
+        ppa_submit_sun((int)game.sun_y);
         ppa_wait_one();
         ppa_submit_mountains();
         int64_t const t_after_bgkick = esp_timer_get_time();
+        // Floor paint is split in three so the obstacle-shadow pass
+        // can sit between the floor base and the grid lines:
+        //   1. synthwave_step_base   — solid floor rectangle
+        //   2. render_shadows        — darker quads where obstacles
+        //                              cast shadows
+        //   3. synthwave_step_lines  — magenta lane lines + stripes
+        //                              on top of both
+        // Lines on top of shadows keeps them visible in shadowed
+        // regions without per-pixel blend math — much cheaper than
+        // detecting per-pixel "am I in a shadow" while drawing the
+        // grid.
         float const floor_scroll = (app_state == APP_STATE_TITLE)      ? title_scroll_speed * dt
                                    : (app_state == APP_STATE_PLAYING)  ? game.ship_speed_z * dt
                                                                        : 0.0f;
-        float const floor_cam_x  = (app_state == APP_STATE_TITLE) ? 0.0f : game.cam_x;
-        synthwave_step(fb, floor_scroll, floor_cam_x);
+        float const floor_cam_x      = (app_state == APP_STATE_TITLE) ? 0.0f : game.cam_x;
+        bool  const fully_shadowed   = (app_state != APP_STATE_TITLE)
+                                       && (game.sun_y >= GAME_SUN_SINK_RANGE_PX);
+        synthwave_step_base(fb, fully_shadowed);
+        if (app_state != APP_STATE_TITLE) {
+            render_shadows(fb, &world, game.cam_x, game.sun_y);
+        }
+        synthwave_step_lines(fb, floor_scroll, floor_cam_x);
         int64_t const t_after_bgflr = esp_timer_get_time();
         // Wait for the BLEND op to finish — obstacles and HUD text
         // can both write into the sky region, so the backdrop must
@@ -773,12 +819,16 @@ void app_main(void) {
             }
 
             case APP_STATE_PLAYING: {
+                // Shadows are already on the floor (drawn between
+                // the floor base and the lines above), so we just
+                // need the obstacles on top.
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
                 game_draw_sparks(fb, &game);
                 draw_exit_hint();
                 draw_speed_readout(game.ship_speed_z);
+                draw_sun_readout(game.sun_y);
 
                 if (head_on) {
                     app_state = APP_STATE_GAME_OVER;
@@ -790,12 +840,15 @@ void app_main(void) {
             case APP_STATE_GAME_OVER: {
                 // World frozen at the crash. No sparks here — they
                 // are a per-frame radial flash that only reads as
-                // a scrape indication during PLAYING.
+                // a scrape indication during PLAYING. Sun readout
+                // stays visible so Q/A nudging still works for
+                // visually tuning the sunset threshold.
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
                 draw_game_over_overlay();
                 draw_exit_hint();
+                draw_sun_readout(game.sun_y);
 
                 if (pickup_pressed) {
                     start_run(&game, &world, run_seed);

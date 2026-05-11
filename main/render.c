@@ -1,6 +1,7 @@
 #include "render.h"
 
 #include "direct_565.h"
+#include "magicnumbers.h"
 #include "shapes/pax_tris.h"
 
 // Per-obstacle dimensions and colours come from the obstacle_t
@@ -25,6 +26,56 @@ void render_project(float x_w, float y_w, float z_w, float cam_x, float* out_sx,
     float const inv_z = 1.0f / z_w;
     *out_sx = RENDER_HALF_W + RENDER_FOCAL_LEN * (x_w - cam_x) * inv_z;
     *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y_w - RENDER_CAM_Y) * inv_z;
+}
+
+void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float sun_y) {
+    // After full sunset the floor base is already the shadow
+    // colour, so per-obstacle shadow quads would just repaint the
+    // same colour. Skip.
+    if (sun_y >= GAME_SUN_SINK_RANGE_PX) return;
+
+    float const sun_norm = sun_y / GAME_SUN_SINK_RANGE_PX;
+    float const factor   = GAME_SHADOW_LEN_FACTOR_MIN
+                         + (GAME_SHADOW_LEN_FACTOR_MAX - GAME_SHADOW_LEN_FACTOR_MIN) * sun_norm;
+
+    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    uint16_t  const sh_packed = direct_565_pack(GAME_SHADOW_FLOOR_COLOR, fb->reverse_endianness);
+
+    for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+        obstacle_t const* o = &w->obstacles[i];
+        if (!o->active) continue;
+        // Walls run along z and are outside the playfield — their
+        // shadows wouldn't show on the visible floor. Pickups /
+        // ramps are too short to cast meaningful shadows. Only
+        // cubes get shadow quads today.
+        if (o->kind != OBSTACLE_KIND_CUBE) continue;
+
+        float const xL          = o->x_world - o->half_w;
+        float const xR          = o->x_world + o->half_w;
+        float const z_far       = o->z_world - o->half_d;            // obstacle's near face
+        float const shadow_len  = o->height * factor;
+        float const z_near_raw  = z_far - shadow_len;                // toward camera
+
+        // Same near-plane clipping rule as render_obstacles: drop
+        // the whole shadow if its far edge is already past the
+        // near clip; otherwise clip the near edge of the quad to
+        // NEAR_CLIP_Z so the projection doesn't blow up.
+        if (z_far < NEAR_CLIP_Z) continue;
+        float const z_near = (z_near_raw < NEAR_CLIP_Z) ? NEAR_CLIP_Z : z_near_raw;
+
+        // Project the four corners of the shadow rectangle on the
+        // y = 0 ground plane. The result on screen is a trapezoid
+        // (narrow at the obstacle base, wider toward the camera).
+        float sx_NL, sy_NL, sx_NR, sy_NR;
+        float sx_FL, sy_FL, sx_FR, sy_FR;
+        render_project(xL, 0.0f, z_near, cam_x, &sx_NL, &sy_NL);
+        render_project(xR, 0.0f, z_near, cam_x, &sx_NR, &sy_NR);
+        render_project(xL, 0.0f, z_far,  cam_x, &sx_FL, &sy_FL);
+        render_project(xR, 0.0f, z_far,  cam_x, &sx_FR, &sy_FR);
+
+        direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_NR, sy_NR, sx_FR, sy_FR, sh_packed);
+        direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_FR, sy_FR, sx_FL, sy_FL, sh_packed);
+    }
 }
 
 void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {

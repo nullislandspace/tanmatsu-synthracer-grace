@@ -292,27 +292,97 @@ bool game_collide(game_state_t* g, world_state_t const* w, float dt) {
     return head_on;
 }
 
-void game_after_collide(game_state_t* g, float dt) {
-    if (dt <= 0.0f) return;
+bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
+    if (dt <= 0.0f) return false;
 
-    // Speed dynamics — ramp ship_speed_z toward scrape floor or
-    // base speed, depending on whether any side is in contact.
-    bool  const scraping = g->scrape_left || g->scrape_right;
-    float const target   = scraping
-                              ? (g->ship_base_speed_z * SCRAPE_SPEED_FRAC)
-                              : g->ship_base_speed_z;
-    if (g->ship_speed_z > target) {
-        float const max_step = SCRAPE_DECEL * dt;
-        g->ship_speed_z -= max_step;
-        if (g->ship_speed_z < target) g->ship_speed_z = target;
-    } else if (g->ship_speed_z < target) {
-        float const max_step = SPEED_RECOVERY * dt;
-        g->ship_speed_z += max_step;
-        if (g->ship_speed_z > target) g->ship_speed_z = target;
+    // --- Sun position update ---------------------------------------------
+    // At cruise speed the sun travels GAME_SUN_SINK_RANGE_PX over
+    // GAME_SUNSET_SECONDS_AT_CRUISE seconds. The per-frame sink
+    // rate is linear in the speed differential from cruise. The
+    // sensitivity to speed is controlled by GAME_SUN_SPEED_INFLUENCE
+    // (default 1.0 → symmetric: stalled doubles the rate, 2× cruise
+    // freezes the sun).
+    {
+        float const base_rate       = GAME_SUN_SINK_RANGE_PX / GAME_SUNSET_SECONDS_AT_CRUISE;
+        float const speed_influence = (base_rate / GAMEPLAY_CRUISE_SPEED) * GAME_SUN_SPEED_INFLUENCE;
+        float const rate            = base_rate - speed_influence * (g->ship_speed_z - GAMEPLAY_CRUISE_SPEED);
+        g->sun_y += rate * dt;
+        if (g->sun_y < 0.0f)                       g->sun_y = 0.0f;
+        if (g->sun_y > GAME_SUN_SINK_RANGE_PX)     g->sun_y = GAME_SUN_SINK_RANGE_PX;
     }
+
+    // --- Shadow detection ------------------------------------------------
+    // Past full sunset everything is in shadow. Otherwise check
+    // every active CUBE obstacle ahead of the ship: shadow extends
+    // toward the camera by `obstacle.height * factor`, where factor
+    // ranges from GAME_SHADOW_LEN_FACTOR_MIN (sun high) to
+    // GAME_SHADOW_LEN_FACTOR_MAX (sun about to set).
+    g->in_shadow = false;
+    if (g->sun_y >= GAME_SUN_SINK_RANGE_PX) {
+        g->in_shadow = true;
+    } else {
+        float const sun_norm = g->sun_y / GAME_SUN_SINK_RANGE_PX;
+        float const factor   = GAME_SHADOW_LEN_FACTOR_MIN
+                             + (GAME_SHADOW_LEN_FACTOR_MAX - GAME_SHADOW_LEN_FACTOR_MIN) * sun_norm;
+        float const ship_z   = SHIP_COLLISION_Z_C;
+        for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+            obstacle_t const* o = &w->obstacles[i];
+            if (!o->active) continue;
+            if (o->kind != OBSTACLE_KIND_CUBE) continue;
+            if (o->z_world <= ship_z) continue;                       // obstacle is behind us
+            float const obs_zN     = o->z_world - o->half_d;
+            float const shadow_len = o->height * factor;
+            if (obs_zN - shadow_len >= ship_z) continue;              // shadow doesn't reach the ship
+            float const dx = fabsf(o->x_world - g->ship_x_world);
+            if (dx > o->half_w + SHIP_COLLISION_HALF_W) continue;     // lateral miss
+            g->in_shadow = true;
+            break;
+        }
+    }
+
+    // --- Speed dynamics --------------------------------------------------
+    // Shadow stall takes priority over scrape recovery. Linear
+    // decel from cruise to zero in GAME_SHADOW_STALL_SECONDS — so
+    // a player stuck in shadow has that many seconds to grab a
+    // boost pickup before coming to rest.
+    if (g->in_shadow) {
+        float const decel = GAMEPLAY_CRUISE_SPEED / GAME_SHADOW_STALL_SECONDS;
+        g->ship_speed_z -= decel * dt;
+        if (g->ship_speed_z < 0.0f) g->ship_speed_z = 0.0f;
+    } else {
+        bool  const scraping = g->scrape_left || g->scrape_right;
+        float const target   = scraping
+                                  ? (g->ship_base_speed_z * SCRAPE_SPEED_FRAC)
+                                  : g->ship_base_speed_z;
+        if (g->ship_speed_z > target) {
+            float const max_step = SCRAPE_DECEL * dt;
+            g->ship_speed_z -= max_step;
+            if (g->ship_speed_z < target) g->ship_speed_z = target;
+        } else if (g->ship_speed_z < target) {
+            float const max_step = SPEED_RECOVERY * dt;
+            g->ship_speed_z += max_step;
+            if (g->ship_speed_z > target) g->ship_speed_z = target;
+        }
+    }
+
+    // Run ends when the ship has fully coasted to a stop. The
+    // floor logic still draws the final frame at zero speed before
+    // the caller flips to GAME_OVER.
+    return g->ship_speed_z <= 0.0f;
 }
 
 // --- Drawing ------------------------------------------------------------------
+
+// Multiply each channel of an ARGB color by `scale` (0..1).
+// Alpha kept intact. Saturates the result implicitly because the
+// inputs are already in [0, 255] and scale ≤ 1.
+static inline pax_col_t dim_argb(pax_col_t col, float scale) {
+    uint32_t const a = (col >> 24) & 0xFF;
+    uint32_t const r = (uint32_t)((float)((col >> 16) & 0xFF) * scale);
+    uint32_t const g = (uint32_t)((float)((col >>  8) & 0xFF) * scale);
+    uint32_t const b = (uint32_t)((float)((col >>  0) & 0xFF) * scale);
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
 
 void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
     float const angle = g->bank * MAX_BANK_RAD;
@@ -330,13 +400,29 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
         render_project(wx, wy, wz, g->cam_x, &screen[i].x, &screen[i].y);
     }
 
+    // Pre-dim every ship colour once if the ship is in shadow —
+    // 30% darker face + ridge fills. Far cheaper than per-pixel
+    // attenuation, and works whether faces stay on PAX or move
+    // to direct_565 later. Keeping the originals in locals so
+    // the compiler can hoist either branch.
+    pax_col_t       belly      = SHIP_BELLY_COLOR;
+    pax_col_t       roof_left  = SHIP_ROOF_LEFT_COLOR;
+    pax_col_t       roof_right = SHIP_ROOF_RIGHT_COLOR;
+    pax_col_t       ridge      = SHIP_RIDGE_COLOR;
+    if (g->in_shadow) {
+        belly      = dim_argb(belly,      GAME_SHIP_SHADOW_TINT);
+        roof_left  = dim_argb(roof_left,  GAME_SHIP_SHADOW_TINT);
+        roof_right = dim_argb(roof_right, GAME_SHIP_SHADOW_TINT);
+        ridge      = dim_argb(ridge,      GAME_SHIP_SHADOW_TINT);
+    }
+
     for (size_t i = 0; i < SHIP_TRI_COUNT; i++) {
         ship_tri_t const* t   = &ship_tris[i];
-        pax_col_t         col = SHIP_BELLY_COLOR;
+        pax_col_t         col = belly;
         switch (t->face) {
-            case SHIP_FACE_ROOF_LEFT:  col = SHIP_ROOF_LEFT_COLOR;  break;
-            case SHIP_FACE_ROOF_RIGHT: col = SHIP_ROOF_RIGHT_COLOR; break;
-            case SHIP_FACE_BELLY:      col = SHIP_BELLY_COLOR;      break;
+            case SHIP_FACE_ROOF_LEFT:  col = roof_left;  break;
+            case SHIP_FACE_ROOF_RIGHT: col = roof_right; break;
+            case SHIP_FACE_BELLY:      col = belly;      break;
         }
         pax_simple_tri(fb, col,
                        screen[t->a].x, screen[t->a].y,
@@ -347,7 +433,7 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
     for (size_t i = 0; i < SHIP_OUTLINE_COUNT; i++) {
         uint8_t const a = ship_outline_edges[i][0];
         uint8_t const b = ship_outline_edges[i][1];
-        pax_simple_line(fb, SHIP_RIDGE_COLOR,
+        pax_simple_line(fb, ridge,
                         screen[a].x, screen[a].y,
                         screen[b].x, screen[b].y);
     }

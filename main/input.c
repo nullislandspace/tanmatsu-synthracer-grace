@@ -11,6 +11,7 @@ static QueueHandle_t s_event_queue = NULL;
 static input_mode_t  s_mode        = INPUT_MODE_TITLE;
 static bool          s_pickup_edge = false;
 static int           s_speed_delta = 0;
+static int           s_sun_delta   = 0;
 
 void input_init(void) {
     esp_err_t res = bsp_input_get_queue(&s_event_queue);
@@ -45,10 +46,15 @@ bool input_drain_events(void) {
                 }
                 break;
             case INPUT_EVENT_TYPE_SCANCODE:
-                // Space (use-pickup) is the one queued-event we care about
-                // mid-game. Steering keys are read via the polled API.
+                // Space (use-pickup) and the Q/A debug sun nudge are
+                // the queued events we care about mid-game. Steering
+                // keys come in through the polled API.
                 if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_SPACE) {
                     s_pickup_edge = true;
+                } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_Q) {
+                    s_sun_delta += 1;     // push sun toward sunset
+                } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_A) {
+                    s_sun_delta -= 1;     // push sun back toward zenith
                 }
                 break;
             default:
@@ -72,8 +78,8 @@ static bool poll_scancode(bsp_input_scancode_t code) {
 }
 
 int input_steering(void) {
-    bool left  = poll_nav(BSP_INPUT_NAVIGATION_KEY_LEFT) || poll_scancode(BSP_INPUT_SCANCODE_A);
-    bool right = poll_nav(BSP_INPUT_NAVIGATION_KEY_RIGHT) || poll_scancode(BSP_INPUT_SCANCODE_D);
+    bool left  = poll_nav(BSP_INPUT_NAVIGATION_KEY_LEFT);
+    bool right = poll_nav(BSP_INPUT_NAVIGATION_KEY_RIGHT);
 
     // Modal: ESC and Backspace only steer during PLAYING.
     if (s_mode == INPUT_MODE_PLAYING) {
@@ -93,5 +99,11 @@ bool input_consume_pickup(void) {
 int input_consume_speed_delta(void) {
     int d         = s_speed_delta;
     s_speed_delta = 0;
+    return d;
+}
+
+int input_consume_sun_delta(void) {
+    int d       = s_sun_delta;
+    s_sun_delta = 0;
     return d;
 }

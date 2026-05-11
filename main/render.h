@@ -19,6 +19,20 @@
 // logical pixels.
 void render_project(float x_w, float y_w, float z_w, float cam_x, float* out_sx, float* out_sy);
 
+// Draw shadow quads on the floor for every active cube obstacle.
+// Each shadow is a flat trapezoid on the y=0 ground plane,
+// projecting from the obstacle's near face toward the camera by
+// `obstacle.height * factor`, where `factor` is the linear
+// interpolation between `GAME_SHADOW_LEN_FACTOR_MIN` and
+// `GAME_SHADOW_LEN_FACTOR_MAX` keyed on `sun_y / SINK_RANGE`.
+//
+// Drawn between the floor paint (`synthwave_step`) and the
+// obstacles themselves so the cube tops overpaint any shadow
+// geometry directly under them. When the sun has fully set the
+// floor base is already the shadow colour (see synthwave_step's
+// `fully_shadowed` flag), and this function does nothing.
+void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float sun_y);
+
 // Draw all active obstacles. Sorted back-to-front (descending z) and
 // drawn as flat-shaded front faces with painter's algorithm — no
 // z-buffer needed. `cam_x` is the camera's lateral world position.

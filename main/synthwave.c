@@ -334,7 +334,23 @@ void synthwave_draw_top_grid(pax_buf_t* fb, float y_bias) {
 // aligned with obstacle bases at those world-z positions.
 #define FLOOR_HSTRIPE_DRAW_EVERY  3
 
-void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
+void synthwave_step_base(pax_buf_t* fb, bool fully_shadowed) {
+    float const horizon_y   = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
+    float const rect_top_y  = horizon_y + 1.0f;
+    float const rect_height = GRID_BOTTOM_Y - rect_top_y;
+
+    // Floor base color — full-width rect, stays on PAX since
+    // pax_range_setter_16bpp is already a tight halfword memset
+    // for horizontal runs (faster than a generic Bresenham would be).
+    // Once the sun has fully set the world is uniformly in shadow,
+    // so we just paint the floor base with the shadow colour
+    // instead of running per-obstacle shadow quads on top of the
+    // normal purple base.
+    pax_col_t const floor_base_col = fully_shadowed ? GAME_SHADOW_FLOOR_COLOR : 0xFF5D0B8Bu;
+    pax_simple_rect(fb, floor_base_col, 0, rect_top_y, DISPLAY_LOG_W, rect_height);
+}
+
+void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x) {
     // Camera's absolute world-z position. Mirrors how `world_advance`
     // tracks each obstacle's z_world: every frame the camera moves
     // forward by dz_world, so a stripe at fixed world-z W appears at
@@ -356,13 +372,6 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     while (cam_z < 0.0f)        cam_z += cam_z_wrap;
 
     float const horizon_y   = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
-    float const rect_top_y  = horizon_y + 1.0f;
-    float const rect_height = GRID_BOTTOM_Y - rect_top_y;
-
-    // Floor base color — full-width rect, stays on PAX since
-    // pax_range_setter_16bpp is already a tight halfword memset
-    // for horizontal runs (faster than a generic Bresenham would be).
-    pax_simple_rect(fb, 0xFF5D0B8B, 0, rect_top_y, DISPLAY_LOG_W, rect_height);
 
     // Pre-pack the magenta lane-line color once for both the
     // vertical lanes and the horizontal stripes — both go through
