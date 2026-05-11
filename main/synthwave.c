@@ -14,8 +14,10 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "direct_565.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "magicnumbers.h"
 #include "pax_gfx.h"
 #include "pax_shapes.h"
 
@@ -227,7 +229,7 @@ static struct {
 // Original (unlifted) grid horizon, kept so the slope-preserving
 // extrapolation math reads cleanly.
 #define GRID_HORIZON_Y_BASE 354.0f
-#define GRID_BOTTOM_Y       480.0f
+#define GRID_BOTTOM_Y       ((float)DISPLAY_LOG_H)
 
 // --- Cached triangulation indices --------------------------------------------
 
@@ -301,7 +303,7 @@ void synthwave_draw_wireframe(pax_buf_t* fb, float y_bias) {
 
 void synthwave_draw_top_grid(pax_buf_t* fb, float y_bias) {
     float const horizon_y = GRID_HORIZON_Y_BASE - GRID_LIFT_PX + y_bias;
-    pax_simple_line(fb, 0xFFF71FF1, 0, horizon_y, 800, horizon_y);
+    pax_simple_line(fb, 0xFFF71FF1, 0, horizon_y, DISPLAY_LOG_W, horizon_y);
 }
 
 // World-space floor parameters. Vertical lane lines and horizontal
@@ -357,7 +359,16 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
     float const rect_top_y  = horizon_y + 1.0f;
     float const rect_height = GRID_BOTTOM_Y - rect_top_y;
 
-    pax_simple_rect(fb, 0xFF5D0B8B, 0, rect_top_y, 800, rect_height);
+    // Floor base color — full-width rect, stays on PAX since
+    // pax_range_setter_16bpp is already a tight halfword memset
+    // for horizontal runs (faster than a generic Bresenham would be).
+    pax_simple_rect(fb, 0xFF5D0B8B, 0, rect_top_y, DISPLAY_LOG_W, rect_height);
+
+    // Pre-pack the magenta lane-line color once for both the
+    // vertical lanes and the horizontal stripes — both go through
+    // the direct-565 Bresenham (no per-pixel PAX setter dispatch).
+    uint16_t  const grid_packed = direct_565_pack_for(fb, 0xFFF71FF1u);
+    uint16_t* const fb_pixels   = (uint16_t*)pax_buf_get_pixels(fb);
 
     // Vertical lane lines in world space. Each line is the projection
     // of a world-X-constant ray on the ground (y_w = 0) from z = ∞
@@ -398,7 +409,7 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
         float const X     = (float)k * FLOOR_LANE_L;
         float const dx    = X - cam_x;
         float const x_bot = FLOOR_HALF_W + FLOOR_F * dx / FLOOR_Z_NEAR;
-        pax_simple_line(fb, 0xFFF71FF1, FLOOR_HALF_W, horizon_y, x_bot, sy_bot);
+        direct_565_line(fb_pixels, (int)FLOOR_HALF_W, (int)horizon_y, (int)x_bot, (int)sy_bot, grid_packed);
     }
 
     // Horizontal scanlines anchored to absolute world-z positions
@@ -435,6 +446,6 @@ void synthwave_step(pax_buf_t* fb, float dz_world, float cam_x) {
         int const sy_int = (int)sy;
         if (sy_int == last_sy_int) continue;
         last_sy_int = sy_int;
-        pax_simple_line(fb, 0xFFF71FF1, 0, sy, 800, sy);
+        direct_565_line(fb_pixels, 0, sy_int, DISPLAY_LOG_W - 1, sy_int, grid_packed);
     }
 }

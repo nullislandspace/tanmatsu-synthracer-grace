@@ -1,5 +1,6 @@
 #include "render.h"
 
+#include "direct_565.h"
 #include "shapes/pax_tris.h"
 
 // Per-obstacle dimensions and colours come from the obstacle_t
@@ -48,6 +49,16 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         idx[j + 1] = k;
     }
 
+    // Wireframe outlines bypass PAX and write straight into the
+    // framebuffer halfwords via direct_565_line. The pre-packed
+    // colour is recomputed per cube because each obstacle carries
+    // its own outline_color, but that's one pack per cube (not per
+    // line or per pixel). Triangle fills stay on PAX —
+    // pax_range_setter_16bpp is already an optimal halfword memset
+    // for solid horizontal runs.
+    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    bool      const rev_endian = fb->reverse_endianness;
+
     for (int k = 0; k < n; k++) {
         obstacle_t const* o = &w->obstacles[idx[k]];
 
@@ -93,23 +104,30 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         // Painter's order within the cube: side and top are at least
         // partially deeper than the front, so draw them first. The
         // front face overpaints any sliver of side/top that leaks
-        // through to the front edge.
+        // through to the front edge. Each face uses direct_565_tri:
+        // colour pre-packed once per face, scanlines walk in
+        // logical-X direction so the inner pixel writes are a
+        // contiguous raw-byte run (cache-friendly under ROT_CW).
         if (show_left) {
-            pax_simple_tri(fb, o->side_color, sx_LBF, sy_LBF, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
-            pax_simple_tri(fb, o->side_color, sx_LBF, sy_LBF, sx_LTB, sy_LTB, sx_LBB, sy_LBB);
+            uint16_t const c = direct_565_pack(o->side_color, rev_endian);
+            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_LTF, sy_LTF, sx_LTB, sy_LTB, c);
+            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_LTB, sy_LTB, sx_LBB, sy_LBB, c);
         } else if (show_right) {
-            pax_simple_tri(fb, o->side_color, sx_RBF, sy_RBF, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
-            pax_simple_tri(fb, o->side_color, sx_RBF, sy_RBF, sx_RTB, sy_RTB, sx_RBB, sy_RBB);
+            uint16_t const c = direct_565_pack(o->side_color, rev_endian);
+            direct_565_tri(fb_pixels, sx_RBF, sy_RBF, sx_RTF, sy_RTF, sx_RTB, sy_RTB, c);
+            direct_565_tri(fb_pixels, sx_RBF, sy_RBF, sx_RTB, sy_RTB, sx_RBB, sy_RBB, c);
         }
 
         if (show_top) {
-            pax_simple_tri(fb, o->top_color, sx_LTF, sy_LTF, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
-            pax_simple_tri(fb, o->top_color, sx_LTF, sy_LTF, sx_RTB, sy_RTB, sx_LTB, sy_LTB);
+            uint16_t const c = direct_565_pack(o->top_color, rev_endian);
+            direct_565_tri(fb_pixels, sx_LTF, sy_LTF, sx_RTF, sy_RTF, sx_RTB, sy_RTB, c);
+            direct_565_tri(fb_pixels, sx_LTF, sy_LTF, sx_RTB, sy_RTB, sx_LTB, sy_LTB, c);
         }
 
         if (front_visible) {
-            pax_simple_tri(fb, o->front_color, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF);
-            pax_simple_tri(fb, o->front_color, sx_LBF, sy_LBF, sx_RTF, sy_RTF, sx_LTF, sy_LTF);
+            uint16_t const c = direct_565_pack(o->front_color, rev_endian);
+            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF, c);
+            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RTF, sy_RTF, sx_LTF, sy_LTF, c);
         }
 
         // Cyan wireframe — each of the cube's 12 edges is drawn
@@ -120,21 +138,23 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         // edge-by-edge avoids the bug where merging the front
         // face's left/right verticals into the side-face branches
         // would drop one of them whenever the camera saw only one
-        // side of a tall pillar.
-        if (front_visible)              pax_simple_line(fb, o->outline_color, sx_LBF, sy_LBF, sx_RBF, sy_RBF);
-        if (front_visible || show_top)  pax_simple_line(fb, o->outline_color, sx_LTF, sy_LTF, sx_RTF, sy_RTF);
-        if (front_visible || show_left) pax_simple_line(fb, o->outline_color, sx_LBF, sy_LBF, sx_LTF, sy_LTF);
-        if (front_visible || show_right)pax_simple_line(fb, o->outline_color, sx_RBF, sy_RBF, sx_RTF, sy_RTF);
-        if (show_top)                   pax_simple_line(fb, o->outline_color, sx_LTB, sy_LTB, sx_RTB, sy_RTB);
-        if (show_top || show_left)      pax_simple_line(fb, o->outline_color, sx_LTF, sy_LTF, sx_LTB, sy_LTB);
-        if (show_top || show_right)     pax_simple_line(fb, o->outline_color, sx_RTF, sy_RTF, sx_RTB, sy_RTB);
+        // side of a tall pillar. Direct-565 line: one halfword
+        // store per pixel, no PAX setter dispatch.
+        uint16_t const wf = direct_565_pack(o->outline_color, rev_endian);
+        if (front_visible)               direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_RBF, (int)sy_RBF, wf);
+        if (front_visible || show_top)   direct_565_line(fb_pixels, (int)sx_LTF, (int)sy_LTF, (int)sx_RTF, (int)sy_RTF, wf);
+        if (front_visible || show_left)  direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LTF, (int)sy_LTF, wf);
+        if (front_visible || show_right) direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RTF, (int)sy_RTF, wf);
+        if (show_top)                    direct_565_line(fb_pixels, (int)sx_LTB, (int)sy_LTB, (int)sx_RTB, (int)sy_RTB, wf);
+        if (show_top || show_left)       direct_565_line(fb_pixels, (int)sx_LTF, (int)sy_LTF, (int)sx_LTB, (int)sy_LTB, wf);
+        if (show_top || show_right)      direct_565_line(fb_pixels, (int)sx_RTF, (int)sy_RTF, (int)sx_RTB, (int)sy_RTB, wf);
         if (show_left) {
-            pax_simple_line(fb, o->outline_color, sx_LBF, sy_LBF, sx_LBB, sy_LBB);
-            pax_simple_line(fb, o->outline_color, sx_LBB, sy_LBB, sx_LTB, sy_LTB);
+            direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LBB, (int)sy_LBB, wf);
+            direct_565_line(fb_pixels, (int)sx_LBB, (int)sy_LBB, (int)sx_LTB, (int)sy_LTB, wf);
         }
         if (show_right) {
-            pax_simple_line(fb, o->outline_color, sx_RBF, sy_RBF, sx_RBB, sy_RBB);
-            pax_simple_line(fb, o->outline_color, sx_RBB, sy_RBB, sx_RTB, sy_RTB);
+            direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RBB, (int)sy_RBB, wf);
+            direct_565_line(fb_pixels, (int)sx_RBB, (int)sy_RBB, (int)sx_RTB, (int)sy_RTB, wf);
         }
     }
 }

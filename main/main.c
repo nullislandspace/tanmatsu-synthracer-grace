@@ -23,6 +23,7 @@
 #include "hal/lcd_types.h"
 #include "icons.h"
 #include "input.h"
+#include "magicnumbers.h"
 #include "nvs_flash.h"
 #include "pax_gfx.h"
 #include "render.h"
@@ -59,7 +60,7 @@ static int                          ppa_pending_n    = 0;
 // baseline. Bands span fb logical y = -4 (off-screen above) to ~174;
 // we render with y_bias = +4 so the topmost band lands at cache y=0
 // and the cache is exactly tall enough to hold the whole sun.
-#define SUN_CACHE_LOG_W   800
+#define SUN_CACHE_LOG_W   DISPLAY_LOG_W
 #define SUN_CACHE_LOG_H   180
 #define SUN_RENDER_Y_BIAS 4.0f
 
@@ -68,7 +69,7 @@ static int                          ppa_pending_n    = 0;
 // (horizon). The cache is rendered with y_bias = -94 so the top of
 // the visible mountain region lands at cache y=0, and the horizon
 // line at fb y=256 lands at cache y=162.
-#define MOUNTAIN_CACHE_LOG_W   800
+#define MOUNTAIN_CACHE_LOG_W   DISPLAY_LOG_W
 #define MOUNTAIN_CACHE_LOG_H   163
 #define MOUNTAIN_RENDER_Y_BIAS (-94.0f)
 #define MOUNTAIN_DEST_LOG_Y    94

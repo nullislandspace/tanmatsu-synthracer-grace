@@ -1,12 +1,13 @@
 #pragma once
 
+#include "magicnumbers.h"
 #include "pax_gfx.h"
 #include "world.h"
 
 // Pinhole-camera projection parameters. The horizon-y matches
 // synthwave's GRID_HORIZON_Y_BASE - GRID_LIFT_PX (= 256), so projected
 // world geometry vanishes correctly into the synthwave horizon.
-#define RENDER_HALF_W       400.0f
+#define RENDER_HALF_W       ((float)DISPLAY_LOG_W / 2.0f)
 #define RENDER_HORIZON_Y    256.0f
 #define RENDER_FOCAL_LEN    450.0f
 #define RENDER_CAM_Y        1.0f
