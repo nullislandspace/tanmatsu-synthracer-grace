@@ -205,40 +205,41 @@ bool game_collide(game_state_t* g, world_state_t const* w) {
         float const z_pen = fminf(ship_zF, obs_zF) - fmaxf(ship_zN, obs_zN);
         if (x_pen <= 0.0f || z_pen <= 0.0f) continue;
 
-        // Classify the contact by the obstacle's lateral position
-        // relative to the playfield. This is shape-agnostic and
-        // robust under future obstacle types:
-        //
-        //   * Boundary obstacles — placed entirely beyond the
-        //     ship's lateral clamp (obs.xL ≥ SHIP_X_MAX_WORLD
-        //     or obs.xR ≤ SHIP_X_MIN_WORLD) — are scrape-only.
-        //     The ship can't position itself laterally inside
-        //     them by construction, so any contact is the side
-        //     face of the obstacle. Today these are the track's
-        //     side walls; the same rule fits any future surface
-        //     that sits outside the playable lane.
-        //   * Trailing contact — obstacle has drifted past the
-        //     ship's centre (obs.z_world ≤ SHIP_COLLISION_Z_C) —
-        //     is also a scrape. By the time we see overlap from
-        //     behind the ship's centre, the obstacle is no longer
-        //     in our path; pushing the ship laterally out is the
-        //     correct resolution.
-        //   * Otherwise — playfield obstacle still ahead of the
-        //     ship's centre, with any AABB overlap — is head-on.
-        //     The ship has run into something that was in its
-        //     path. No more "corner clip survives" — any contact
-        //     is fatal.
-        bool const is_boundary_obstacle = (obs_xL >= SHIP_X_MAX_WORLD)
-                                       || (obs_xR <= SHIP_X_MIN_WORLD);
-        bool const obstacle_ahead       = (o->z_world > SHIP_COLLISION_Z_C);
-        bool       is_scrape;
-        if (is_boundary_obstacle) {
-            is_scrape = true;
-        } else if (!obstacle_ahead) {
-            is_scrape = true;
-        } else {
-            is_scrape = false;
+        // Collision response is dispatched by obstacle kind. Each
+        // kind decides for itself whether contact is a scrape,
+        // head-on, pickup, ramp trigger, etc. New kinds only need
+        // a case here — the geometry math above stays untouched.
+        bool const obstacle_ahead = (o->z_world > SHIP_COLLISION_Z_C);
+        bool       is_scrape      = false;
+        bool       skip_response  = false;  // for non-blocking kinds (pickups, future ramps)
+        switch (o->kind) {
+            case OBSTACLE_KIND_WALL:
+                // Walls are scrape-only by definition. Side walls
+                // sit just beyond the ship's lateral clamp; any
+                // future "ridable" wall (e.g. an in-track barrier)
+                // gets tagged WALL too and gets the same response.
+                is_scrape = true;
+                break;
+            case OBSTACLE_KIND_CUBE:
+                // Cube ahead of the ship → head-on. Cube that's
+                // drifted past the ship's centre → trailing
+                // scrape (it's no longer in our path, just push
+                // the ship laterally out of the residual overlap).
+                is_scrape = !obstacle_ahead;
+                break;
+            case OBSTACLE_KIND_PICKUP_TRI:
+            case OBSTACLE_KIND_PICKUP_BOOST:
+            case OBSTACLE_KIND_PICKUP_JUMP:
+            case OBSTACLE_KIND_PICKUP_SHIELD:
+            case OBSTACLE_KIND_RAMP:
+                // Not implemented yet — ignore the overlap so
+                // collision doesn't kill the ship on contact with
+                // a future pickup that happens to share the pool.
+                // Phase 5 / 6 / 9 / future will fill these in.
+                skip_response = true;
+                break;
         }
+        if (skip_response) continue;
 
         if (is_scrape) {
             // Push the ship out of the obstacle laterally so it

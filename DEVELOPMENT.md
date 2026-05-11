@@ -332,27 +332,36 @@
   debug speed knob now adjusts `ship_base_speed_z` (not the
   current `ship_speed_z`) so the scrape decay/recovery doesn't
   fight the player's tuning.
-- 2026-05-11 — Collision classifier ended up *position-based*, not
-  shape-based or axis-of-smallest-penetration. An obstacle is a
-  "boundary obstacle" if its x range sits entirely outside the
-  ship's lateral clamp (`obs.xL >= SHIP_X_MAX_WORLD` or
-  `obs.xR <= SHIP_X_MIN_WORLD`); the ship's centre can never enter
-  it by construction so any contact is by geometry on a side face.
-  Boundary obstacles always scrape. Playfield obstacles (anything
-  whose x range overlaps the ship's lateral range) are head-on on
-  any AABB overlap while still ahead of the ship's z centre;
-  trailing contact (obstacle has drifted past) is a scrape. The
-  earlier axis-of-smallest-penetration rule misfired on long wall
-  segments that had drifted past (z_pen shrunk below x_pen, faked
-  a head-on) and on cube corner clips (allowed survivable graze
-  past obstacles). An aspect-ratio shortcut was tried and
-  rejected — the user's call: future obstacle types/shapes should
-  support both behaviours based on the geometry of contact, not
-  the obstacle's identity. The boundary-obstacle position rule is
-  the cleanest shape-agnostic split available today; the trade-off
-  is that an in-playfield "ridable wall" can't be expressed by
-  position alone, but no such obstacle exists yet. When one is
-  needed we'll add an explicit `kind` tag on the obstacle struct.
+- 2026-05-11 — Collision classifier evolved through several
+  shapes before landing in its final form. The axis-of-smallest-
+  penetration rule (first attempt) misfired on long wall segments
+  that had drifted past (z_pen shrunk below x_pen, faked a head-
+  on) and on cube corner clips (allowed survivable graze past
+  obstacles). An aspect-ratio shortcut was tried and rejected.
+  A position-based variant — "boundary obstacle if its x range
+  sits entirely outside the ship's lateral clamp" — fixed the
+  wall transition and made cube corner clips fatal, but it baked
+  the wall/non-wall distinction into the geometry of where the
+  obstacle is placed, which doesn't generalise to future
+  in-playfield scrape-able surfaces.
+- 2026-05-11 — **Final form: per-obstacle `kind` tag.** Added
+  `obstacle_kind_t` (`CUBE`, `WALL`, plus stubs for
+  `PICKUP_TRI/BOOST/JUMP/SHIELD` and `RAMP`) and an `obstacle_t.kind`
+  field. World's spawn helpers tag entries at creation time:
+  `try_spawn_dynamic` → `CUBE`, `top_up_wall` → `WALL`. The collision
+  classifier now dispatches on kind: WALL is always scrape, CUBE
+  is head-on if ahead and trailing-scrape if past, pickup/ramp
+  stubs `continue` so their future presence in the pool doesn't
+  collide. The position-based boundary test is gone — wall vs
+  non-wall is a data fact, not a geometric inference. Adding a
+  new obstacle kind is now: one enum value + one case in
+  `game_collide` + (when needed) one case in `render_obstacles`.
+  Trade-off: 1 byte per pool entry (alignment-padded — already
+  paying ~40 bytes per entry, +1 is noise) plus a small switch
+  dispatch in collision. The benefit is that future obstacle
+  types/shapes plug into the same general pool/render/collision
+  logic the user asked for, instead of competing with the
+  classifier's heuristics.
 - 2026-05-11 — Collision model for Phase 4 derived from a
   playtest of the original *Race The Sun*: head-on collisions
   are fatal, but **scraping along a wall or the side of an
@@ -530,10 +539,15 @@ the function makes it explicit and lets us animate the sun.
   remains a continuous chain of segments out to the far spawn plane;
   spawns dynamic obstacles on the randomized cadence.
 - Obstacles stored in a fixed pool (128 entries) of
-  `{ x, z, half_w, half_d, height, colors, active }`. Each entry
-  carries its own dimensions and four-colour palette — the
-  renderer doesn't distinguish dynamic obstacles from wall
-  segments from future pickups, they're all just cubes.
+  `{ kind, x, z, half_w, half_d, height, colors, active }`. The
+  `kind` enum (`obstacle_kind_t`) tags each entry as CUBE, WALL,
+  one of the pickup variants, or RAMP. Collision and render
+  dispatch on it — adding a new obstacle type means one enum
+  value + a case in each switch, no plumbing changes. Each entry
+  also carries its own dimensions and four-colour palette so the
+  renderer treats every entry uniformly (today: 3D cube draw for
+  CUBE + WALL; pickups/ramps will get their own draw functions
+  when those phases land).
 - Side walls are stored as regular obstacles so a single AABB
   collision pass covers both the dynamic stream and the track
   edges. Segment length = `FLOOR_LANE_L * FLOOR_HSTRIPE_DRAW_EVERY`
@@ -588,28 +602,26 @@ the function makes it explicit and lets us animate the sun.
   the actual turn rate are one and the same parameter.
 - Pickups (Phase 9+) activated via spacebar / button (queued events).
 - Collision: `game_collide` does AABB in 3D world space against
-  every active entry of the obstacle pool (walls and dynamic
-  obstacles share the same pool). Classification is
-  position-based:
-  * *Boundary obstacle* — `obs.xL >= SHIP_X_MAX_WORLD` or
-    `obs.xR <= SHIP_X_MIN_WORLD`. Ship's centre can't enter
-    it laterally so any contact is on a side face. Always
-    scrape: set `scrape_left`/`scrape_right` and push the ship
-    out of the obstacle along x by `x_pen` so it physically
-    can't penetrate the wall.
-  * *Trailing contact* — obstacle is in the playfield but has
-    drifted past the ship's z centre (`obs.z_world ≤
-    SHIP_COLLISION_Z_C`). Treated as a scrape (the obstacle is
-    no longer in the ship's path).
-  * *Playfield obstacle ahead* — anything else with AABB
-    overlap. Head-on: `game_collide` returns true, the caller
-    flips the app state to `GAME_OVER`.
-  `game_after_collide` reads the resolved flags and ramps
+  every active entry of the obstacle pool (walls, dynamic
+  obstacles, future pickups all share the same pool).
+  Classification dispatches on `obstacle_t.kind`:
+  * `OBSTACLE_KIND_WALL` — scrape only. Set
+    `scrape_left`/`scrape_right` and push the ship out along x
+    by `x_pen` so it physically can't penetrate the wall.
+  * `OBSTACLE_KIND_CUBE` — head-on if the obstacle is still
+    ahead of `SHIP_COLLISION_Z_C` (returns true; caller flips
+    the app state to `GAME_OVER`); trailing-scrape if it has
+    already drifted past the ship's centre.
+  * `OBSTACLE_KIND_PICKUP_*` / `OBSTACLE_KIND_RAMP` — stubs
+    that `continue` for now. Phase 5 / 6 / 9 / future fill
+    these in.
+  `game_after_collide` reads the resolved scrape flags and ramps
   `ship_speed_z` toward the scrape-floor (≈ 0.55 × base) at
   `SCRAPE_DECEL` while scraping, or back up toward base speed at
   the slower `SPEED_RECOVERY` when contact ends — both
   transitions are continuous. Phase 9 will add a pickup
-  proximity test that respects the magnet upgrade range.
+  proximity test (or extend the pickup `case` clauses above) that
+  respects the magnet upgrade range.
 - **Sun mechanic & shadow**: `sun_seconds_left` ticks down at 1.0/s in
   light, 1.5/s in shadow. Each tick `game_step()` calls
   `is_ship_in_shadow(world, ship)`:

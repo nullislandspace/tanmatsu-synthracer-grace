@@ -70,11 +70,13 @@ static float frand(uint32_t* s) {
 // Find a free obstacle slot and populate it. Returns true on success.
 // On a full pool we silently drop the spawn — the pool is sized so
 // that shouldn't happen with the current cadence + walls.
-static bool spawn_obstacle(world_state_t* w, float x, float z, float half_w, float half_d, float height,
+static bool spawn_obstacle(world_state_t* w, obstacle_kind_t kind,
+                           float x, float z, float half_w, float half_d, float height,
                            uint32_t front_color, uint32_t side_color, uint32_t top_color,
                            uint32_t outline_color) {
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
         if (w->obstacles[i].active) continue;
+        w->obstacles[i].kind          = kind;
         w->obstacles[i].x_world       = x;
         w->obstacles[i].z_world       = z;
         w->obstacles[i].half_w        = half_w;
@@ -102,7 +104,8 @@ static bool spawn_obstacle(world_state_t* w, float x, float z, float half_w, flo
 // drawn horizontal stripes.
 static void top_up_wall(world_state_t* w, float* far_cursor, float wall_x) {
     while (*far_cursor < WORLD_Z_FAR_SPAWN) {
-        spawn_obstacle(w, wall_x, *far_cursor, WALL_HALF_W, WALL_SEGMENT_HALF_D, WALL_HEIGHT,
+        spawn_obstacle(w, OBSTACLE_KIND_WALL,
+                       wall_x, *far_cursor, WALL_HALF_W, WALL_SEGMENT_HALF_D, WALL_HEIGHT,
                        WALL_FRONT_COLOR, WALL_SIDE_COLOR, WALL_TOP_COLOR, WALL_OUTLINE_COLOR);
         *far_cursor += WALL_SEGMENT_LEN;
     }
@@ -124,7 +127,7 @@ void world_init(world_state_t* w, uint32_t seed) {
 }
 
 static void try_spawn_dynamic(world_state_t* w) {
-    spawn_obstacle(w,
+    spawn_obstacle(w, OBSTACLE_KIND_CUBE,
                    (frand(&w->prng_state) * 2.0f - 1.0f) * TRACK_HALF_WIDTH,
                    WORLD_Z_FAR_SPAWN,
                    OBSTACLE_HALF_W, OBSTACLE_HALF_W, OBSTACLE_HEIGHT,

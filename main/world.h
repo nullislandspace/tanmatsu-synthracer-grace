@@ -15,16 +15,33 @@
 // obstacles and future pickups.
 #define WORLD_OBSTACLE_POOL_SIZE 128
 
+// What an obstacle pool entry actually *is* — drives collision
+// response and (later) custom rendering. Today only CUBE and WALL
+// are populated; the pickup and ramp values are stubbed so the
+// collision/render switches already have the slots and can be
+// filled in as those phases land. Adding a new kind = one enum
+// entry + one case in each switch.
+typedef enum {
+    OBSTACLE_KIND_CUBE = 0,        // dodge-or-die; head-on fatal, side scrape allowed
+    OBSTACLE_KIND_WALL,            // scrape-only (side walls today)
+    OBSTACLE_KIND_PICKUP_TRI,      // Phase 6: collected, bumps multiplier counter
+    OBSTACLE_KIND_PICKUP_BOOST,    // Phase 5: collected, refills sun + restores speed
+    OBSTACLE_KIND_PICKUP_JUMP,     // Phase 9
+    OBSTACLE_KIND_PICKUP_SHIELD,   // Phase 9
+    OBSTACLE_KIND_RAMP,            // future: contact triggers a jump
+} obstacle_kind_t;
+
 typedef struct {
-    float    x_world;        // lateral, world units (0 = track centre)
-    float    z_world;        // depth, world units (positive = ahead of camera)
-    float    half_w;         // half-width  (lateral)
-    float    half_d;         // half-depth  (along z)
-    float    height;         // height in world units (base sits on y=0 plane)
-    uint32_t front_color;    // pax_col_t for the front face
-    uint32_t side_color;     // pax_col_t for the visible side face
-    uint32_t top_color;      // pax_col_t for the top face (drawn only when camera is above the cube)
-    uint32_t outline_color;  // pax_col_t for the wireframe overlay
+    obstacle_kind_t kind;          // collision + render dispatch
+    float    x_world;              // lateral, world units (0 = track centre)
+    float    z_world;              // depth, world units (positive = ahead of camera)
+    float    half_w;               // half-width  (lateral)
+    float    half_d;               // half-depth  (along z)
+    float    height;               // height in world units (base sits on y=0 plane)
+    uint32_t front_color;          // pax_col_t for the front face
+    uint32_t side_color;           // pax_col_t for the visible side face
+    uint32_t top_color;            // pax_col_t for the top face (drawn only when camera is above the cube)
+    uint32_t outline_color;        // pax_col_t for the wireframe overlay
     bool     active;
 } obstacle_t;
 
