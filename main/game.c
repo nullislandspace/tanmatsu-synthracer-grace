@@ -179,13 +179,21 @@ void game_step(game_state_t* g, float dt, int steer) {
     g->cam_x = g->ship_x_world;
 }
 
-bool game_collide(game_state_t* g, world_state_t const* w) {
+bool game_collide(game_state_t* g, world_state_t const* w, float dt) {
     g->scrape_left  = false;
     g->scrape_right = false;
     bool head_on    = false;
 
     float const ship_zN = SHIP_COLLISION_Z_C - SHIP_COLLISION_HALF_D;
     float const ship_zF = SHIP_COLLISION_Z_C + SHIP_COLLISION_HALF_D;
+
+    // Per-frame z motion. Obstacles will move by this much in
+    // world_advance later this frame; they moved by approximately
+    // the same amount last frame too. We use it for both swept-z
+    // overlap detection (so fast obstacles can't tunnel between
+    // frames) and to recover the obstacle's previous position for
+    // the head-on / scrape classifier.
+    float const dz_frame = (dt > 0.0f) ? (g->ship_speed_z * dt) : 0.0f;
 
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
         obstacle_t const* o = &w->obstacles[i];
@@ -196,22 +204,38 @@ bool game_collide(game_state_t* g, world_state_t const* w) {
         float const ship_xL = g->ship_x_world - SHIP_COLLISION_HALF_W;
         float const ship_xR = g->ship_x_world + SHIP_COLLISION_HALF_W;
 
-        float const obs_xL = o->x_world - o->half_w;
-        float const obs_xR = o->x_world + o->half_w;
-        float const obs_zN = o->z_world - o->half_d;
-        float const obs_zF = o->z_world + o->half_d;
+        float const obs_xL      = o->x_world - o->half_w;
+        float const obs_xR      = o->x_world + o->half_w;
+        // Current z range and the obstacle's last-frame z range
+        // (positions are reduced by `dz_frame` each world_advance,
+        // so previous position = current + dz_frame). The swept
+        // range covers everywhere the obstacle was during the
+        // frame: from its current near face down to its previous
+        // far face. Catches single-frame tunneling at any speed.
+        float const obs_zN_curr = o->z_world - o->half_d;
+        float const obs_zF_curr = o->z_world + o->half_d;
+        float const obs_zN_prev = obs_zN_curr + dz_frame;
+        float const obs_zF_prev = obs_zF_curr + dz_frame;
+        float const swept_zN    = obs_zN_curr;  // smallest z reached this frame (current near)
+        float const swept_zF    = obs_zF_prev;  // largest  z reached this frame (previous far)
 
         float const x_pen = fminf(ship_xR, obs_xR) - fmaxf(ship_xL, obs_xL);
-        float const z_pen = fminf(ship_zF, obs_zF) - fmaxf(ship_zN, obs_zN);
+        float const z_pen = fminf(ship_zF, swept_zF) - fmaxf(ship_zN, swept_zN);
         if (x_pen <= 0.0f || z_pen <= 0.0f) continue;
 
-        // Collision response is dispatched by obstacle kind. Each
-        // kind decides for itself whether contact is a scrape,
-        // head-on, pickup, ramp trigger, etc. New kinds only need
-        // a case here — the geometry math above stays untouched.
-        bool const obstacle_ahead = (o->z_world > SHIP_COLLISION_Z_C);
-        bool       is_scrape      = false;
-        bool       skip_response  = false;  // for non-blocking kinds (pickups, future ramps)
+        // Head-on iff the obstacle's near face was still ahead of
+        // the ship's front face at the start of this frame — it
+        // entered the ship's z range *from ahead* during the
+        // frame. If the obstacle was already overlapping (or past)
+        // last frame, this is a trailing scrape: the obstacle is
+        // continuing past us, just push the ship out laterally.
+        // The earlier "obstacle.z_world > SHIP_COLLISION_Z_C" rule
+        // misclassified fast head-on hits where dz outran the
+        // overlap window in one frame and the cube landed past
+        // ship centre with the player still aimed dead at it.
+        bool const came_from_ahead = obs_zN_prev >= ship_zF;
+        bool       is_scrape       = false;
+        bool       skip_response   = false;  // for non-blocking kinds (pickups, future ramps)
         switch (o->kind) {
             case OBSTACLE_KIND_WALL:
                 // Walls are scrape-only by definition. Side walls
@@ -221,11 +245,9 @@ bool game_collide(game_state_t* g, world_state_t const* w) {
                 is_scrape = true;
                 break;
             case OBSTACLE_KIND_CUBE:
-                // Cube ahead of the ship → head-on. Cube that's
-                // drifted past the ship's centre → trailing
-                // scrape (it's no longer in our path, just push
-                // the ship laterally out of the residual overlap).
-                is_scrape = !obstacle_ahead;
+                // Hit from ahead → head-on (fatal). Already-passing
+                // → trailing scrape (push out and slow).
+                is_scrape = !came_from_ahead;
                 break;
             case OBSTACLE_KIND_PICKUP_TRI:
             case OBSTACLE_KIND_PICKUP_BOOST:

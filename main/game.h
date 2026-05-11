@@ -49,17 +49,27 @@ void game_init(game_state_t* g);
 // position the player is trying to be in this frame.
 void game_step(game_state_t* g, float dt, int steer);
 
-// AABB collision pass against every active entry in the obstacle
-// pool. Classifies each overlap by axis of smallest penetration:
-//   * smallest on x → side scrape (sets scrape_left/scrape_right
-//     and pushes the ship out by `x_pen` so it physically can't
-//     penetrate the wall);
-//   * smallest on z AND obs.z_world ahead of ship → head-on
-//     (returns true; caller flips the app state to GAME_OVER).
-// Smallest-on-z when the obstacle has already drifted past the
-// ship's z centre is still treated as a scrape — it's just a long
-// wall segment whose back edge has crept past the ship.
-bool game_collide(game_state_t* g, world_state_t const* w);
+// Swept AABB collision pass against every active entry in the
+// obstacle pool. The z range tested is the obstacle's *swept*
+// extent — from its current near face to its previous far face,
+// using `speed * dt` as the per-frame z delta — so a fast obstacle
+// that would otherwise tunnel through the ship in a single frame
+// still registers as overlap.
+//
+// Kind dispatch decides the response per pool entry:
+//   * `OBSTACLE_KIND_WALL` → always a scrape: sets
+//     `scrape_left` / `scrape_right` and pushes the ship out by
+//     `x_pen` so it physically can't penetrate the wall.
+//   * `OBSTACLE_KIND_CUBE` → head-on iff the obstacle's near
+//     face was *still ahead of the ship's front face at the
+//     start of the frame* — i.e. the obstacle just slammed into
+//     the ship from ahead. Returns true; caller flips the app
+//     state to GAME_OVER. Otherwise (the obstacle was already
+//     overlapping or past last frame), the contact is a
+//     trailing scrape — push out and ramp speed.
+//   * pickup / ramp stubs `continue` so they don't kill the
+//     ship on contact. Phase 5 / 6 / 9 will fill these in.
+bool game_collide(game_state_t* g, world_state_t const* w, float dt);
 
 // Speed dynamics + spark emission/advance. Reads scrape_left/
 // scrape_right (set by game_collide) to ramp ship_speed_z toward

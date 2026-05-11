@@ -303,7 +303,7 @@ void app_main(void) {
                 // position the one we render and the one that
                 // feeds the next world_advance.
                 game_step(&game, dt, steer);
-                bool const head_on = game_collide(&game, &world);
+                bool const head_on = game_collide(&game, &world, dt);
                 game_after_collide(&game, dt);
                 world_advance(&world, dt, game.ship_speed_z);
 
