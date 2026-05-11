@@ -146,7 +146,7 @@ void app_main(void) {
     bsp_configuration_t const bsp_configuration = {
         .display =
             {
-                .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888,
+                .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
                 .num_fbs                = 1,
             },
     };
@@ -249,14 +249,32 @@ void app_main(void) {
     app_state_t app_state = APP_STATE_TITLE;
     int64_t     prev_us   = esp_timer_get_time();
 
+    // Per-frame timing accumulators (microseconds), summed over a
+    // ~1 s window then logged + reset. Phases are mutually exclusive
+    // and together cover the whole loop iteration, so the sum should
+    // approximately equal `window_us`.
+    int64_t prof_input_us  = 0;
+    int64_t prof_phys_us   = 0;
+    int64_t prof_bgcpy_us  = 0;
+    int64_t prof_bgflr_us  = 0;
+    int64_t prof_obs_us    = 0;
+    int64_t prof_fgrest_us = 0;
+    int64_t prof_blit_us   = 0;
+    int64_t prof_vsync_us  = 0;
+    int     prof_frames    = 0;
+    int64_t prof_window_us = 0;
+    int64_t prof_prev_us   = prev_us;
+
     ESP_LOGI(TAG, "Race the Synth: title screen up");
 
     while (1) {
+        int64_t const t_loop_start = esp_timer_get_time();
+
         if (input_drain_events()) {
             bsp_device_restart_to_launcher();
         }
 
-        int64_t now_us = esp_timer_get_time();
+        int64_t now_us = t_loop_start;
         float   dt     = (float)(now_us - prev_us) / 1e6f;
         prev_us        = now_us;
         if (dt > 0.1f) dt = 0.1f;
@@ -273,15 +291,43 @@ void app_main(void) {
         bool const pickup_pressed = input_consume_pickup();
         int  const steer          = input_steering();
 
-        // Frame setup: start with the cached backdrop and draw the
-        // scrolling floor. The floor scroll speed depends on the
-        // app state — fixed in TITLE, ship-driven in PLAYING,
-        // frozen in GAME_OVER.
-        memcpy((void*)pax_buf_get_pixels(&fb), backdrop_pixels, backdrop_size);
+        int64_t const t_after_input = esp_timer_get_time();
+        bool          head_on       = false;
 
+        // Physics pass — only meaningful in PLAYING; the other states
+        // record zero physics time so the breakdown stays honest.
+        if (app_state == APP_STATE_PLAYING) {
+            // 1. Apply bank + lateral motion using this frame's steer.
+            // 2. Collide: push the ship out of side-contact obstacles
+            //    and set scrape flags (or return head-on).
+            // 3. After-collide work that reads the flags: ramp speed,
+            //    emit + advance sparks.
+            game_step(&game, dt, steer);
+            head_on = game_collide(&game, &world, dt);
+            game_after_collide(&game, dt);
+            world_advance(&world, dt, game.ship_speed_z);
+        }
+        int64_t const t_after_phys = esp_timer_get_time();
+
+        // Background pass — restore the cached static backdrop and
+        // scroll the grid floor. Same work in every state.
+        memcpy((void*)pax_buf_get_pixels(&fb), backdrop_pixels, backdrop_size);
+        int64_t const t_after_bgcpy = esp_timer_get_time();
+        float const floor_scroll = (app_state == APP_STATE_TITLE)      ? title_scroll_speed * dt
+                                   : (app_state == APP_STATE_PLAYING)  ? game.ship_speed_z * dt
+                                                                       : 0.0f;
+        float const floor_cam_x  = (app_state == APP_STATE_TITLE) ? 0.0f : game.cam_x;
+        synthwave_step(&fb, floor_scroll, floor_cam_x);
+        int64_t const t_after_bg = esp_timer_get_time();
+
+        // Foreground pass — state-dependent dynamic content.
+        // `obs` measures render_obstacles in isolation since it
+        // dominates the gameplay frame; everything else (ship,
+        // sparks, HUD, overlays) rolls up under `fgrest`.
+        int64_t t_after_obs = 0;
         switch (app_state) {
             case APP_STATE_TITLE: {
-                synthwave_step(&fb, title_scroll_speed * dt, 0.0f);
+                t_after_obs = esp_timer_get_time();
                 draw_title_overlay();
                 draw_exit_hint();
                 if (pickup_pressed) {
@@ -292,23 +338,8 @@ void app_main(void) {
             }
 
             case APP_STATE_PLAYING: {
-                // 1. Apply bank + lateral motion using this frame's
-                //    steer input.
-                // 2. Collide against the world: push the ship out
-                //    of any side-contact obstacle and set scrape
-                //    flags (or return head-on).
-                // 3. After-collide work that reads the flags:
-                //    ramp ship_speed_z, emit + advance sparks.
-                // Doing collide *after* motion makes the resolved
-                // position the one we render and the one that
-                // feeds the next world_advance.
-                game_step(&game, dt, steer);
-                bool const head_on = game_collide(&game, &world, dt);
-                game_after_collide(&game, dt);
-                world_advance(&world, dt, game.ship_speed_z);
-
-                synthwave_step(&fb, game.ship_speed_z * dt, game.cam_x);
                 render_obstacles(&fb, &world, game.cam_x);
+                t_after_obs = esp_timer_get_time();
                 game_draw_ship(&fb, &game);
                 game_draw_sparks(&fb, &game);
                 draw_exit_hint();
@@ -325,8 +356,8 @@ void app_main(void) {
                 // World frozen at the crash. No sparks here — they
                 // are a per-frame radial flash that only reads as
                 // a scrape indication during PLAYING.
-                synthwave_step(&fb, 0.0f, game.cam_x);
                 render_obstacles(&fb, &world, game.cam_x);
+                t_after_obs = esp_timer_get_time();
                 game_draw_ship(&fb, &game);
                 draw_game_over_overlay();
                 draw_exit_hint();
@@ -338,13 +369,47 @@ void app_main(void) {
                 break;
             }
         }
+        int64_t const t_after_fg = esp_timer_get_time();
 
         blit();
+        int64_t const t_after_blit = esp_timer_get_time();
 
         if (vsync_sem != NULL) {
             xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(50));
         } else {
             vTaskDelay(pdMS_TO_TICKS(16));
+        }
+        int64_t const t_after_vsync = esp_timer_get_time();
+
+        prof_input_us  += t_after_input - t_loop_start;
+        prof_phys_us   += t_after_phys  - t_after_input;
+        prof_bgcpy_us  += t_after_bgcpy - t_after_phys;
+        prof_bgflr_us  += t_after_bg    - t_after_bgcpy;
+        prof_obs_us    += t_after_obs   - t_after_bg;
+        prof_fgrest_us += t_after_fg    - t_after_obs;
+        prof_blit_us   += t_after_blit  - t_after_fg;
+        prof_vsync_us  += t_after_vsync - t_after_blit;
+        prof_frames    += 1;
+        prof_window_us  = t_after_vsync - prof_prev_us;
+
+        if (prof_window_us >= 1000000) {
+            float const fps    = prof_frames * 1e6f / (float)prof_window_us;
+            float const inv_fr = 1.0f / (float)prof_frames;
+            ESP_LOGI(TAG,
+                     "FPS=%.1f  in=%.2fms phys=%.2fms bgcpy=%.2fms bgflr=%.2fms obs=%.2fms fgrest=%.2fms blit=%.2fms vsync=%.2fms",
+                     fps,
+                     (float)prof_input_us  * inv_fr / 1000.0f,
+                     (float)prof_phys_us   * inv_fr / 1000.0f,
+                     (float)prof_bgcpy_us  * inv_fr / 1000.0f,
+                     (float)prof_bgflr_us  * inv_fr / 1000.0f,
+                     (float)prof_obs_us    * inv_fr / 1000.0f,
+                     (float)prof_fgrest_us * inv_fr / 1000.0f,
+                     (float)prof_blit_us   * inv_fr / 1000.0f,
+                     (float)prof_vsync_us  * inv_fr / 1000.0f);
+            prof_input_us  = prof_phys_us = prof_bgcpy_us = prof_bgflr_us = 0;
+            prof_obs_us    = prof_fgrest_us = prof_blit_us = prof_vsync_us = 0;
+            prof_frames    = 0;
+            prof_prev_us   = t_after_vsync;
         }
     }
 }

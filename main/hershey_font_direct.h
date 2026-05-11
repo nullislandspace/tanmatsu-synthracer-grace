@@ -13,10 +13,30 @@
 // Font metrics
 #define HERSHEY_DIRECT_BASE_HEIGHT 21
 
-// Set a single pixel directly in the pax_buf_t raw buffer (RGB888 only).
+// Pre-computed color in the buffer's native pixel format. Built once
+// per draw call (string or char) so the per-pixel write skips any
+// format conversion. Holds both the 24bpp byte triple and the 16bpp
+// packed halfword; set_pixel picks the right one based on buf->type.
+typedef struct {
+    uint8_t  r, g, b;     // RGB888 byte triple (native channel order)
+    uint16_t packed565;   // RGB565 packed, already byte-swapped if needed
+} hershey_native_color_t;
+
+static inline hershey_native_color_t hershey_pack_color(pax_buf_t const *buf, pax_col_t color) {
+    hershey_native_color_t c;
+    c.r = (color >> 16) & 0xFF;
+    c.g = (color >>  8) & 0xFF;
+    c.b =  color        & 0xFF;
+    uint16_t p565 = (uint16_t)(((c.r & 0xF8) << 8) | ((c.g & 0xFC) << 3) | (c.b >> 3));
+    c.packed565 = buf->reverse_endianness ? (uint16_t)__builtin_bswap16(p565) : p565;
+    return c;
+}
+
+// Set a single pixel directly in the pax_buf_t raw buffer.
+// Supports PAX_BUF_24_888RGB and PAX_BUF_16_565RGB.
 // Coordinates are in LOGICAL space (post-orientation).
 static inline void hershey_direct_set_pixel(pax_buf_t *buf, int lx, int ly,
-                                            uint8_t r, uint8_t g, uint8_t b) {
+                                            hershey_native_color_t const *c) {
     // Raw (physical) buffer dimensions
     int raw_w = buf->width;
     int raw_h = buf->height;
@@ -47,24 +67,30 @@ static inline void hershey_direct_set_pixel(pax_buf_t *buf, int lx, int ly,
         return;
     }
 
-    uint8_t *pixels = buf->buf_8bpp;
-    int idx = (ry * raw_w + rx) * 3;
+    int const idx = ry * raw_w + rx;
 
-    if (buf->reverse_endianness) {
-        pixels[idx + 0] = r;
-        pixels[idx + 1] = g;
-        pixels[idx + 2] = b;
+    if (buf->type == PAX_BUF_16_565RGB) {
+        buf->buf_16bpp[idx] = c->packed565;
     } else {
-        pixels[idx + 0] = b;
-        pixels[idx + 1] = g;
-        pixels[idx + 2] = r;
+        // Assume 24bpp RGB888 — the only other format this app uses.
+        uint8_t *pixels    = buf->buf_8bpp;
+        int      byte_idx  = idx * 3;
+        if (buf->reverse_endianness) {
+            pixels[byte_idx + 0] = c->r;
+            pixels[byte_idx + 1] = c->g;
+            pixels[byte_idx + 2] = c->b;
+        } else {
+            pixels[byte_idx + 0] = c->b;
+            pixels[byte_idx + 1] = c->g;
+            pixels[byte_idx + 2] = c->r;
+        }
     }
 }
 
 // Draw a line using Bresenham's algorithm (logical coordinates)
 static inline void hershey_direct_draw_line(pax_buf_t *buf,
                                             int x0, int y0, int x1, int y1,
-                                            uint8_t r, uint8_t g, uint8_t b) {
+                                            hershey_native_color_t const *c) {
     int dx = abs(x1 - x0);
     int dy = abs(y1 - y0);
     int sx = (x0 < x1) ? 1 : -1;
@@ -72,7 +98,7 @@ static inline void hershey_direct_draw_line(pax_buf_t *buf,
     int err = dx - dy;
 
     while (1) {
-        hershey_direct_set_pixel(buf, x0, y0, r, g, b);
+        hershey_direct_set_pixel(buf, x0, y0, c);
 
         if (x0 == x1 && y0 == y1) break;
 
@@ -90,17 +116,14 @@ static inline void hershey_direct_draw_line(pax_buf_t *buf,
 
 // Draw a single character
 // Returns: scaled character width for horizontal advance
-static inline int hershey_direct_draw_char(pax_buf_t *buf, pax_col_t color,
-                                           float screen_x, float screen_y, char c, float font_height) {
+static inline int hershey_direct_draw_char(pax_buf_t *buf,
+                                           hershey_native_color_t const *c,
+                                           float screen_x, float screen_y, char ch, float font_height) {
     float scale = font_height / HERSHEY_DIRECT_BASE_HEIGHT;
-    int idx = (int)c - 32;
+    int idx = (int)ch - 32;
     if (idx < 0 || idx >= 95) {
         return (int)(16 * scale);
     }
-
-    uint8_t r = (color >> 16) & 0xFF;
-    uint8_t g = (color >>  8) & 0xFF;
-    uint8_t b =  color        & 0xFF;
 
     const int *glyph = simplex[idx];
     int num_vertices = glyph[0];
@@ -129,7 +152,7 @@ static inline int hershey_direct_draw_char(pax_buf_t *buf, pax_col_t color,
         int sy = (int)screen_y + gy;
 
         if (pen_down) {
-            hershey_direct_draw_line(buf, prev_sx, prev_sy, sx, sy, r, g, b);
+            hershey_direct_draw_line(buf, prev_sx, prev_sy, sx, sy, c);
         }
 
         prev_sx = sx;
@@ -144,9 +167,10 @@ static inline int hershey_direct_draw_char(pax_buf_t *buf, pax_col_t color,
 static inline pax_vec2f hershey_direct_draw_string(pax_buf_t *buf, pax_col_t color,
                                                    float screen_x, float screen_y,
                                                    const char *str, float font_height) {
+    hershey_native_color_t const c = hershey_pack_color(buf, color);
     float start_x = screen_x;
     while (*str) {
-        screen_x += hershey_direct_draw_char(buf, color, screen_x, screen_y, *str, font_height);
+        screen_x += hershey_direct_draw_char(buf, &c, screen_x, screen_y, *str, font_height);
         str++;
     }
     return (pax_vec2f){screen_x - start_x, font_height};
