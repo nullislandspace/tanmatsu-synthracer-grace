@@ -155,6 +155,8 @@ void game_init(game_state_t* g) {
     memset(g, 0, sizeof(*g));
     g->ship_speed_z      = SHIP_BASE_SPEED_Z;
     g->ship_base_speed_z = SHIP_BASE_SPEED_Z;
+    g->multiplier        = 1;
+    g->multiplier_max    = 1;
 }
 
 void game_step(game_state_t* g, float dt, int steer) {
@@ -179,7 +181,7 @@ void game_step(game_state_t* g, float dt, int steer) {
     g->cam_x = g->ship_x_world;
 }
 
-bool game_collide(game_state_t* g, world_state_t const* w, float dt) {
+bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     g->scrape_left  = false;
     g->scrape_right = false;
     bool head_on    = false;
@@ -196,7 +198,7 @@ bool game_collide(game_state_t* g, world_state_t const* w, float dt) {
     float const dz_frame = (dt > 0.0f) ? (g->ship_speed_z * dt) : 0.0f;
 
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
-        obstacle_t const* o = &w->obstacles[i];
+        obstacle_t* o = &w->obstacles[i];
         if (!o->active) continue;
 
         // Ship x bounds are recomputed each iteration because a
@@ -249,15 +251,28 @@ bool game_collide(game_state_t* g, world_state_t const* w, float dt) {
                 // → trailing scrape (push out and slow).
                 is_scrape = !came_from_ahead;
                 break;
-            case OBSTACLE_KIND_PICKUP_TRI:
             case OBSTACLE_KIND_PICKUP_BOOST:
+                // Collect the booster: deactivate the obstacle, kick
+                // the boost state machine into RAMPING from the
+                // current speed. Picking up another booster
+                // mid-boost just restarts at RAMPING from the new
+                // current speed (which might already be near the
+                // target).
+                o->active                 = false;
+                g->boost_phase            = BOOST_RAMPING;
+                g->boost_phase_time       = GAME_BOOST_RAMP_UP_SECONDS;
+                g->boost_ramp_start_speed = g->ship_speed_z;
+                g->pickups_speed_boost   += 1;
+                skip_response             = true;
+                break;
+            case OBSTACLE_KIND_PICKUP_TRI:
             case OBSTACLE_KIND_PICKUP_JUMP:
             case OBSTACLE_KIND_PICKUP_SHIELD:
             case OBSTACLE_KIND_RAMP:
                 // Not implemented yet — ignore the overlap so
                 // collision doesn't kill the ship on contact with
                 // a future pickup that happens to share the pool.
-                // Phase 5 / 6 / 9 / future will fill these in.
+                // Phase 6 / 9 / future will fill these in.
                 skip_response = true;
                 break;
         }
@@ -341,14 +356,56 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
     }
 
     // --- Speed dynamics --------------------------------------------------
-    // Shadow stall takes priority over scrape recovery. Linear
-    // decel from cruise to zero in GAME_SHADOW_STALL_SECONDS — so
-    // a player stuck in shadow has that many seconds to grab a
-    // boost pickup before coming to rest.
-    if (g->in_shadow) {
+    // Priority order (top wins):
+    //   1. Active boost RAMP/HOLD — overrides everything, ship is
+    //      forced to the boost trajectory.
+    //   2. Shadow stall — linear decel toward zero.
+    //   3. Boost COAST  — slow linear decel back to base.
+    //   4. Scrape / normal recovery — ramps toward base or scrape
+    //      floor.
+    if (g->boost_phase == BOOST_RAMPING) {
+        // Linear lerp from the pickup speed up to the boost target
+        // over GAME_BOOST_RAMP_UP_SECONDS. Boost overrides shadow,
+        // scrape, everything — the whole point is to escape stalls.
+        float const elapsed = GAME_BOOST_RAMP_UP_SECONDS - g->boost_phase_time;
+        float const t       = elapsed / GAME_BOOST_RAMP_UP_SECONDS;
+        g->ship_speed_z     = g->boost_ramp_start_speed
+                            + (GAME_BOOST_TARGET_SPEED - g->boost_ramp_start_speed) * t;
+        g->boost_phase_time -= dt;
+        if (g->boost_phase_time <= 0.0f) {
+            g->ship_speed_z     = GAME_BOOST_TARGET_SPEED;
+            g->boost_phase      = BOOST_HOLDING;
+            g->boost_phase_time = GAME_BOOST_HOLD_SECONDS;
+        }
+    } else if (g->boost_phase == BOOST_HOLDING) {
+        // Peg the speed at target for the hold duration.
+        g->ship_speed_z      = GAME_BOOST_TARGET_SPEED;
+        g->boost_phase_time -= dt;
+        if (g->boost_phase_time <= 0.0f) {
+            g->boost_phase = BOOST_COASTING;
+        }
+    } else if (g->in_shadow) {
+        // Shadow stall — wins over the boost COAST (a player who
+        // re-enters shadow during the coast still pays the stall
+        // cost). Linear decel toward zero.
         float const decel = GAMEPLAY_CRUISE_SPEED / GAME_SHADOW_STALL_SECONDS;
         g->ship_speed_z -= decel * dt;
         if (g->ship_speed_z < 0.0f) g->ship_speed_z = 0.0f;
+        // If shadow stall drops us below base while coasting, drop
+        // back to IDLE so the scrape-recovery path can resume on
+        // shadow exit.
+        if (g->boost_phase == BOOST_COASTING && g->ship_speed_z <= g->ship_base_speed_z) {
+            g->boost_phase = BOOST_IDLE;
+        }
+    } else if (g->boost_phase == BOOST_COASTING) {
+        // Slow linear coast back to base speed. Slower than the
+        // scrape decel so a successful boost gives a long tail of
+        // above-cruise travel.
+        g->ship_speed_z -= GAME_BOOST_COAST_DECEL * dt;
+        if (g->ship_speed_z <= g->ship_base_speed_z) {
+            g->ship_speed_z = g->ship_base_speed_z;
+            g->boost_phase  = BOOST_IDLE;
+        }
     } else {
         bool  const scraping = g->scrape_left || g->scrape_right;
         float const target   = scraping
@@ -363,6 +420,20 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
             g->ship_speed_z += max_step;
             if (g->ship_speed_z > target) g->ship_speed_z = target;
         }
+    }
+
+    // --- Scoring + distance integration ----------------------------------
+    // Distance is the world-units the ship has travelled this run.
+    // Score is `Σ dz * multiplier` so multiplier upgrades (Phase 6)
+    // multiply forward income retroactively from the moment of
+    // collection. Multiplier is currently fixed at 1.
+    {
+        float const dz = g->ship_speed_z * dt;
+        if (dz > 0.0f) {
+            g->distance_traveled += (double)dz;
+            g->score             += (double)dz * (double)g->multiplier;
+        }
+        if (g->multiplier > g->multiplier_max) g->multiplier_max = g->multiplier;
     }
 
     // Run ends when the ship has fully coasted to a stop. The

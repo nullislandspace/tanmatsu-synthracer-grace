@@ -18,6 +18,9 @@ set(APP_SOURCES
     main/game.c
     main/world.c
     main/render.c
+    main/nbt.c
+    main/save.c
+    main/save_nbt.c
 )
 
 # Include directories — add paths to your headers here

@@ -45,3 +45,31 @@ int  input_consume_speed_delta(void);
 // previewing shadow lengths without waiting for the natural
 // sunset to advance.
 int  input_consume_sun_delta(void);
+
+// Menu navigation edge: +1 for an UP press, -1 for a DOWN press, 0 if
+// neither pressed since last call. Self-clears. UP/DOWN also feed the
+// speed_delta debug knob — the same physical key serves both roles;
+// the main loop reads the one appropriate to the current app state.
+int  input_consume_menu_nav(void);
+
+// True if ENTER, SPACE or GAMEPAD_A was pressed since last call.
+// Mirrors `input_consume_pickup` — they share the same edge buffer
+// because the action button doubles as the menu confirm button.
+bool input_consume_menu_confirm(void);
+
+// True if ESC was pressed since last call. Only fires in non-PLAYING
+// modes; during PLAYING the same key is steering (polled).
+bool input_consume_menu_cancel(void);
+
+// True if BACKSPACE was pressed since last call. Same modal rule as
+// ESC — only fires in non-PLAYING modes.
+bool input_consume_backspace(void);
+
+// If the user typed an ASCII digit since last call, returns true and
+// writes the digit into *out_digit (0..9). Self-clears.
+bool input_consume_digit(int* out_digit);
+
+// True if F4 was pressed since last call. F4 toggles the in-game
+// pause menu: PLAYING → PAUSED (overlay with Resume / Abort) and
+// PAUSED → PLAYING (Resume). Self-clears.
+bool input_consume_pause_toggle(void);

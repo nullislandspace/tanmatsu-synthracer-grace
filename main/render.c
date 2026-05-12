@@ -1,8 +1,22 @@
 #include "render.h"
 
+#include <math.h>
+
 #include "direct_565.h"
+#include "esp_timer.h"
 #include "magicnumbers.h"
 #include "shapes/pax_tris.h"
+
+// Scale every RGB channel of an ARGB pax_col_t by `scale` (0..1).
+// Alpha kept intact. Same shape as the dim_argb helper in game.c
+// — duplicated here so render.c doesn't have to pull in game.h.
+static inline pax_col_t dim_argb_render(pax_col_t col, float scale) {
+    uint32_t const a = (col >> 24) & 0xFF;
+    uint32_t const r = (uint32_t)((float)((col >> 16) & 0xFF) * scale);
+    uint32_t const g = (uint32_t)((float)((col >>  8) & 0xFF) * scale);
+    uint32_t const b = (uint32_t)((float)((col >>  0) & 0xFF) * scale);
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
 
 // Per-obstacle dimensions and colours come from the obstacle_t
 // itself (world.c sets them at spawn time) so the renderer treats
@@ -78,6 +92,72 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
     }
 }
 
+// Draw one speed-booster pickup as a square-based pyramid. Apex
+// sits at (obs.x, obs.height, obs.z); the 4 base corners are on
+// the y=0 plane at obs.x±half_w / obs.z±half_d. Painter's order
+// inside the pyramid: visible side faces first, then front. The
+// back face is never visible (camera always sits in front and
+// slightly above), so it's skipped. Pulse modulates each side's
+// fill colour every frame.
+static void render_booster_pyramid(uint16_t* fb_pixels, obstacle_t const* o, float cam_x,
+                                   bool rev_endian, float pulse) {
+    // Whole-pyramid near-plane cull. Pyramids are short in z
+    // (half_d = 0.4) and small, so once the apex is at or behind
+    // NEAR_CLIP_Z just drop the whole thing — saves the
+    // projection / clipping math for almost-passed pickups.
+    if (o->z_world < NEAR_CLIP_Z) return;
+
+    float const xL = o->x_world - o->half_w;
+    float const xR = o->x_world + o->half_w;
+    float const zF = o->z_world - o->half_d;
+    float const zB = o->z_world + o->half_d;
+    float const zN = (zF < NEAR_CLIP_Z) ? NEAR_CLIP_Z : zF;
+
+    // 5 projected vertices: apex + 4 base corners (clockwise from
+    // front-left when viewed from above).
+    float sx_A,  sy_A;
+    float sx_FL, sy_FL, sx_FR, sy_FR;
+    float sx_BL, sy_BL, sx_BR, sy_BR;
+    render_project(o->x_world, o->height, o->z_world, cam_x, &sx_A,  &sy_A);
+    render_project(xL,         0.0f,      zN,          cam_x, &sx_FL, &sy_FL);
+    render_project(xR,         0.0f,      zN,          cam_x, &sx_FR, &sy_FR);
+    render_project(xL,         0.0f,      zB,          cam_x, &sx_BL, &sy_BL);
+    render_project(xR,         0.0f,      zB,          cam_x, &sx_BR, &sy_BR);
+
+    bool const show_left  = cam_x < o->x_world;
+    bool const show_right = cam_x > o->x_world;
+
+    // Pulse the side / front fill colours but leave the outline at
+    // full brightness — the silhouette stays crisp while the body
+    // breathes.
+    uint16_t const front_packed = direct_565_pack(dim_argb_render(o->front_color, pulse), rev_endian);
+    uint16_t const side_packed  = direct_565_pack(dim_argb_render(o->side_color,  pulse), rev_endian);
+    uint16_t const out_packed   = direct_565_pack(o->outline_color, rev_endian);
+
+    // Side first (whichever's facing the camera), then front. Back
+    // face never drawn — camera is always in front of the pickup.
+    if (show_left) {
+        direct_565_tri(fb_pixels, sx_A, sy_A, sx_FL, sy_FL, sx_BL, sy_BL, side_packed);
+    } else if (show_right) {
+        direct_565_tri(fb_pixels, sx_A, sy_A, sx_BR, sy_BR, sx_FR, sy_FR, side_packed);
+    }
+    direct_565_tri(fb_pixels, sx_A, sy_A, sx_FR, sy_FR, sx_FL, sy_FL, front_packed);
+
+    // Wireframe: apex to each base corner of visible faces + the
+    // visible base edges. Outline stays bright (no pulse) for a
+    // crisp silhouette regardless of the body's brightness.
+    direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_FL, (int)sy_FL, out_packed);
+    direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_FR, (int)sy_FR, out_packed);
+    direct_565_line(fb_pixels, (int)sx_FL, (int)sy_FL, (int)sx_FR, (int)sy_FR, out_packed);
+    if (show_left) {
+        direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_BL, (int)sy_BL, out_packed);
+        direct_565_line(fb_pixels, (int)sx_FL, (int)sy_FL, (int)sx_BL, (int)sy_BL, out_packed);
+    } else if (show_right) {
+        direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_BR, (int)sy_BR, out_packed);
+        direct_565_line(fb_pixels, (int)sx_FR, (int)sy_FR, (int)sx_BR, (int)sy_BR, out_packed);
+    }
+}
+
 void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
     // Build an index list over the active subset, then sort it
     // descending by z so painter's algorithm draws far → near. n is
@@ -110,8 +190,25 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
     uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
     bool      const rev_endian = fb->reverse_endianness;
 
+    // Booster pulse factor, computed once per frame and reused
+    // across every booster. Uses a steady time source so the pulse
+    // continues evenly regardless of FPS.
+    int64_t const now_us       = esp_timer_get_time();
+    float   const time_s       = (float)(now_us % 600000000LL) * 1e-6f;
+    float   const pulse_phase  = fmodf(time_s, GAME_BOOSTER_PULSE_PERIOD_S) / GAME_BOOSTER_PULSE_PERIOD_S;
+    float   const pulse_factor = 1.0f - GAME_BOOSTER_PULSE_AMPLITUDE
+                                       * 0.5f * (1.0f - sinf(pulse_phase * 2.0f * (float)M_PI));
+
     for (int k = 0; k < n; k++) {
         obstacle_t const* o = &w->obstacles[idx[k]];
+
+        // Booster pickups render as a pyramid, not a cube. Same
+        // sort order so painter's algorithm interleaves them with
+        // surrounding cubes correctly.
+        if (o->kind == OBSTACLE_KIND_PICKUP_BOOST) {
+            render_booster_pyramid(fb_pixels, o, cam_x, rev_endian, pulse_factor);
+            continue;
+        }
 
         // Cube extents come straight from the obstacle. z_world is
         // the centre along z; front face sits at zF_raw, back at

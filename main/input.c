@@ -7,11 +7,16 @@
 
 static char const TAG[] = "input";
 
-static QueueHandle_t s_event_queue = NULL;
-static input_mode_t  s_mode        = INPUT_MODE_TITLE;
-static bool          s_pickup_edge = false;
-static int           s_speed_delta = 0;
-static int           s_sun_delta   = 0;
+static QueueHandle_t s_event_queue   = NULL;
+static input_mode_t  s_mode          = INPUT_MODE_TITLE;
+static bool          s_pickup_edge   = false;
+static int           s_speed_delta   = 0;
+static int           s_sun_delta     = 0;
+static int           s_menu_nav      = 0;     // latest -1/0/+1 menu direction
+static bool          s_menu_cancel   = false; // latest ESC press
+static bool          s_backspace     = false; // latest BACKSPACE press
+static int           s_digit         = -1;    // 0..9 if a digit was typed, else -1
+static bool          s_pause_toggle  = false; // latest F4 press edge
 
 void input_init(void) {
     esp_err_t res = bsp_input_get_queue(&s_event_queue);
@@ -36,25 +41,50 @@ bool input_drain_events(void) {
                 if (event.args_navigation.state) {
                     if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
                         exit_requested = true;
+                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F4) {
+                        s_pause_toggle = true;
                     } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A) {
                         s_pickup_edge = true;
                     } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_UP) {
                         s_speed_delta += 1;
+                        s_menu_nav     = +1;
                     } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
                         s_speed_delta -= 1;
+                        s_menu_nav     = -1;
                     }
                 }
                 break;
             case INPUT_EVENT_TYPE_SCANCODE:
-                // Space (use-pickup) and the Q/A debug sun nudge are
-                // the queued events we care about mid-game. Steering
-                // keys come in through the polled API.
+                // Space (use-pickup / menu-confirm) and the Q/A debug
+                // sun nudge are the queued events we care about
+                // mid-game; ENTER also confirms menus; ESC and
+                // BACKSPACE are menu-cancel / digit-edit when we're
+                // not steering. Steering keys come in through the
+                // polled API.
                 if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_SPACE) {
                     s_pickup_edge = true;
+                } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_ENTER) {
+                    s_pickup_edge = true;
+                } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_ESC) {
+                    if (s_mode != INPUT_MODE_PLAYING) {
+                        s_menu_cancel = true;
+                    }
+                } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_BACKSPACE) {
+                    if (s_mode != INPUT_MODE_PLAYING) {
+                        s_backspace = true;
+                    }
                 } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_Q) {
                     s_sun_delta += 1;     // push sun toward sunset
                 } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_A) {
                     s_sun_delta -= 1;     // push sun back toward zenith
+                }
+                break;
+            case INPUT_EVENT_TYPE_KEYBOARD:
+                if (s_mode == INPUT_MODE_MENU_SEED) {
+                    char c = event.args_keyboard.ascii;
+                    if (c >= '0' && c <= '9') {
+                        s_digit = c - '0';
+                    }
                 }
                 break;
             default:
@@ -106,4 +136,41 @@ int input_consume_sun_delta(void) {
     int d       = s_sun_delta;
     s_sun_delta = 0;
     return d;
+}
+
+int input_consume_menu_nav(void) {
+    int n      = s_menu_nav;
+    s_menu_nav = 0;
+    return n;
+}
+
+bool input_consume_menu_confirm(void) {
+    bool e        = s_pickup_edge;
+    s_pickup_edge = false;
+    return e;
+}
+
+bool input_consume_menu_cancel(void) {
+    bool e        = s_menu_cancel;
+    s_menu_cancel = false;
+    return e;
+}
+
+bool input_consume_backspace(void) {
+    bool e      = s_backspace;
+    s_backspace = false;
+    return e;
+}
+
+bool input_consume_digit(int* out_digit) {
+    if (s_digit < 0) return false;
+    if (out_digit) *out_digit = s_digit;
+    s_digit = -1;
+    return true;
+}
+
+bool input_consume_pause_toggle(void) {
+    bool e          = s_pause_toggle;
+    s_pause_toggle = false;
+    return e;
 }

@@ -98,6 +98,12 @@ typedef struct {
     uint32_t   stage_prng;           // xorshift state mixed from (level_seed, stage); reset each stage
     float      right_wall_far_z;     // camera-relative z of the next far-end wall segment to spawn (right side)
     float      left_wall_far_z;      // ditto for the left side
+
+    // Stage-progress positions (0..GAME_STAGE_LENGTH_Z) at which
+    // a booster should spawn during this stage. Set at stage start
+    // to N evenly-spaced+jittered values; each slot is overwritten
+    // with -1 once its booster has spawned.
+    float      booster_due_at_progress[GAME_BOOSTERS_PER_STAGE];
 } world_state_t;
 
 // Initialize the obstacle pool, seed the per-run PRNG, fill the side

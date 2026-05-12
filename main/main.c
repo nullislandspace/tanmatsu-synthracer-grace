@@ -10,6 +10,7 @@
 
 #include "bsp/device.h"
 #include "bsp/display.h"
+#include "direct_565.h"
 #include "driver/ppa.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
@@ -28,6 +29,7 @@
 #include "pax_gfx.h"
 #include "render.h"
 #include "rendertext.h"
+#include "save.h"
 #include "synthwave.h"
 #include "world.h"
 
@@ -131,10 +133,71 @@ static void*                        mountain_pixels      = NULL;
 static size_t                       mountain_size        = 0;
 
 typedef enum {
-    APP_STATE_TITLE = 0,
+    APP_STATE_SLOT_SELECT = 0,  // first state on boot: pick save slot 0..2
+    APP_STATE_MENU,             // main menu: Daily/Seeded/Upgrade/Stats/Exit
+    APP_STATE_SEED_INPUT,       // numeric entry for the custom seed
+    APP_STATE_STATS_VIEW,       // text dump of the active slot's stats
+    APP_STATE_UPGRADE_STUB,     // placeholder "coming soon" screen
     APP_STATE_PLAYING,
+    APP_STATE_PAUSED,           // F4 pause overlay: Resume / Abort run
     APP_STATE_GAME_OVER,
 } app_state_t;
+
+// Pause-menu entries (STATE_PAUSED).
+enum {
+    PAUSE_ENTRY_RESUME = 0,
+    PAUSE_ENTRY_ABORT,
+    PAUSE_ENTRY_COUNT,
+};
+
+// Menu entry indices for STATE_MENU. Order is the visible order.
+enum {
+    MENU_ENTRY_DAILY = 0,
+    MENU_ENTRY_SEEDED,
+    MENU_ENTRY_UPGRADE,
+    MENU_ENTRY_STATS,
+    MENU_ENTRY_EXIT,
+    MENU_ENTRY_COUNT,
+};
+
+// Persistence state owned by main. The active slot is sticky for the
+// app lifetime; we load on slot select and write after every run.
+static save_data_t s_save        = {0};
+static int         s_active_slot = -1;
+
+// Menu / seed-input cursor state. Each is the per-screen cursor for
+// the corresponding STATE_* entry — main loop resets the cursor on
+// entry to each screen.
+static int  s_slot_cursor  = 0;            // STATE_SLOT_SELECT cursor (0..2)
+static int  s_menu_cursor  = MENU_ENTRY_DAILY;
+static int  s_pause_cursor = PAUSE_ENTRY_RESUME;
+static char s_seed_buf[11] = {0};          // STATE_SEED_INPUT decimal seed (max 10 digits)
+static int  s_seed_len     = 0;
+
+// Game-over flavour text pool. The displayed line is chosen on the
+// PLAYING → GAME_OVER transition and stays put until the next run
+// ends; same flavour is rendered on every frame while GAME_OVER is
+// active. Add more lines by appending to the array — the count is
+// derived from `sizeof`, no manual update needed.
+static char const* const gameover_flavours[] = {
+    "Failure. Expected and inevitable.",
+    "Death. The Great Divide.",
+    "Infinity failed. Things end.",
+};
+#define GAMEOVER_FLAVOUR_COUNT  ((int)(sizeof(gameover_flavours) / sizeof(gameover_flavours[0])))
+
+static int s_gameover_flavour_idx = 0;
+
+// Run-instrumentation captured at run start, used by
+// save_commit_run_end on transition into GAME_OVER. `s_run_play_seconds`
+// accumulates per-PLAYING-frame `dt` so paused time is excluded from
+// the saved duration stat (wallclock since start would count F4
+// pauses in the play time, which we don't want).
+static int64_t s_run_started_us   = 0;
+static double  s_run_play_seconds = 0.0;
+static int     s_peak_stage       = 1;
+static int     s_run_was_custom   = 0;
+static int64_t s_run_seed_used    = 0;
 
 static void blit(void) {
     bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(fb));
@@ -367,13 +430,16 @@ static void draw_centered(float cy, float h, pax_col_t color, char const* text) 
     rendertext_draw(fb, color, NULL, h, x, cy, text);
 }
 
+// Top-right readout stack. Slot 0 is reserved for the score line
+// (drawn separately by draw_score_readout), so v= sits at slot 1 and
+// sun= at slot 2.
 static void draw_speed_readout(float speed_z) {
     char        buf[32];
     snprintf(buf, sizeof(buf), "v=%.1f", speed_z);
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
     float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
-    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f, buf);
+    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + (text_h + 4.0f), buf);
 }
 
 static void draw_sun_readout(float sun_y) {
@@ -382,7 +448,30 @@ static void draw_sun_readout(float sun_y) {
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
     float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
-    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + text_h + 4.0f, buf);
+    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 2.0f * (text_h + 4.0f), buf);
+}
+
+// Bottom-left HUD: a solid green upward-pointing triangle that's
+// visible whenever a boost is active (any phase that isn't IDLE).
+// Sized at 3× the debug-readout text height so it's easy to read
+// out of the corner of the eye while flying. Drawn via the direct
+// 565 rasterizer — single triangle, ~zero cost.
+static void draw_boost_indicator(game_state_t const* g) {
+    if (g->boost_phase == BOOST_IDLE) return;
+    float const text_h    = 18.0f;
+    float const h         = text_h * 3.0f;   // 54 px
+    float const w         = h * 0.866f;      // equilateral-ish footprint
+    float const margin    = 12.0f;
+    float const fb_h      = pax_buf_get_heightf(fb);
+    float const apex_x    = margin + w * 0.5f;
+    float const apex_y    = fb_h - margin - h;
+    float const bl_x      = margin;
+    float const br_x      = margin + w;
+    float const base_y    = fb_h - margin;
+
+    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    uint16_t  const packed    = direct_565_pack(GAME_BOOSTER_FRONT_COLOR, fb->reverse_endianness);
+    direct_565_tri(fb_pixels, apex_x, apex_y, bl_x, base_y, br_x, base_y, packed);
 }
 
 static void draw_exit_hint(void) {
@@ -404,16 +493,283 @@ static void draw_exit_hint(void) {
     }
 }
 
-static void draw_title_overlay(void) {
+// Translucent dim panel behind menu text. Centred rectangle sized by
+// the caller — leaves a synthwave border at the edges so the menu
+// still reads as overlaid on the live scene rather than a context
+// switch. Each menu's draw_*() picks dimensions sized to its text
+// extents (footer hint baseline + title baseline + line spacing).
+static void draw_menu_panel_size(float w_frac, float h_frac) {
+    float const fbw = pax_buf_get_widthf(fb);
     float const fbh = pax_buf_get_heightf(fb);
-    draw_centered(fbh * 0.30f, 64.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
-    draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to start");
+    int   const pw  = (int)(fbw * w_frac);
+    int   const ph  = (int)(fbh * h_frac);
+    int   const px  = (int)((fbw - (float)pw) * 0.5f);
+    int   const py  = (int)((fbh - (float)ph) * 0.5f);
+    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
+}
+
+// Smaller dim panel for the pause overlay — sized to fit "PAUSED" +
+// two entries + footer hint. Keeps the gameplay scene mostly visible
+// so the player can see roughly where they were when they paused.
+// Custom centring (sits a little higher than dead-centre).
+static void draw_pause_panel(void) {
+    float const fbw = pax_buf_get_widthf(fb);
+    float const fbh = pax_buf_get_heightf(fb);
+    int   const pw  = (int)(fbw * 0.55f);
+    int   const ph  = (int)(fbh * 0.58f);
+    int   const px  = (int)((fbw - (float)pw) * 0.5f);
+    int   const py  = (int)(fbh * 0.22f);
+    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
 }
 
 static void draw_game_over_overlay(void) {
+    // Panel sized to bound "GAME OVER" (64 px, top 30 %) + flavour
+    // text (22 px, top 46 %) + "press space to retry" (22 px, top
+    // 58 %). Width widened to fit the longest flavour line at the
+    // current text size.
+    float const fbw = pax_buf_get_widthf(fb);
     float const fbh = pax_buf_get_heightf(fb);
+    int   const pw  = (int)(fbw * 0.66f);
+    int   const ph  = (int)(fbh * 0.46f);
+    int   const px  = (int)((fbw - (float)pw) * 0.5f);
+    int   const py  = (int)(fbh * 0.22f);
+    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
+
     draw_centered(fbh * 0.30f, 64.0f, 0xFFF71FF1u, "GAME OVER");
-    draw_centered(fbh * 0.52f, 22.0f, 0xFFFFFFFFu, "press space to retry");
+    draw_centered(fbh * 0.46f, 22.0f, 0xFF31FBFBu, gameover_flavours[s_gameover_flavour_idx]);
+    draw_centered(fbh * 0.58f, 22.0f, 0xFFFFFFFFu, "press space to retry");
+}
+
+// Format an int64 Unix time as "YYYY-MM-DD HH:MM" into out. Empty
+// string if t == 0.
+static void format_unix(int64_t t, char* out, size_t out_size) {
+    if (t <= 0) {
+        snprintf(out, out_size, "—");
+        return;
+    }
+    time_t    tt = (time_t)t;
+    struct tm lt = {0};
+    localtime_r(&tt, &lt);
+    snprintf(out, out_size, "%04d-%02d-%02d %02d:%02d",
+             lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+             lt.tm_hour, lt.tm_min);
+}
+
+// Slot-select screen — three rows with summary stats (or [new] when
+// the slot has no save file).
+static void draw_slot_select(void) {
+    // Title at 12%, rows from 34%, footer hint at 92% + 14 px → ~96%.
+    draw_menu_panel_size(0.80f, 0.94f);
+    float const fbh = pax_buf_get_heightf(fb);
+    float const fbw = pax_buf_get_widthf(fb);
+    draw_centered(fbh * 0.12f, 48.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
+    draw_centered(fbh * 0.22f, 22.0f, 0xFFFFFFFFu, "select save slot");
+
+    float const row_h = 56.0f;
+    float const top   = fbh * 0.34f;
+    for (int i = 0; i < SAVE_SLOT_COUNT; i++) {
+        save_peek_info_t info  = {0};
+        int              exist = save_slot_peek(i, &info) == 0;
+        bool const       sel   = (i == s_slot_cursor);
+        pax_col_t        title_col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
+        pax_col_t        sub_col   = sel ? 0xFFFFFFFFu : 0xFF808088u;
+
+        char title[64];
+        snprintf(title, sizeof(title), "%s slot %d %s",
+                 sel ? ">" : " ", i + 1, sel ? "<" : " ");
+
+        char sub[128];
+        if (exist) {
+            char when[64];
+            format_unix(info.last_played_unix, when, sizeof(when));
+            snprintf(sub, sizeof(sub),
+                     "best %lld  stage %d  runs %d  %s",
+                     (long long)info.score_best, (int)info.stage_best,
+                     (int)info.runs_total, when);
+        } else {
+            snprintf(sub, sizeof(sub), "[new]");
+        }
+
+        float const y = top + (float)i * row_h;
+        {
+            pax_vec2f sz = rendertext_size(NULL, 24.0f, title);
+            rendertext_draw(fb, title_col, NULL, 24.0f,
+                            (fbw - sz.x) * 0.5f, y, title);
+        }
+        {
+            pax_vec2f sz = rendertext_size(NULL, 16.0f, sub);
+            rendertext_draw(fb, sub_col, NULL, 16.0f,
+                            (fbw - sz.x) * 0.5f, y + 28.0f, sub);
+        }
+    }
+
+    draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u,
+                  "up / down to choose, enter to confirm, F1 to exit");
+}
+
+// Main menu — five entries.
+static void draw_main_menu(void) {
+    draw_menu_panel_size(0.80f, 0.94f);
+    char        title[64];
+    snprintf(title, sizeof(title), "slot %d", s_active_slot + 1);
+    float const fbh = pax_buf_get_heightf(fb);
+    float const fbw = pax_buf_get_widthf(fb);
+    draw_centered(fbh * 0.12f, 48.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
+    draw_centered(fbh * 0.21f, 18.0f, 0xFFFFFFFFu, title);
+
+    char const* labels[MENU_ENTRY_COUNT] = {
+        [MENU_ENTRY_DAILY]   = "Daily Run",
+        [MENU_ENTRY_SEEDED]  = "Seeded Run",
+        [MENU_ENTRY_UPGRADE] = "Upgrade Ship",
+        [MENU_ENTRY_STATS]   = "Stats",
+        [MENU_ENTRY_EXIT]    = "Exit",
+    };
+
+    float const row_h = 44.0f;
+    float const top   = fbh * 0.34f;
+    for (int i = 0; i < MENU_ENTRY_COUNT; i++) {
+        bool const sel = (i == s_menu_cursor);
+        char line[64];
+        snprintf(line, sizeof(line), "%s %s %s",
+                 sel ? ">" : " ", labels[i], sel ? "<" : " ");
+        pax_col_t col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
+        pax_vec2f sz  = rendertext_size(NULL, 28.0f, line);
+        rendertext_draw(fb, col, NULL, 28.0f,
+                        (fbw - sz.x) * 0.5f, top + (float)i * row_h, line);
+    }
+
+    draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u,
+                  "up / down to choose, enter to confirm");
+}
+
+// Seed-input screen — numeric entry, prefilled from last_custom_seed.
+static void draw_seed_input(void) {
+    draw_menu_panel_size(0.70f, 0.76f);
+    float const fbh = pax_buf_get_heightf(fb);
+    draw_centered(fbh * 0.20f, 36.0f, 0xFFFFFF6Bu, "Seeded Run");
+    draw_centered(fbh * 0.34f, 18.0f, 0xFFFFFFFFu, "enter seed (digits 0-9)");
+
+    char display[16];
+    if (s_seed_len == 0) {
+        snprintf(display, sizeof(display), "_");
+    } else {
+        snprintf(display, sizeof(display), "%s_", s_seed_buf);
+    }
+    draw_centered(fbh * 0.50f, 48.0f, 0xFFFFFF6Bu, display);
+
+    draw_centered(fbh * 0.78f, 16.0f, 0xFFA0A0A8u,
+                  "backspace edits, enter starts, esc cancels");
+}
+
+// Single-block stats renderer, run twice with different pointers
+// (last_run, all_time) and labels. Returns the y of the next free
+// line so the caller can stack blocks.
+static float draw_stats_block(float tx, float y, char const* heading, run_stats_t const* rs) {
+    float const text_h  = 18.0f;
+    pax_col_t   hdr_col = 0xFFFFFF6Bu;
+    pax_col_t   txt_col = 0xFFFFFFFFu;
+    char        buf[128];
+
+    rendertext_draw(fb, hdr_col, NULL, text_h, tx, y, heading); y += text_h + 4.0f;
+
+    snprintf(buf, sizeof(buf), "  score        %lld",   (long long)rs->score);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 2.0f;
+    snprintf(buf, sizeof(buf), "  distance     %.1f u", rs->distance);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 2.0f;
+    snprintf(buf, sizeof(buf), "  stage        %d",     (int)rs->stage_reached);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 2.0f;
+    snprintf(buf, sizeof(buf), "  mult max     %dx",    (int)rs->multiplier_max);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 2.0f;
+    snprintf(buf, sizeof(buf), "  duration     %.1f s", rs->duration_s);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 2.0f;
+    snprintf(buf, sizeof(buf), "  pickups      boost %d  tri %d  jump %d  shield %d",
+             (int)rs->pickups_speed_boost, (int)rs->pickups_tri,
+             (int)rs->pickups_jump, (int)rs->pickups_shield);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 2.0f;
+    snprintf(buf, sizeof(buf), "  runs         %d (crash %d, stall %d, sunset %d, quit %d)",
+             (int)rs->runs_total, (int)rs->runs_crashed,
+             (int)rs->runs_stalled, (int)rs->runs_sunset, (int)rs->runs_quit);
+    rendertext_draw(fb, txt_col, NULL, text_h, tx, y, buf); y += text_h + 10.0f;
+    return y;
+}
+
+static void draw_stats_view(void) {
+    // Stats block is the tallest screen — title at 6%, footer at 95%
+    // + 14 px → ~98%. Lines are also wider than the other menus so
+    // we use a wider panel here.
+    draw_menu_panel_size(0.92f, 0.98f);
+    float const fbh = pax_buf_get_heightf(fb);
+    float const fbw = pax_buf_get_widthf(fb);
+    float const tx  = fbw * 0.10f;
+    float       y   = fbh * 0.06f;
+
+    draw_centered(y, 32.0f, 0xFFFFFF6Bu, "Stats");
+    y += 44.0f;
+
+    y = draw_stats_block(tx, y, "Last run", &s_save.stats.last_run);
+    y = draw_stats_block(tx, y, "All time", &s_save.stats.all_time);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Level %d  points %d",
+             (int)s_save.meta.level, (int)s_save.meta.points);
+    rendertext_draw(fb, 0xFFFFFF6Bu, NULL, 18.0f, tx, y, buf);
+
+    draw_centered(fbh * 0.95f, 14.0f, 0xFFA0A0A8u, "press enter or esc to return");
+}
+
+// Pause overlay shown over the frozen game scene (STATE_PAUSED).
+static void draw_pause_overlay(void) {
+    draw_pause_panel();
+    float const fbh = pax_buf_get_heightf(fb);
+    float const fbw = pax_buf_get_widthf(fb);
+
+    draw_centered(fbh * 0.30f, 48.0f, 0xFFFFFF6Bu, "PAUSED");
+
+    char const* labels[PAUSE_ENTRY_COUNT] = {
+        [PAUSE_ENTRY_RESUME] = "Resume",
+        [PAUSE_ENTRY_ABORT]  = "Abort run",
+    };
+
+    float const top   = fbh * 0.48f;
+    float const row_h = 40.0f;
+    for (int i = 0; i < PAUSE_ENTRY_COUNT; i++) {
+        bool const sel = (i == s_pause_cursor);
+        char line[48];
+        snprintf(line, sizeof(line), "%s %s %s",
+                 sel ? ">" : " ", labels[i], sel ? "<" : " ");
+        pax_col_t col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
+        pax_vec2f sz  = rendertext_size(NULL, 28.0f, line);
+        rendertext_draw(fb, col, NULL, 28.0f,
+                        (fbw - sz.x) * 0.5f, top + (float)i * row_h, line);
+    }
+
+    draw_centered(fbh * 0.74f, 14.0f, 0xFFA0A0A8u,
+                  "up / down to choose, enter to confirm, F4 to resume");
+}
+
+static void draw_upgrade_stub(void) {
+    draw_menu_panel_size(0.60f, 0.76f);
+    float const fbh = pax_buf_get_heightf(fb);
+    draw_centered(fbh * 0.30f, 48.0f, 0xFFFFFF6Bu, "Upgrade Ship");
+    draw_centered(fbh * 0.50f, 22.0f, 0xFFFFFFFFu, "Coming soon!");
+    draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u, "press enter or esc to return");
+}
+
+// Top-right HUD during PLAYING and GAME_OVER: score + multiplier.
+// Returns the y of the bottom of the lowest line drawn so callers
+// can stack v= / sun= readouts below it.
+static void draw_score_readout(game_state_t const* g) {
+    char        buf[48];
+    float const text_h = 18.0f;
+    float const fbw    = pax_buf_get_widthf(fb);
+
+    snprintf(buf, sizeof(buf), "score=%lld", (long long)g->score);
+    pax_vec2f sz = rendertext_size(NULL, text_h, buf);
+    rendertext_draw(fb, 0xFFFFFF6Bu, NULL, text_h,
+                    fbw - sz.x - 12.0f, 12.0f, buf);
 }
 
 // Build the daily seed from the RTC date — `year*10000 + month*100
@@ -442,13 +798,39 @@ static uint32_t derive_daily_seed(void) {
 }
 
 // Reset run state and (re-)seed the world. The seed is supplied by
-// the caller so the same world replays exactly on retry. The caller
-// owns the seed source — daily seed today, daily + custom seed once
-// Phase 8 lands.
-static void start_run(game_state_t* game, world_state_t* world, uint32_t seed) {
+// the caller so the same world replays exactly on retry. is_custom
+// tags the run for save bookkeeping (custom-seed runs will skip
+// meta-progression once Phase 11 lands; for now we just record the
+// flag so the stats and last_custom_seed updates are correctly
+// scoped).
+static void start_run(game_state_t* game, world_state_t* world, uint32_t seed, bool is_custom) {
     game_init(game);
     world_init(world, seed);
     input_set_mode(INPUT_MODE_PLAYING);
+    s_run_started_us   = esp_timer_get_time();
+    s_run_play_seconds = 0.0;
+    s_peak_stage       = (int)world->stage;
+    s_run_was_custom   = is_custom ? 1 : 0;
+    s_run_seed_used    = (int64_t)seed;
+    if (is_custom) {
+        s_save.meta.last_custom_seed = (int64_t)seed;
+    }
+}
+
+// Classify the end-of-run cause and commit the run summary to the
+// active slot. Called once on the PLAYING → GAME_OVER transition.
+static void commit_run_end(game_state_t const* g, world_state_t const* w, bool head_on) {
+    save_end_reason_t reason;
+    if (head_on) {
+        reason = SAVE_END_CRASH;
+    } else if (g->sun_y >= GAME_SUN_SINK_RANGE_PX) {
+        reason = SAVE_END_SUNSET;
+    } else {
+        reason = SAVE_END_STALL;
+    }
+    int   const peak_stage   = (s_peak_stage > (int)w->stage) ? s_peak_stage : (int)w->stage;
+    double const run_seconds = s_run_play_seconds;
+    save_commit_run_end(s_active_slot, &s_save, reason, g, peak_stage, run_seconds);
 }
 
 void app_main(void) {
@@ -659,17 +1041,21 @@ void app_main(void) {
 
     // Daily seed. Derived from today's calendar date so every run
     // — across restarts, across app reboots — uses the same world
-    // layout until the next midnight rollover. Phase 8 will add an
-    // opt-in custom-seed menu and the anti-cheat fallback for an
-    // unset RTC.
-    uint32_t const run_seed = derive_daily_seed();
-    // The title screen scrolls the floor with a fake speed so the
-    // scene reads as "live" instead of static. The world isn't
-    // advanced (no obstacles spawn yet) — start_run() initializes
-    // the world fresh each time PLAYING begins.
+    // layout until the next midnight rollover.
+    uint32_t const daily_seed = derive_daily_seed();
+    // The menu/title floor scrolls with a fake speed so the scene
+    // reads as "live" instead of static. The world isn't advanced
+    // (no obstacles spawn yet) — start_run() initializes the world
+    // fresh each time PLAYING begins.
     float const title_scroll_speed = 6.0f;
 
-    app_state_t app_state = APP_STATE_TITLE;
+    // Persistence setup: mkdir /int/synthracer if missing. Defaults
+    // until the user picks a slot.
+    save_init();
+    save_init_defaults(&s_save);
+
+    app_state_t app_state = APP_STATE_SLOT_SELECT;
+    bool        run_end_committed = false;
     int64_t     prev_us   = esp_timer_get_time();
 
     // Per-frame timing accumulators (microseconds), summed over a
@@ -689,12 +1075,18 @@ void app_main(void) {
     int64_t prof_window_us = 0;
     int64_t prof_prev_us   = prev_us;
 
-    ESP_LOGI(TAG, "Race the Synth: title screen up");
+    ESP_LOGI(TAG, "Race the Synth: slot-select up");
 
     while (1) {
         int64_t const t_loop_start = esp_timer_get_time();
 
         if (input_drain_events()) {
+            // F1 = straight exit to launcher. Per the design: this
+            // is a dev-only escape hatch and explicitly does NOT
+            // save mid-run — losing progress here is by design. The
+            // proper "abort a run" path is the F4 pause menu's
+            // Abort entry, which commits a QUIT run before returning
+            // to the main menu.
             bsp_device_restart_to_launcher();
         }
 
@@ -746,6 +1138,10 @@ void app_main(void) {
             bool const stalled = game_after_collide(&game, &world, dt);
             head_on            = head_on || stalled;
             world_advance(&world, dt, game.ship_speed_z);
+            // Accumulate active play time (excludes paused frames).
+            // Used by save_commit_run_end so the duration_s stat
+            // doesn't count F4 pauses as gameplay time.
+            s_run_play_seconds += (double)dt;
         }
         int64_t const t_after_phys = esp_timer_get_time();
 
@@ -783,14 +1179,23 @@ void app_main(void) {
         // regions without per-pixel blend math — much cheaper than
         // detecting per-pixel "am I in a shadow" while drawing the
         // grid.
-        float const floor_scroll = (app_state == APP_STATE_TITLE)      ? title_scroll_speed * dt
+        bool const is_menu_state = (app_state == APP_STATE_SLOT_SELECT
+                                    || app_state == APP_STATE_MENU
+                                    || app_state == APP_STATE_SEED_INPUT
+                                    || app_state == APP_STATE_STATS_VIEW
+                                    || app_state == APP_STATE_UPGRADE_STUB);
+        // PAUSED freezes the world but keeps the existing scene
+        // visible behind the overlay — same render path as
+        // GAME_OVER (obstacles + shadows in their last positions,
+        // but no scrolling and no fresh shadows).
+        float const floor_scroll = is_menu_state                       ? title_scroll_speed * dt
                                    : (app_state == APP_STATE_PLAYING)  ? game.ship_speed_z * dt
                                                                        : 0.0f;
-        float const floor_cam_x      = (app_state == APP_STATE_TITLE) ? 0.0f : game.cam_x;
-        bool  const fully_shadowed   = (app_state != APP_STATE_TITLE)
+        float const floor_cam_x      = is_menu_state ? 0.0f : game.cam_x;
+        bool  const fully_shadowed   = !is_menu_state
                                        && (game.sun_y >= GAME_SUN_SINK_RANGE_PX);
         synthwave_step_base(fb, fully_shadowed);
-        if (app_state != APP_STATE_TITLE) {
+        if (!is_menu_state) {
             render_shadows(fb, &world, game.cam_x, game.sun_y);
         }
         synthwave_step_lines(fb, floor_scroll, floor_cam_x);
@@ -805,15 +1210,128 @@ void app_main(void) {
         // `obs` measures render_obstacles in isolation since it
         // dominates the gameplay frame; everything else (ship,
         // sparks, HUD, overlays) rolls up under `fgrest`.
+        int const menu_nav       = input_consume_menu_nav();
+        bool const menu_esc      = input_consume_menu_cancel();
+        bool const menu_bs       = input_consume_backspace();
+        bool const pause_toggle  = input_consume_pause_toggle();
+        int       typed          = -1;
+        bool const typed_d       = input_consume_digit(&typed);
+
         int64_t t_after_obs = 0;
         switch (app_state) {
-            case APP_STATE_TITLE: {
+            case APP_STATE_SLOT_SELECT: {
                 t_after_obs = esp_timer_get_time();
-                draw_title_overlay();
+                draw_slot_select();
                 draw_exit_hint();
+                if (menu_nav != 0) {
+                    // UP = -1 (toward index 0), DOWN = +1. menu_nav
+                    // here is +1 for UP / -1 for DOWN (mirrors the
+                    // speed-delta convention); flip the sign so
+                    // the cursor moves the way the labels read.
+                    s_slot_cursor -= menu_nav;
+                    if (s_slot_cursor < 0)               s_slot_cursor = 0;
+                    if (s_slot_cursor >= SAVE_SLOT_COUNT) s_slot_cursor = SAVE_SLOT_COUNT - 1;
+                }
                 if (pickup_pressed) {
-                    start_run(&game, &world, run_seed);
+                    s_active_slot = s_slot_cursor;
+                    if (save_load_slot(s_active_slot, &s_save) != 0) {
+                        // Missing or corrupt — start a fresh profile.
+                        save_init_defaults(&s_save);
+                    }
+                    if (s_save.meta.last_custom_seed > 0) {
+                        // The seed is logically a uint32 (max 10
+                        // digits), so we clamp into 10 chars + null
+                        // before formatting; the static analyser
+                        // can't deduce the range from a int64 field.
+                        uint32_t v = (uint32_t)(s_save.meta.last_custom_seed & 0xFFFFFFFFu);
+                        snprintf(s_seed_buf, sizeof(s_seed_buf), "%u", (unsigned)v);
+                        s_seed_len = (int)strnlen(s_seed_buf, sizeof(s_seed_buf) - 1);
+                    } else {
+                        s_seed_buf[0] = '\0';
+                        s_seed_len    = 0;
+                    }
+                    s_menu_cursor = MENU_ENTRY_DAILY;
+                    app_state     = APP_STATE_MENU;
+                    input_set_mode(INPUT_MODE_TITLE);
+                }
+                break;
+            }
+
+            case APP_STATE_MENU: {
+                t_after_obs = esp_timer_get_time();
+                draw_main_menu();
+                draw_exit_hint();
+                if (menu_nav != 0) {
+                    s_menu_cursor -= menu_nav;
+                    if (s_menu_cursor < 0)                  s_menu_cursor = 0;
+                    if (s_menu_cursor >= MENU_ENTRY_COUNT)   s_menu_cursor = MENU_ENTRY_COUNT - 1;
+                }
+                if (pickup_pressed) {
+                    switch (s_menu_cursor) {
+                        case MENU_ENTRY_DAILY:
+                            start_run(&game, &world, daily_seed, /*is_custom=*/false);
+                            run_end_committed = false;
+                            app_state = APP_STATE_PLAYING;
+                            break;
+                        case MENU_ENTRY_SEEDED:
+                            input_set_mode(INPUT_MODE_MENU_SEED);
+                            app_state = APP_STATE_SEED_INPUT;
+                            break;
+                        case MENU_ENTRY_UPGRADE:
+                            app_state = APP_STATE_UPGRADE_STUB;
+                            break;
+                        case MENU_ENTRY_STATS:
+                            app_state = APP_STATE_STATS_VIEW;
+                            break;
+                        case MENU_ENTRY_EXIT:
+                            bsp_device_restart_to_launcher();
+                            break;
+                    }
+                }
+                break;
+            }
+
+            case APP_STATE_SEED_INPUT: {
+                t_after_obs = esp_timer_get_time();
+                draw_seed_input();
+                draw_exit_hint();
+                if (typed_d && s_seed_len < (int)(sizeof(s_seed_buf) - 1)) {
+                    s_seed_buf[s_seed_len++] = (char)('0' + typed);
+                    s_seed_buf[s_seed_len]   = '\0';
+                }
+                if (menu_bs && s_seed_len > 0) {
+                    s_seed_buf[--s_seed_len] = '\0';
+                }
+                if (menu_esc) {
+                    app_state = APP_STATE_MENU;
+                    input_set_mode(INPUT_MODE_TITLE);
+                }
+                if (pickup_pressed && s_seed_len > 0) {
+                    uint64_t v   = strtoull(s_seed_buf, NULL, 10);
+                    uint32_t seed = (v == 0) ? 1u : (uint32_t)(v & 0xFFFFFFFFu);
+                    start_run(&game, &world, seed, /*is_custom=*/true);
+                    run_end_committed = false;
                     app_state = APP_STATE_PLAYING;
+                }
+                break;
+            }
+
+            case APP_STATE_STATS_VIEW: {
+                t_after_obs = esp_timer_get_time();
+                draw_stats_view();
+                draw_exit_hint();
+                if (pickup_pressed || menu_esc) {
+                    app_state = APP_STATE_MENU;
+                }
+                break;
+            }
+
+            case APP_STATE_UPGRADE_STUB: {
+                t_after_obs = esp_timer_get_time();
+                draw_upgrade_stub();
+                draw_exit_hint();
+                if (pickup_pressed || menu_esc) {
+                    app_state = APP_STATE_MENU;
                 }
                 break;
             }
@@ -827,12 +1345,72 @@ void app_main(void) {
                 game_draw_ship(fb, &game);
                 game_draw_sparks(fb, &game);
                 draw_exit_hint();
+                draw_score_readout(&game);
                 draw_speed_readout(game.ship_speed_z);
                 draw_sun_readout(game.sun_y);
+                draw_boost_indicator(&game);
+
+                // Track peak stage reached this run.
+                if ((int)world.stage > s_peak_stage) s_peak_stage = (int)world.stage;
 
                 if (head_on) {
+                    if (!run_end_committed) {
+                        commit_run_end(&game, &world, head_on);
+                        run_end_committed = true;
+                    }
+                    // Cheap, non-cryptographic per-run flavour roll:
+                    // microseconds-since-boot mod count varies enough
+                    // for cosmetic text selection.
+                    s_gameover_flavour_idx = (int)((uint32_t)esp_timer_get_time() % (uint32_t)GAMEOVER_FLAVOUR_COUNT);
                     app_state = APP_STATE_GAME_OVER;
                     input_set_mode(INPUT_MODE_GAME_OVER);
+                } else if (pause_toggle) {
+                    s_pause_cursor = PAUSE_ENTRY_RESUME;
+                    app_state      = APP_STATE_PAUSED;
+                    input_set_mode(INPUT_MODE_PAUSED);
+                }
+                break;
+            }
+
+            case APP_STATE_PAUSED: {
+                // Render the world frozen behind the overlay (same
+                // approach as GAME_OVER — obstacles + ship in their
+                // last positions). The physics step above is gated
+                // on PLAYING so nothing moves.
+                render_obstacles(fb, &world, game.cam_x);
+                t_after_obs = esp_timer_get_time();
+                game_draw_ship(fb, &game);
+                draw_score_readout(&game);
+                draw_sun_readout(game.sun_y);
+                draw_pause_overlay();
+                draw_exit_hint();
+
+                if (menu_nav != 0) {
+                    s_pause_cursor -= menu_nav;
+                    if (s_pause_cursor < 0)                 s_pause_cursor = 0;
+                    if (s_pause_cursor >= PAUSE_ENTRY_COUNT) s_pause_cursor = PAUSE_ENTRY_COUNT - 1;
+                }
+                if (pause_toggle) {
+                    // F4 inside the pause overlay = Resume (matches
+                    // the prompt at the bottom of the overlay).
+                    app_state = APP_STATE_PLAYING;
+                    input_set_mode(INPUT_MODE_PLAYING);
+                } else if (pickup_pressed) {
+                    if (s_pause_cursor == PAUSE_ENTRY_RESUME) {
+                        app_state = APP_STATE_PLAYING;
+                        input_set_mode(INPUT_MODE_PLAYING);
+                    } else { // PAUSE_ENTRY_ABORT
+                        if (!run_end_committed) {
+                            int    const peak_stage  = (s_peak_stage > (int)world.stage)
+                                                         ? s_peak_stage : (int)world.stage;
+                            double const run_seconds = s_run_play_seconds;
+                            save_commit_run_end(s_active_slot, &s_save, SAVE_END_QUIT,
+                                                &game, peak_stage, run_seconds);
+                            run_end_committed = true;
+                        }
+                        app_state = APP_STATE_MENU;
+                        input_set_mode(INPUT_MODE_TITLE);
+                    }
                 }
                 break;
             }
@@ -848,11 +1426,12 @@ void app_main(void) {
                 game_draw_ship(fb, &game);
                 draw_game_over_overlay();
                 draw_exit_hint();
+                draw_score_readout(&game);
                 draw_sun_readout(game.sun_y);
 
                 if (pickup_pressed) {
-                    start_run(&game, &world, run_seed);
-                    app_state = APP_STATE_PLAYING;
+                    app_state = APP_STATE_MENU;
+                    input_set_mode(INPUT_MODE_TITLE);
                 }
                 break;
             }

@@ -92,6 +92,48 @@ static inline void direct_565_line(uint16_t* pixels, int x0, int y0, int x1, int
     }
 }
 
+// Translucent panel: blend each pixel inside the logical rectangle
+// 50/50 with a dark grey, dimming the background so overlaid text
+// reads cleanly. Standard RGB565 50% blend trick:
+//   avg = ((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1)
+// The mask clears each channel's LSB before the right-shift so
+// channels don't bleed into each other. The grey-half constant
+// (0x0861 = (0x18C3 & 0xF7DE) >> 1; 0x18C3 ≈ 10% RGB grey) is
+// pre-computed, so the inner loop is one read + AND + shift + add
+// + write per pixel. Mask and constant are byte-swapped when the
+// framebuffer is stored in reverse endian — `+`, `&`, and `>> 1`
+// all commute with byteswap on uint16_t, so the math is correct
+// without per-pixel swapping.
+static inline void direct_565_dim_rect(uint16_t* pixels, bool reverse_endian,
+                                       int lx, int ly, int lw, int lh) {
+    uint16_t const mask      = reverse_endian ? (uint16_t)__builtin_bswap16((uint16_t)0xF7DEu)
+                                              : (uint16_t)0xF7DEu;
+    // Pure 50% halve — no grey floor added. The math `(px & mask) >> 1`
+    // produces a darkened pixel preserving the original hue at half
+    // intensity, with no color shift. Any non-zero `grey_half` would
+    // need its R, G, and B channel bits all set in the RGB565 layout
+    // — bit 11 for R LSB, bit 5 for G LSB, bit 0 for B LSB; otherwise
+    // the addition lands in only one channel and tints the panel
+    // toward that colour. The simplest correct alternative is the
+    // balanced LSB constant `0x0821` (adds R=1, G=1, B=1).
+
+    if (lx < 0) { lw += lx; lx = 0; }
+    if (ly < 0) { lh += ly; ly = 0; }
+    if (lx + lw > DISPLAY_LOG_W) lw = DISPLAY_LOG_W - lx;
+    if (ly + lh > DISPLAY_LOG_H) lh = DISPLAY_LOG_H - ly;
+    if (lw <= 0 || lh <= 0) return;
+
+    for (int x = lx; x < lx + lw; x++) {
+        uint16_t* p = pixels + direct_565_logical_index(x, ly);
+        // Pointer step for +1 logical y is -1 halfword under PAX_O_ROT_CW.
+        for (int yi = 0; yi < lh; yi++) {
+            uint16_t const px = *p;
+            *p = (uint16_t)((px & mask) >> 1);
+            p--;
+        }
+    }
+}
+
 // Internal: fill a vertical run of pixels (logical x fixed,
 // logical y from y_top to y_bot inclusive). This is the inner
 // loop of `direct_565_tri` — under PAX_O_ROT_CW it writes a

@@ -31,12 +31,50 @@
 #define SHIP_X_MIN_WORLD     (-5.0f)
 #define SHIP_X_MAX_WORLD      (5.0f)
 
-typedef struct {
+// Speed-booster state machine. Boost transitions:
+//   IDLE → RAMPING (on pickup)
+//   RAMPING → HOLDING (after RAMP_UP_SECONDS)
+//   HOLDING → COASTING (after HOLD_SECONDS)
+//   COASTING → IDLE (when ship_speed reaches base, or speed is
+//                    decreased below base by shadow stall)
+// Picking up another booster while non-IDLE restarts at RAMPING
+// with the current speed as ramp start.
+typedef enum {
+    BOOST_IDLE = 0,
+    BOOST_RAMPING,
+    BOOST_HOLDING,
+    BOOST_COASTING,
+} boost_phase_t;
+
+// game_state_t is referred to by forward declaration in save.h to
+// avoid a transitive include — keep the typedef name `game_state_t`
+// stable (the tag `game_state_s` is what save.h forward-declares).
+typedef struct game_state_s {
     float ship_x_world;       // lateral, world units. Track is [-5, +5].
     float ship_speed_z;       // current forward velocity. Drifts toward target.
     float ship_base_speed_z;  // unhindered target speed. Adjustable via debug knob.
     float bank;               // -1..+1 signed banking factor
     float cam_x;              // camera follows ship laterally
+
+    // Phase 6 scoring. `multiplier` defaults to 1 and is bumped by
+    // Tri pickups (not yet wired). `multiplier_max` tracks the peak
+    // value reached this run for the per-run stat. Score and
+    // distance accumulate per-frame in game_after_collide as
+    // `dz = ship_speed_z * dt`. score is `Σ dz * multiplier`.
+    double distance_traveled; // world units travelled by the ship this run
+    double score;             // accumulated score (distance × current multiplier)
+    int    multiplier;        // current multiplier (1× default)
+    int    multiplier_max;    // peak multiplier reached this run
+
+    // Per-run pickup counters. Incremented in game_collide on
+    // contact; copied verbatim into save_data.stats.last_run when
+    // the run ends so the player's career totals reflect what was
+    // collected. Only speed_boost is wired today; the others are
+    // placeholders for Phases 6 and 9.
+    int pickups_speed_boost;
+    int pickups_tri;
+    int pickups_jump;
+    int pickups_shield;
 
     // Phase 5: sun position drives the run length. 0 = sun high
     // (start of run); GAME_SUN_SINK_RANGE_PX = fully behind the
@@ -56,6 +94,13 @@ typedef struct {
     // to emit the wingtip burst.
     bool  scrape_left;
     bool  scrape_right;
+
+    // Active speed-booster phase + the timer for the current
+    // phase + the ship's speed at the start of the RAMPING phase
+    // (so the lerp interpolates from there to the boost target).
+    boost_phase_t boost_phase;
+    float         boost_phase_time;
+    float         boost_ramp_start_speed;
 } game_state_t;
 
 // Reset the run (zeroes the spark pool too).
@@ -86,7 +131,7 @@ void game_step(game_state_t* g, float dt, int steer);
 //     trailing scrape — push out and ramp speed.
 //   * pickup / ramp stubs `continue` so they don't kill the
 //     ship on contact. Phase 5 / 6 / 9 will fill these in.
-bool game_collide(game_state_t* g, world_state_t const* w, float dt);
+bool game_collide(game_state_t* g, world_state_t* w, float dt);
 
 // Sun + shadow + speed dynamics. Returns `true` when the run
 // should end because the ship has coasted to a stop in shadow.

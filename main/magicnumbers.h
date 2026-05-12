@@ -135,6 +135,68 @@
 // visual tint — the gameplay-side shadow stall is unrelated.
 #define GAME_SHIP_SHADOW_TINT             0.7f
 
+
+// =============================================================
+// Speed booster pickup — the recovery loop for Phase 5.
+// =============================================================
+//
+// Collecting a booster forces the ship through three phases:
+//   1. RAMP   — linear ramp from current speed to the target
+//               speed over `RAMP_UP_SECONDS`.
+//   2. HOLD   — pegged at the target speed for `HOLD_SECONDS`.
+//   3. COAST  — linear decel back to base speed at
+//               `COAST_DECEL`. Yields to shadow stall if the
+//               ship is in shadow during this phase.
+//
+// During RAMP and HOLD the boost overrides every other speed
+// dynamic (shadow stall, scrape recovery). During COAST the
+// shadow stall takes priority again so the boost doesn't insulate
+// the player from a fresh shadow encounter.
+
+// Target speed during the boost's hold phase, world units / s.
+// At the current `cruise = 20`, `INFLUENCE = 3.0` tuning this
+// makes the sun *rise* at 2× the base sink rate while the boost
+// is active, so a single boost reverses several seconds of
+// natural sunset. Re-derive when cruise/influence change:
+//   ship = cruise × (1 + 3/INFLUENCE)   for "rising at 2× base"
+#define GAME_BOOST_TARGET_SPEED           40.0f
+
+// Linear ramp from pickup-speed to target speed, seconds.
+#define GAME_BOOST_RAMP_UP_SECONDS         2.0f
+
+// How long the ship is held at the target speed after the ramp.
+#define GAME_BOOST_HOLD_SECONDS            1.0f
+
+// Linear coast-back deceleration, world units per second². At
+// the default 2.0, going from 40 → 20 takes 10 s — slower than
+// scrape decel (5 u/s²) so a successful boost gives a long tail
+// of above-cruise travel that keeps the sun off-balance.
+#define GAME_BOOST_COAST_DECEL             2.0f
+
+// Number of boosters spawned per stage, distributed roughly
+// evenly along the stage's world-z budget (with per-segment
+// jitter from the stage PRNG).
+#define GAME_BOOSTERS_PER_STAGE            4
+
+// Number of boosters in each inter-stage rest area.
+#define GAME_BOOSTERS_PER_REST             1
+
+// Booster geometry — square-based pyramid. Footprint matches a
+// pixel-cube (so the player can read it as "obstacle-sized"),
+// height equals the footprint side (so apex sits at base-width
+// above the floor).
+#define GAME_BOOSTER_HALF_W                0.4f
+#define GAME_BOOSTER_HEIGHT                (2.0f * GAME_BOOSTER_HALF_W)
+
+// Booster colour palette and pulse animation. The base colour is
+// a bright neon green; per-pixel brightness modulates between
+// `1.0 - PULSE_AMPLITUDE` and `1.0` over `PULSE_PERIOD_S`.
+#define GAME_BOOSTER_FRONT_COLOR           0xFF60FF60u
+#define GAME_BOOSTER_SIDE_COLOR            0xFF20A040u
+#define GAME_BOOSTER_OUTLINE_COLOR         0xFFC0FFC0u
+#define GAME_BOOSTER_PULSE_PERIOD_S        1.2f
+#define GAME_BOOSTER_PULSE_AMPLITUDE       0.3f
+
 // Per-stage obstacle play time, seconds at cruise. Implemented
 // as a world-z distance budget so a slow run takes longer in
 // real time but encounters the same set of obstacles per stage.

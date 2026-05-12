@@ -217,6 +217,21 @@ static void spawn_pixel_cube(world_state_t* w) {
                    OBSTACLE_OUTLINE_COLOR);
 }
 
+// Spawn one speed-booster pickup at the far plane, x drawn
+// uniformly across the track (same range as cube/big-block spawns
+// so they share the playfield). Kind is PICKUP_BOOST so
+// game_collide routes the contact to the boost-state-machine
+// rather than to head-on death.
+static void spawn_booster(world_state_t* w) {
+    float const x = (frand(&w->stage_prng) * 2.0f - 1.0f) * TRACK_HALF_WIDTH;
+    spawn_obstacle(w, OBSTACLE_KIND_PICKUP_BOOST,
+                   x, WORLD_Z_FAR_SPAWN,
+                   GAME_BOOSTER_HALF_W, GAME_BOOSTER_HALF_W, GAME_BOOSTER_HEIGHT,
+                   GAME_BOOSTER_FRONT_COLOR, GAME_BOOSTER_SIDE_COLOR,
+                   /* top_color */ GAME_BOOSTER_FRONT_COLOR,
+                   GAME_BOOSTER_OUTLINE_COLOR);
+}
+
 // Spawn one big-block cube at the far plane, x drawn uniformly
 // across the track.
 static void spawn_big_block(world_state_t* w) {
@@ -351,6 +366,17 @@ static void start_stage(world_state_t* w, uint8_t stage) {
     w->stage             = stage;
     w->stage_z_remaining = WORLD_STAGE_LENGTH_Z;
     w->stage_prng        = mix_stage_seed(w->level_seed, stage);
+
+    // Schedule the stage's boosters: divide the stage length into
+    // N equal segments and place one booster in each segment at a
+    // jittered position (0.25..0.75 of the segment). Roughly equal
+    // spacing, deterministic from the stage seed.
+    float const segment = WORLD_STAGE_LENGTH_Z / (float)GAME_BOOSTERS_PER_STAGE;
+    for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
+        float const jitter = 0.25f + 0.5f * frand(&w->stage_prng);
+        w->booster_due_at_progress[i] = ((float)i + jitter) * segment;
+    }
+
     start_next_area(w);
 }
 
@@ -458,11 +484,32 @@ void world_advance(world_state_t* w, float dt, float speed_z) {
     // rest area just finished).
     w->stage_z_remaining -= dz;
     bool const area_done = area_tick(w, dz);
+
+    // Booster scheduler: spawn the i-th booster the moment the
+    // stage progress passes its scheduled point. Spent slots are
+    // marked with a negative sentinel so they don't fire again.
+    // Rest areas don't tick this loop; rest's single booster spawns
+    // on rest-area init below.
+    if (w->area.type != AREA_TYPE_REST) {
+        float const stage_progress = WORLD_STAGE_LENGTH_Z - w->stage_z_remaining;
+        for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
+            if (w->booster_due_at_progress[i] >= 0.0f
+                && stage_progress >= w->booster_due_at_progress[i]) {
+                spawn_booster(w);
+                w->booster_due_at_progress[i] = -1.0f;
+            }
+        }
+    }
+
     if (area_done) {
         if (w->area.type == AREA_TYPE_REST) {
             start_stage(w, (uint8_t)(w->stage + 1));
         } else if (w->stage_z_remaining <= 0.0f) {
             area_init_rest(&w->area);
+            // Rest area gets its own boosters, spawned once on entry.
+            for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
+                spawn_booster(w);
+            }
         } else {
             start_next_area(w);
         }

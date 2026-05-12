@@ -19,10 +19,10 @@
 | 2 | Ship + steering | ✅ runs on-device; ship is a placeholder delta-wing (sun-yellow + grid-magenta), proper graphics deferred to Phase 13 |
 | 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles share one pinhole projection; obstacles render as 3D cubes with per-face culling and near-plane clipping; continuous side walls along the track edges, all stored in the same obstacle pool ready for collision in Phase 4 |
 | 4 | Collision + game over | ✅ TITLE → PLAYING → GAME_OVER state machine; AABB collision against the unified obstacle pool with a boundary-obstacle position rule (scrape on side walls, head-on on any playfield obstacle ahead); push-out resolution + continuous scrape-floor/recovery speed dynamics; per-frame red radial-burst sparks at the banked wingtip while scraping |
-| 5 | Sun timer + shadow + boost | 🟡 partial — sun, shadows, stall, full-sunset landed; boost pickups still TODO |
+| 5 | Sun timer + shadow + boost | ✅ done — sun, shadows, stall, full-sunset, boost pickups all landed |
 | 6 | Tris + multiplier | ⬜ not started |
 | 7 | Audio + volume keys | ⬜ not started |
-| 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts); custom-seed menu, NVS anti-cheat last-known-good-date, and `cs_best` ring still TODO. MVP complete after the rest of this phase. |
+| 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts). Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, proper main menu, seed-input subscreen, stats screen, basic scoring + per-slot stats tracking are the work for this phase. MVP complete after the rest of this phase. |
 | 9 | Pickups & attachments | ⬜ not started |
 | 10 | Regions | ⬜ not started |
 | 11 | Meta-progression UI | ⬜ not started |
@@ -1199,6 +1199,247 @@
     shadows on the floor + the ship sprite tint together
     provide enough "you are in a shadow now" signal.
 
+- 2026-05-12 — **Speed-booster pickups landed — Phase 5 closes.**
+  The recovery loop is now playable: collect a pyramid, ship
+  briefly surges to a sun-rising speed, sun climbs back, and
+  shadow stalls become survivable. Phase 5 row in the status
+  table flipped to ✅.
+
+  **Boost state machine** in `game.h/c`:
+
+      IDLE → RAMPING (on pickup)
+      RAMPING → HOLDING after GAME_BOOST_RAMP_UP_SECONDS
+      HOLDING → COASTING after GAME_BOOST_HOLD_SECONDS
+      COASTING → IDLE when ship_speed_z ≤ base_speed_z
+
+  `game_state_t` gains `boost_phase`, `boost_phase_time`, and
+  `boost_ramp_start_speed`. The phase machine is checked at the
+  *top* of `game_after_collide`'s speed-dynamics block with this
+  priority order:
+
+  1. **RAMPING / HOLDING** override everything — the ship's
+     speed is forced to the lerp/peg value. Shadow stalls,
+     scrape decel, etc. all yield. (This is the whole point of
+     the boost: escape stalls.)
+  2. **Shadow stall** wins over **COASTING** so a player who
+     wanders back into shadow during the coast still pays the
+     stall cost.
+  3. **COASTING** linear decel at `GAME_BOOST_COAST_DECEL` until
+     `ship_speed_z ≤ base_speed_z`, then drops to IDLE.
+  4. **Normal scrape / recovery** dynamics (unchanged from Phase
+     4) — only active when boost is IDLE and ship isn't in
+     shadow.
+
+  Picking up another booster mid-boost just resets to RAMPING
+  with the current speed as the lerp start (so picking up at
+  near-peak speed extends the hold rather than stuttering).
+
+  **Collision plumbing.** `game_collide` signature changed from
+  `world_state_t const*` to `world_state_t*` so the booster
+  case can deactivate the obstacle on contact. The
+  `OBSTACLE_KIND_PICKUP_BOOST` switch arm:
+
+  ```
+  o->active                 = false;
+  g->boost_phase            = BOOST_RAMPING;
+  g->boost_phase_time       = GAME_BOOST_RAMP_UP_SECONDS;
+  g->boost_ramp_start_speed = g->ship_speed_z;
+  skip_response             = true;   // no scrape, no head-on
+  ```
+
+  Skip-response keeps the booster from triggering the wall /
+  cube collision paths.
+
+  **World scheduling.** `world_state_t` gains
+  `booster_due_at_progress[GAME_BOOSTERS_PER_STAGE]`. On
+  `start_stage` these are filled with stage-progress positions
+  obtained by dividing the stage length into N equal segments
+  and placing one booster in each segment at a jittered fraction
+  in [0.25, 0.75] (deterministic from the stage PRNG). On each
+  `world_advance` the booster scheduler checks whether the new
+  `stage_progress = WORLD_STAGE_LENGTH_Z - stage_z_remaining`
+  has crossed any due-at-progress; if so it calls
+  `spawn_booster` (which places one at the far-plane spawn z)
+  and marks that slot with the `-1` sentinel.
+
+  The rest area spawns its `GAME_BOOSTERS_PER_REST` boosters
+  once on rest-area entry (in the `area_init_rest` call site in
+  `world_advance`, not inside the init function — keeps
+  `area_init_rest` a pure state initialiser).
+
+  **Pyramid rendering.** `render.c` dispatches on
+  `obstacle_kind_t` inside the painter's-sort loop. Cubes /
+  walls take the existing cube path. `OBSTACLE_KIND_PICKUP_BOOST`
+  goes through a new `render_booster_pyramid` helper that:
+  - Projects 5 vertices (apex at y = height, 4 base corners at
+    y = 0).
+  - Skips the back face (camera always in front).
+  - Draws one side face (whichever's facing the camera) then
+    the front face with `direct_565_tri`.
+  - Wireframes the visible apex-edges and base-edges with
+    `direct_565_line`.
+  - Modulates the fill colour by a per-frame `pulse_factor`
+    computed once from `esp_timer_get_time()`:
+    `1.0 - PULSE_AMPLITUDE × 0.5 × (1 - sin(2π × phase))`.
+    Outline stays at full brightness so the silhouette doesn't
+    breathe with the body.
+
+  **HUD indicator.** Bottom-left of the screen, a solid green
+  upward-pointing triangle whose height is 3× the 18 px debug
+  text size (so the player can read it out of the corner of
+  their eye). Visible whenever `boost_phase != BOOST_IDLE` —
+  covers the full RAMP / HOLD / COAST window. Drawn via
+  `direct_565_tri` in PLAYING state only (GAME_OVER and TITLE
+  don't show it).
+
+  **Tunables added to magicnumbers.h:**
+  - `GAME_BOOST_TARGET_SPEED = 40.0` — peg speed during HOLD.
+    Re-derive when cruise / influence change; the formula in
+    the file's comments is
+    `ship = cruise × (1 + 3/INFLUENCE)` for "sun rising at 2×
+    base rate".
+  - `GAME_BOOST_RAMP_UP_SECONDS = 2.0`
+  - `GAME_BOOST_HOLD_SECONDS = 1.0`
+  - `GAME_BOOST_COAST_DECEL = 2.0` — slower than scrape decel
+    (5.0) so a boost gives a long tail of above-cruise travel.
+  - `GAME_BOOSTERS_PER_STAGE = 4`
+  - `GAME_BOOSTERS_PER_REST = 1`
+  - `GAME_BOOSTER_HALF_W = 0.4`,
+    `GAME_BOOSTER_HEIGHT = 2 × HALF_W = 0.8` (height equals
+    base side as requested).
+  - `GAME_BOOSTER_FRONT_COLOR`, `GAME_BOOSTER_SIDE_COLOR`,
+    `GAME_BOOSTER_OUTLINE_COLOR` — neon green palette.
+  - `GAME_BOOSTER_PULSE_PERIOD_S = 1.2`,
+    `GAME_BOOSTER_PULSE_AMPLITUDE = 0.3` — body breathes ±30%
+    brightness over 1.2 s.
+
+  **What's left for Phase 5 polish (deferred):**
+  - Run-end fade as `ship_speed → 0`. The current behaviour
+    (instant freeze + GAME OVER overlay) is functional; a
+    couple seconds of slow-mo would feel better but isn't
+    strictly necessary.
+  - Per-phase visual differentiation on the HUD indicator (e.g.
+    pulsing during RAMP, steady during HOLD, dimming during
+    COAST). Steady-on-all-phases is readable enough.
+
+- 2026-05-12 — **Persistence redesign: file-based NBT saves with
+  three independent slots.** NVS dropped as the persistence
+  store. New layout:
+  - **Path**: `/int/synthracer/save{0,1,2}.bin`. The `/int`
+    mount is already used for icon PNGs, no new mount needed.
+    `save_init()` creates the directory at boot.
+  - **Format**: NBT, copied verbatim from paperclips
+    (`game_nbt.c`/`game_save.c`). Magic changed to **`SYNT`**,
+    format version starts at **1**. Same endian sentinel and
+    tag types (END/INT32/INT64/DOUBLE/STRING/COMPOUND).
+  - **Tools**: `tools/savetool.pl` mirrors the paperclips
+    helper — `decompile <bin> <txt>` and `compile <txt> <bin>`
+    so saves are inspectable and we can construct test
+    scenarios from text files (e.g. "slot with all unlocks
+    + 7 stages reached" for testing the stats screen).
+  - **Three slots, no autosave slot.** Slot 0/1/2 are
+    independent profiles (stats + unlocks + daily-progress per
+    slot). When the player picks a slot at boot, that slot is
+    sticky for the app lifetime; we autosave to it after every
+    run (no separate autosave file).
+  - **Explicit-boolean fields**, not bitmasks. Each unlock
+    has its own INT32 (0 or 1): `unlock_speed_boost`,
+    `unlock_multiplier`, `unlock_jump`, `unlock_magnet`,
+    `unlock_shield`, … 25 entries total. Same pattern for
+    today's three daily-challenge slots:
+    `daily_done_1pt`, `daily_done_2pt`, `daily_done_3pt`. NBT
+    has no native bool tag — we use INT32 0/1 with a leading
+    `b_` naming hint isn't necessary because the field names
+    are self-describing. Easy to grep, easy to edit by hand
+    via the savetool round-trip.
+
+- 2026-05-12 — **Stats tracking (per slot).** The save's
+  `stats` compound records two parallel sets of counters:
+  - **Last run**: `score_last` (i64), `distance_last` (f64,
+    world units), `stage_last` (i32), `multiplier_last_max`
+    (i32), `run_end_reason` (i32: 0=in-progress, 1=crash,
+    2=stall, 3=sunset, 4=quit).
+  - **All-time bests / totals**: `score_best` (i64),
+    `distance_total` (f64), `stage_best` (i32),
+    `multiplier_best` (i32), `runs_total` (i32),
+    `runs_crashed` (i32), `runs_stalled` (i32),
+    `runs_sunset` (i32), `runs_quit` (i32),
+    `play_time_total_s` (f64).
+  Counters are committed to the save on run end (by
+  `save_commit_run_end(...)`), which writes the file
+  immediately. No async autosave thread today — the run is
+  paused at the GAME OVER screen anyway, so a synchronous
+  write is fine.
+
+- 2026-05-12 — **Stats compound refactored to symmetric
+  `run_stats_t` (twin compounds `last_run` and `all_time`).**
+  Followup on the persistence redesign: instead of one flat
+  compound with asymmetric `_last` / `_best` / `_total` pairs,
+  the on-disk `stats` compound contains two children of the
+  *same* schema:
+  ```
+  stats {
+    last_run { score=…, distance=…, stage_reached=…, ... }
+    all_time { score=…, distance=…, stage_reached=…, ... }
+  }
+  ```
+  Both are `run_stats_t` from `save.h`. The merge rule
+  (`run_stats_merge_into_all_time` in save.c) is the single
+  place that knows max-tracked fields (score, stage_reached,
+  multiplier_max) versus sum-tracked fields (distance,
+  duration_s, pickup counters, runs_total + the four
+  end-reason flag-counters). Same field name in both
+  compounds means the stats screen renders both with a single
+  helper (`draw_stats_block(y, label, run_stats_t const*)`),
+  and constructing test scenarios in the savetool text file
+  is symmetric.
+
+  Pickup counters live on `run_stats_t` from day one:
+  `pickups_speed_boost` (wired), `pickups_tri`, `pickups_jump`,
+  `pickups_shield` (placeholders, increment when the
+  corresponding pickup types land in Phases 6 / 9).
+  `game_state_t` gained matching per-run counters that the
+  commit copies into `last_run.pickups_*` on run end.
+
+- 2026-05-12 — **F4 pause menu (Resume / Abort run); F1 is a
+  no-save dev-only exit.** The pause overlay is `STATE_PAUSED`:
+  - F4 in `PLAYING` → `PAUSED`. F4 in `PAUSED` → resume.
+  - `PAUSED` cursor moves with UP/DOWN, ENTER picks:
+    - **Resume** → back to `PLAYING`.
+    - **Abort run** → `save_commit_run_end(…, SAVE_END_QUIT, …)`
+      then `STATE_MENU`. This is the *only* path that records
+      a QUIT run.
+  - F1 still restarts to launcher but explicitly does **not**
+    commit the in-flight run. Losing mid-run progress on F1
+    is deliberate — F1 is a development-only escape hatch,
+    expected to be removed in the final build. Players who
+    want to abandon a run with stats recorded use F4 → Abort.
+
+- 2026-05-12 — **Title screen redesigned as a menu.** New app
+  states:
+  - `STATE_SLOT_SELECT` — first state on boot. Three rows
+    (slot 0/1/2), each labelled with summary stats (best
+    score, runs played, last-played date) or `[new]` if the
+    file is absent. UP/DOWN to select, ENTER/SPACE/A to
+    confirm. F1 exits the app.
+  - `STATE_MENU` — main menu with five entries: **Daily Run**
+    / **Seeded Run** / **Upgrade Ship** (stub) / **Stats** /
+    **Exit**.
+  - `STATE_SEED_INPUT` — keyboard ASCII digits entry, max 10
+    digits to fit a `uint32_t`. Prefilled from
+    `last_custom_seed` in the active save. ENTER starts the
+    run; ESC cancels back to menu. BACKSPACE edits.
+  - `STATE_STATS_VIEW` — text dump of the stats compound. ESC
+    or ENTER returns to menu.
+  - `STATE_UPGRADE_STUB` — placeholder "coming soon" screen.
+    Slot for future Phase 11 ship-upgrade UI.
+  - `STATE_PLAYING` → `STATE_GAME_OVER` → `STATE_MENU` (no
+    longer back to a press-space-to-start title screen).
+  Custom-seed runs (`STATE_SEED_INPUT` → PLAYING) still set
+  the `is_custom` flag so meta-progression doesn't award
+  (Phase 11 enforces; today it's just stored on the save
+  alongside `last_custom_seed`).
+
 ---
 
 ## Future FPS improvements
@@ -1670,40 +1911,150 @@ the function makes it explicit and lets us animate the sun.
     challenges + their progress.
   - "Exit" — `bsp_device_restart_to_launcher()` (also bound to F1).
 
-### `meta.c` — levels, challenges, persistence
+### `save.c` — persistence + slot management + stats (replaces planned `meta.c` persistence)
 
-- Static table `level_unlocks[26]` mapping level → unlock-flag enum
-  (BOOST_PICKUP, MULTIPLIER, JUMP, MAGNET, …, APOCALYPSE, etc.) per the
-  original-game research. Implemented as a `const struct { ... }`
-  initialized at file scope.
-- `challenge_template_t templates[~14]` — types: REACH_REGION, COLLECT_TRIS,
-  TRAVEL_DISTANCE, USE_PICKUP, REACH_MULTIPLIER, PERFECT_REGIONS,
-  ONLY_LEFT, ONLY_RIGHT, with `(min,max)` ranges per tier.
-- `meta.active[3]` — three concurrent challenges (1pt, 2pt, 3pt). On
-  completion: award points, reroll that slot from the **daily** PRNG
-  seeded by `today_seed * 7 + slot_index`. So challenges are also
-  date-stable.
-- Persistence (NVS namespace `synthracer`):
-  - `level` (u8) — current player level 1..25
-  - `points` (u8) — challenge points toward next level
-  - `unlocks` (u32) — bitmask of feature flags
-  - `attach1` / `attach2` (u8) — equipped attachment IDs
-  - `highscore` (u32) — all-time best (across all seed modes)
-  - `last_date` (u32) — last seen RTC date as `yyyymmdd`
-  - `ch_state` (blob, ~64B) — three challenge slots' current targets and
-    progress
-  - `daily_done_<date>` (u8) — bitmask of which challenges done today
-    (lazy-cleaned: when `last_date` rolls forward, drop the oldest key)
-  - `last_custom_seed` (u32) — most recent custom seed entered (UI default)
-  - `cs_best` (blob) — small ring of `{seed, score}` pairs (e.g. last 8
-    custom seeds played) so the title screen can show "Best on this
-    seed: 12345" when the player re-enters a seed they've played before.
-- **Custom-seed runs do NOT touch** `level`, `points`, `unlocks`, or
-  `ch_state` — only `highscore` (if beaten) and `cs_best`. `meta.c`'s
-  pickup/region callbacks check the `is_custom` flag and early-return.
-- API: `meta_load()`, `meta_save()`, `meta_on_pickup_collected()`,
-  `meta_on_region_complete()`, `meta_on_run_end(score)`,
-  `meta_reroll_for_date(seed)`.
+Persistence lives in plain NBT files under `/int/synthracer/`, one
+per slot. The format is copied verbatim from
+`tanmatsu-paperclips-grace/main/game_nbt.{c,h}` — only the magic
+(`SYNT`) and the structure of the payload differ.
+
+**Files in `main/`:**
+- `nbt.{c,h}` — generic NBT reader/writer, header-for-header
+  identical to paperclips with `NBT_MAGIC_0..3 = 'S','Y','N','T'`.
+- `save.{c,h}` — slot API (`save_init`, `save_load_slot`,
+  `save_write_slot`, `save_slot_exists`, `save_slot_peek`,
+  `save_commit_run_end`).
+- `save_nbt.c` — `save_write_state` / `save_read_state` that
+  serialize the `save_data_t` struct to / from an open NBT
+  reader / writer. Skipping unknown tags lets us add new
+  fields without breaking older saves; missing fields keep
+  their `save_init_defaults()` values.
+
+**Tools (in `tools/`):**
+- `savetool.pl` — copied from paperclips, magic patched to
+  `SYNT`. `./tools/savetool.pl decompile save0.bin out.txt`
+  produces an indented text dump; `./tools/savetool.pl
+  compile in.txt save0.bin` reconstructs the binary.
+  Round-trip-stable, so we can construct test scenarios by
+  hand (e.g. "slot with stage_best=12 and the multiplier
+  unlock") and push them to the device via `mpremote` or
+  similar.
+
+**Slots:**
+- `SAVE_SLOT_COUNT = 3`. No autosave slot. Slot 0/1/2 are
+  independent profiles.
+- `save_data_t s_save` is the in-memory mirror of the active
+  slot's file contents. The active-slot index is sticky for
+  the app lifetime.
+- On boot: enumerate the three files, show
+  `STATE_SLOT_SELECT` with per-slot summary lines (last
+  played date, best score, runs played; or `[new]` if the
+  file is absent). The user picks a slot; we
+  `save_load_slot(idx)` (or initialize defaults if the file
+  doesn't exist yet), set `s_active_slot = idx`, and
+  transition to `STATE_MENU`.
+- On run end: `save_commit_run_end(reason, &game)` updates
+  the in-memory `s_save.stats` (last_* fields = current run,
+  best_* fields = max(current, previous best), all-time
+  totals += this-run delta) and immediately writes the file
+  via `save_write_slot(s_active_slot)`. Synchronous — the
+  player is on the GAME OVER screen anyway.
+
+**`save_data_t` (in memory; serialised compound-for-compound):**
+
+```c
+typedef struct {
+    // peek (written first so save_slot_peek can read this fast)
+    int64_t last_played_unix;       // time(NULL) of last save, 0 if never
+    int64_t score_best;              // copied here from stats for fast peek
+    int32_t stage_best;
+    int32_t runs_total;
+
+    // stats — last-run snapshots + all-time accumulators
+    struct {
+        int64_t score_last, score_best;
+        double  distance_last, distance_total;
+        int32_t stage_last, stage_best;
+        int32_t multiplier_last_max, multiplier_best;
+        int32_t run_end_reason;     // 0=none,1=crash,2=stall,3=sunset,4=quit
+        int32_t runs_total, runs_crashed, runs_stalled, runs_sunset, runs_quit;
+        double  play_time_total_s;
+    } stats;
+
+    // meta — player progression + flags (each unlock is its own bool)
+    struct {
+        int32_t level;               // 1..25, default 1
+        int32_t points;              // toward next level
+        // 25 explicit booleans — INT32 0/1 each
+        int32_t unlock_speed_boost;  // lv2
+        int32_t unlock_multiplier;   // lv3
+        int32_t unlock_jump;         // lv4
+        int32_t unlock_magnet;       // lv5
+        int32_t unlock_starting_mult_2x;     // lv6
+        int32_t unlock_portal_easier_world;  // lv7
+        int32_t unlock_double_jump;          // lv8
+        int32_t unlock_shield;               // lv9
+        int32_t unlock_shield_attachment;    // lv10
+        int32_t unlock_apocalypse;           // lv11
+        int32_t unlock_starting_mult_3x;     // lv12
+        int32_t unlock_attach_slot2;         // lv13
+        int32_t unlock_left_wing_decal;      // lv14
+        int32_t unlock_double_portal;        // lv15
+        int32_t unlock_checkpoint;           // lv16
+        int32_t unlock_power_turning1;       // lv17
+        int32_t unlock_power_turning2;       // lv18
+        int32_t unlock_triple_jump;          // lv19
+        int32_t unlock_checkpoint2;          // lv20
+        int32_t unlock_enhanced_magnet;      // lv21
+        int32_t unlock_right_wing_decal;     // lv22
+        int32_t unlock_starting_mult_4x;     // lv23
+        int32_t unlock_starting_mult_max;    // lv24
+        int32_t unlock_labyrinth;            // lv25
+        int32_t attach1, attach2;            // equipped attachment IDs (0 = none)
+        int64_t last_custom_seed;            // most recently entered seed
+        int64_t last_seen_date;              // yyyymmdd anti-cheat
+    } meta;
+
+    // daily — today's challenge state (resets when last_seen_date rolls
+    // forward; each "done" is its own boolean)
+    struct {
+        int32_t daily_done_1pt;
+        int32_t daily_done_2pt;
+        int32_t daily_done_3pt;
+        // challenge targets / progress arrive with Phase 11.
+    } daily;
+} save_data_t;
+```
+
+`save_init_defaults(&s)` zeros the struct and sets `meta.level = 1`.
+
+**API:**
+- `void save_init(void);` — `mkdir /int/synthracer` if absent.
+- `int  save_slot_exists(int slot);` — `stat(path)`.
+- `int  save_slot_peek(int slot, save_peek_info_t* out);` —
+  reads just the `peek` compound from disk; for slot-select
+  summary display.
+- `int  save_load_slot(int slot, save_data_t* out);` —
+  initializes defaults, then reads tags, ignoring unknowns.
+  Returns 0 on success, -1 if the file is missing / corrupt.
+- `int  save_write_slot(int slot, save_data_t const* s);` —
+  serialises the full struct to the slot file.
+- `void save_commit_run_end(save_data_t* s, int reason,
+  game_state_t const* g);` — updates stats from the just-ended
+  run, then `save_write_slot()`. The single entry point for
+  end-of-run persistence so the call site in main.c stays one
+  line.
+
+**Anti-cheat (planned, not yet implemented):** if RTC year < 2024
+*or* the current date is earlier than `meta.last_seen_date`, the
+daily seed is taken from `last_seen_date` rather than the
+current RTC. Otherwise update `last_seen_date` to today. Reset
+the `daily_done_*` booleans whenever the date moves forward.
+
+**Custom seed:** `last_custom_seed` is updated whenever the
+user starts a seeded run; the seed-input screen prefills its
+buffer from this field. Phase 11 will add the per-seed best
+ring; today only the most-recent value is persisted.
 
 ### `audio.c` — SFX + system volume
 
