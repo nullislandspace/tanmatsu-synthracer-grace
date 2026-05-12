@@ -2,7 +2,7 @@
   "name": "Race the Synth",
   "description": "Synthwave-styled tribute to Race The Sun — race the setting sun across procedurally generated terrain.",
   "categories": ["games"],
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon": {
     "16x16": "icon16.png",
     "32x32": "icon32.png",
@@ -13,7 +13,7 @@
   "application": [
     {
       "targets": ["tanmatsu", "konsool"],
-      "revision": 1,
+      "revision": 2,
       "type": "script",
       "interpreter": "at.cavac.graceloader",
       "executable": "app.so",
