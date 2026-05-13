@@ -95,13 +95,14 @@
 // = 0.56 u (kept in sync with game.h by re-deriving from a literal here
 // to avoid an awkward include cycle for a single constant). Opening
 // scales linearly from 3× ship width at stage 1 down to 1.5× at
-// stage 10; lead-in / lead-out pad scales 30 → 10 over the same
-// range. Both clamp at stage 10.
+// stage 10 and clamps from there — that's where the difficulty curve
+// lives. Inter-gate / lead-in / trailing pad is a fixed 50 u for all
+// stages, sized so even back-to-back hard-left → hard-right alignment
+// shifts are physically reachable at cruise speed.
 #define SHIP_FULL_WIDTH        (2.0f * 0.28f)
 #define GATEWAY_OPENING_STAGE1 (3.0f * SHIP_FULL_WIDTH)
 #define GATEWAY_OPENING_STAGE10 (1.5f * SHIP_FULL_WIDTH)
-#define GATEWAY_PAD_STAGE1     30.0f
-#define GATEWAY_PAD_STAGE10    10.0f
+#define GATEWAY_PAD_Z          50.0f
 #define GATEWAY_COUNT_MIN      1
 #define GATEWAY_COUNT_MAX      5
 
@@ -242,13 +243,30 @@ static void spawn_big_block(world_state_t* w) {
                    BIG_FRONT_COLOR, BIG_SIDE_COLOR, BIG_TOP_COLOR, BIG_OUTLINE_COLOR);
 }
 
+// Spawn a booster pickup at an explicit (x, z) — used when the area
+// generator knows the right position (e.g. inside a gate gap) rather
+// than picking randomly.
+static void spawn_booster_at(world_state_t* w, float x, float z) {
+    spawn_obstacle(w, OBSTACLE_KIND_PICKUP_BOOST,
+                   x, z,
+                   GAME_BOOSTER_HALF_W, GAME_BOOSTER_HALF_W, GAME_BOOSTER_HEIGHT,
+                   GAME_BOOSTER_FRONT_COLOR, GAME_BOOSTER_SIDE_COLOR,
+                   /* top_color */ GAME_BOOSTER_FRONT_COLOR,
+                   GAME_BOOSTER_OUTLINE_COLOR);
+}
+
 // Spawn a gateway: two cube slabs flanking a central gap of width
 // `2 * half_gap`. The gap centre is picked so that both slabs are
 // entirely inside the playfield (no slab pokes through the side
 // wall). Each slab is OBSTACLE_KIND_CUBE so the ship dies head-on
 // just like striking a pixel cube — gateways are a deadly barrier,
 // not a scrape rail.
-static void spawn_gateway(world_state_t* w, float half_gap) {
+//
+// If `with_booster` is true, also spawns a speed booster centred in
+// the gap at the same z as the gate — the gate area's way of
+// consuming a stage-scheduled booster, placing it where the player
+// must steer to dodge the gate anyway.
+static void spawn_gateway(world_state_t* w, float half_gap, bool with_booster) {
     float const gap_centre_extent = TRACK_HALF_WIDTH - half_gap;
     float       gap_x             = 0.0f;
     if (gap_centre_extent > 0.0f) {
@@ -273,6 +291,9 @@ static void spawn_gateway(world_state_t* w, float half_gap) {
                        right_centre, WORLD_Z_FAR_SPAWN,
                        right_half_w, GATE_HALF_D, GATE_HEIGHT,
                        GATE_FRONT_COLOR, GATE_SIDE_COLOR, GATE_TOP_COLOR, GATE_OUTLINE_COLOR);
+    }
+    if (with_booster) {
+        spawn_booster_at(w, gap_x, WORLD_Z_FAR_SPAWN);
     }
 }
 
@@ -313,7 +334,7 @@ static void area_init_gateways(area_state_t* a, uint8_t stage, uint32_t* prng) {
           + (int)(frand(prng) * (float)(GATEWAY_COUNT_MAX - GATEWAY_COUNT_MIN + 1));
     if (n > GATEWAY_COUNT_MAX) n = GATEWAY_COUNT_MAX;
     float const gap     = lerp_by_stage(stage, GATEWAY_OPENING_STAGE1, GATEWAY_OPENING_STAGE10);
-    float const pad     = lerp_by_stage(stage, GATEWAY_PAD_STAGE1,     GATEWAY_PAD_STAGE10);
+    float const pad     = GATEWAY_PAD_Z;
     float const thick   = 2.0f * GATE_HALF_D;
     a->type               = AREA_TYPE_GATEWAYS;
     a->gates_remaining    = n;
@@ -366,6 +387,10 @@ static void start_stage(world_state_t* w, uint8_t stage) {
     w->stage             = stage;
     w->stage_z_remaining = WORLD_STAGE_LENGTH_Z;
     w->stage_prng        = mix_stage_seed(w->level_seed, stage);
+    // Clear any unspent owed-counter from the previous stage. The
+    // rest-entry handler should already have drained it, but reset
+    // here defensively so a logic bug doesn't accumulate across runs.
+    w->area.boosters_owed = 0;
 
     // Schedule the stage's boosters: divide the stage length into
     // N equal segments and place one booster in each segment at a
@@ -390,9 +415,20 @@ static bool area_tick(world_state_t* w, float dz) {
 
     switch (a->type) {
         case AREA_TYPE_PIXEL_FIELD: {
+            // When the stage scheduler has flagged a booster as owed,
+            // the next spawn event becomes a booster instead of a
+            // cube. This guarantees no overlap with adjacent obstacles
+            // — the booster simply occupies a slot that would have
+            // held a cube. One cube is "displaced" per booster, which
+            // is acceptable density-wise.
             float const scale = stage_interval_scale(w->stage);
             while (a->next_event_z <= 0.0f && a->length_remaining_z > 0.0f) {
-                spawn_pixel_cube(w);
+                if (a->boosters_owed > 0) {
+                    spawn_booster(w);
+                    a->boosters_owed--;
+                } else {
+                    spawn_pixel_cube(w);
+                }
                 float const interval = (PIXEL_INTERVAL_MIN
                                        + frand(&w->stage_prng)
                                          * (PIXEL_INTERVAL_MAX - PIXEL_INTERVAL_MIN))
@@ -402,9 +438,15 @@ static bool area_tick(world_state_t* w, float dz) {
             break;
         }
         case AREA_TYPE_BIG_BLOCKS: {
+            // Same booster-displaces-cube rule as pixel field.
             float const scale = stage_interval_scale(w->stage);
             while (a->next_event_z <= 0.0f && a->length_remaining_z > 0.0f) {
-                spawn_big_block(w);
+                if (a->boosters_owed > 0) {
+                    spawn_booster(w);
+                    a->boosters_owed--;
+                } else {
+                    spawn_big_block(w);
+                }
                 float const interval = (BIG_INTERVAL_MIN
                                        + frand(&w->stage_prng)
                                          * (BIG_INTERVAL_MAX - BIG_INTERVAL_MIN))
@@ -419,17 +461,26 @@ static bool area_tick(world_state_t* w, float dz) {
             // plus the next gate's thickness) before the next event
             // fires. After the last gate the trailing pad ticks down
             // the area's length normally.
+            //
+            // If a booster is owed, it rides along inside the next
+            // gate's gap — the player has to steer to the gap anyway
+            // to dodge the gate, so picking up the booster is the
+            // default path. Reads as the area type rewarding tight
+            // alignment with a speed boost.
             float const thick = 2.0f * GATE_HALF_D;
             while (a->next_event_z <= 0.0f && a->gates_remaining > 0) {
-                spawn_gateway(w, a->gate_gap_half_w);
+                bool const with_booster = a->boosters_owed > 0;
+                spawn_gateway(w, a->gate_gap_half_w, with_booster);
+                if (with_booster) a->boosters_owed--;
                 a->gates_remaining--;
                 a->next_event_z += a->gate_pad_z + thick;
             }
             break;
         }
         case AREA_TYPE_REST:
-            // No obstacles today; Phase 5 will sprinkle pickups here
-            // on a separate cadence.
+            // No tick-driven spawns here; boosters owed at rest entry
+            // are dumped all at once in `world_advance` when the rest
+            // area is inserted (see the area-transition block).
             break;
     }
 
@@ -485,17 +536,19 @@ void world_advance(world_state_t* w, float dt, float speed_z) {
     w->stage_z_remaining -= dz;
     bool const area_done = area_tick(w, dz);
 
-    // Booster scheduler: spawn the i-th booster the moment the
-    // stage progress passes its scheduled point. Spent slots are
-    // marked with a negative sentinel so they don't fire again.
-    // Rest areas don't tick this loop; rest's single booster spawns
-    // on rest-area init below.
+    // Booster scheduler — decides *when* a booster is due. Each
+    // scheduled progress mark, once crossed, bumps the active area's
+    // `boosters_owed` counter; the area's tick block (above) consumes
+    // it and decides *where* the booster goes. Spent slots are
+    // marked with a negative sentinel so they don't fire again. Rest
+    // areas skip this loop — their booster handling is the dump on
+    // entry, just below.
     if (w->area.type != AREA_TYPE_REST) {
         float const stage_progress = WORLD_STAGE_LENGTH_Z - w->stage_z_remaining;
         for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
             if (w->booster_due_at_progress[i] >= 0.0f
                 && stage_progress >= w->booster_due_at_progress[i]) {
-                spawn_booster(w);
+                w->area.boosters_owed++;
                 w->booster_due_at_progress[i] = -1.0f;
             }
         }
@@ -505,11 +558,19 @@ void world_advance(world_state_t* w, float dt, float speed_z) {
         if (w->area.type == AREA_TYPE_REST) {
             start_stage(w, (uint8_t)(w->stage + 1));
         } else if (w->stage_z_remaining <= 0.0f) {
+            // Capture any leftovers before area_init_rest overwrites
+            // most of the area state (it doesn't touch boosters_owed,
+            // but read it explicitly so the intent is local).
+            int const leftover_boosters = w->area.boosters_owed;
             area_init_rest(&w->area);
-            // Rest area gets its own boosters, spawned once on entry.
-            for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
+            // Rest absorbs the per-rest quota plus anything the stage
+            // generators couldn't place. All spawn at the rest's far
+            // plane with random x, in a single burst.
+            int const total = leftover_boosters + GAME_BOOSTERS_PER_REST;
+            for (int i = 0; i < total; i++) {
                 spawn_booster(w);
             }
+            w->area.boosters_owed = 0;
         } else {
             start_next_area(w);
         }

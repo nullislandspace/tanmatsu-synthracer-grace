@@ -87,6 +87,14 @@ typedef struct {
     int         gates_remaining;     // GATEWAYS only: gates still to spawn
     float       gate_gap_half_w;     // GATEWAYS only: half-width of the opening
     float       gate_pad_z;          // GATEWAYS only: empty z between gates (and lead-in / trailing)
+    // Booster "owed" counter. The top-level stage scheduler in
+    // world_advance decides *when* a booster is due and increments
+    // this; each area type's tick consumes the counter and decides
+    // *where* the booster goes (pixel-field / big-blocks: replace
+    // the next cube event; gateways: in the gap of the next gate;
+    // rest: dumped at entry). Carries across area transitions
+    // within a stage; cleared at stage start.
+    int         boosters_owed;
 } area_state_t;
 
 typedef struct {

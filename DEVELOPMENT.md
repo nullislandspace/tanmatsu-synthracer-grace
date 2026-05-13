@@ -448,9 +448,11 @@
     gate is two `OBSTACLE_KIND_CUBE` slabs (left + right of
     the gap), amber palette, so head-on into a wall slab is
     fatal. Gap width lerps 3.0× → 1.5× ship width over
-    stages 1-10 (clamped past 10); inter-gate / lead-in /
-    trailing pad lerps 30 → 10 u over the same range. Gate
-    count per area is a uniform 1..5 draw.
+    stages 1-10 (clamped past 10) — that's the entire
+    difficulty curve. Inter-gate / lead-in / trailing pad is
+    a fixed 50 u for all stages; alternating hard-left ↔
+    hard-right gaps need that much z to be reachable at
+    cruise speed. Gate count per area is a uniform 1..5 draw.
   * `AREA_TYPE_REST` — internal-only, can't be picked by the
     area picker; only the stage rollover inserts it.
 
@@ -1748,7 +1750,9 @@ the function makes it explicit and lets us animate the sun.
     head-on into a slab is fatal exactly like striking a pixel
     cube. Gap width `lerp_by_stage(stage, 3*ship_w, 1.5*ship_w)`,
     clamped past stage 10. Inter-gate / lead-in / trailing pad
-    `lerp_by_stage(stage, 30, 10)`. Gate count uniform 1..5.
+    is a fixed 50 u for all stages (sized so back-to-back
+    hard-left ↔ hard-right gaps remain reachable at cruise
+    speed). Gate count uniform 1..5.
     Layout: `[settle][pad][gate][pad][gate]...[gate][pad]` —
     total length `settle + (n+1)*pad + n*thick`. The `settle =
     WORLD_Z_FAR_SPAWN` (= 100 u) prefix guarantees any
