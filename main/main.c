@@ -20,16 +20,23 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "audio_mixer.h"
+#include "audio_settings.h"
 #include "game.h"
 #include "hal/lcd_types.h"
 #include "icons.h"
 #include "input.h"
 #include "magicnumbers.h"
+#include "music/music_procedural.h"
 #include "nvs_flash.h"
 #include "pax_gfx.h"
 #include "render.h"
 #include "rendertext.h"
 #include "save.h"
+#include "sfx/sfx_crash.h"
+#include "sfx/sfx_engine_hum.h"
+#include "sfx/sfx_pickup_ding.h"
+#include "sfx/sfx_scrape.h"
 #include "synthwave.h"
 #include "world.h"
 
@@ -134,10 +141,11 @@ static size_t                       mountain_size        = 0;
 
 typedef enum {
     APP_STATE_SLOT_SELECT = 0,  // first state on boot: pick save slot 0..2
-    APP_STATE_MENU,             // main menu: Daily/Seeded/Upgrade/Stats/Exit
+    APP_STATE_MENU,             // main menu: Daily/Seeded/Upgrade/Stats/Audio/Exit
     APP_STATE_SEED_INPUT,       // numeric entry for the custom seed
     APP_STATE_STATS_VIEW,       // text dump of the active slot's stats
     APP_STATE_UPGRADE_STUB,     // placeholder "coming soon" screen
+    APP_STATE_AUDIO_SETTINGS,   // two-checkbox panel: music / SFX on-off
     APP_STATE_PLAYING,
     APP_STATE_PAUSED,           // F4 pause overlay: Resume / Abort run
     APP_STATE_GAME_OVER,
@@ -156,9 +164,18 @@ enum {
     MENU_ENTRY_SEEDED,
     MENU_ENTRY_UPGRADE,
     MENU_ENTRY_STATS,
+    MENU_ENTRY_AUDIO,
     MENU_ENTRY_EXIT,
     MENU_ENTRY_COUNT,
 };
+
+// Audio-settings cursor entries (STATE_AUDIO_SETTINGS).
+enum {
+    AUDIO_ENTRY_MUSIC = 0,
+    AUDIO_ENTRY_SFX,
+    AUDIO_ENTRY_COUNT,
+};
+static int s_audio_cursor = AUDIO_ENTRY_MUSIC;
 
 // Persistence state owned by main. The active slot is sticky for the
 // app lifetime; we load on slot select and write after every run.
@@ -646,6 +663,7 @@ static void draw_main_menu(void) {
         [MENU_ENTRY_SEEDED]  = "Seeded Run",
         [MENU_ENTRY_UPGRADE] = "Upgrade Ship",
         [MENU_ENTRY_STATS]   = "Stats",
+        [MENU_ENTRY_AUDIO]   = "Audio",
         [MENU_ENTRY_EXIT]    = "Exit",
     };
 
@@ -664,6 +682,41 @@ static void draw_main_menu(void) {
 
     draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u,
                   "up / down to choose, enter to confirm");
+}
+
+// Audio-settings screen — two checkboxes, toggled with enter / space.
+static void draw_audio_settings(void) {
+    draw_menu_panel_size(0.60f, 0.70f);
+    float const fbh = pax_buf_get_heightf(fb);
+    float const fbw = pax_buf_get_widthf(fb);
+    draw_centered(fbh * 0.20f, 36.0f, 0xFFFFFF6Bu, "Audio");
+
+    char const* const labels[AUDIO_ENTRY_COUNT] = {
+        [AUDIO_ENTRY_MUSIC] = "Music",
+        [AUDIO_ENTRY_SFX]   = "Sound effects",
+    };
+    bool const states[AUDIO_ENTRY_COUNT] = {
+        [AUDIO_ENTRY_MUSIC] = audio_settings_music_on(),
+        [AUDIO_ENTRY_SFX]   = audio_settings_sfx_on(),
+    };
+
+    float const row_h = 44.0f;
+    float const top   = fbh * 0.40f;
+    for (int i = 0; i < AUDIO_ENTRY_COUNT; i++) {
+        bool const sel = (i == s_audio_cursor);
+        char line[64];
+        snprintf(line, sizeof(line), "%s %s [%s]",
+                 sel ? ">" : " ",
+                 labels[i],
+                 states[i] ? "X" : " ");
+        pax_col_t col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
+        pax_vec2f sz  = rendertext_size(NULL, 28.0f, line);
+        rendertext_draw(fb, col, NULL, 28.0f,
+                        (fbw - sz.x) * 0.5f, top + (float)i * row_h, line);
+    }
+
+    draw_centered(fbh * 0.85f, 14.0f, 0xFFA0A0A8u,
+                  "up / down to choose, enter to toggle, esc to leave");
 }
 
 // Seed-input screen — numeric entry, prefilled from last_custom_seed.
@@ -878,6 +931,25 @@ static void start_run(game_state_t* game, world_state_t* world, uint32_t seed, b
     if (is_custom) {
         s_save.meta.last_custom_seed = (int64_t)seed;
     }
+
+    // Install fresh procedural music seeded from the run seed. The
+    // mixer takes ownership; on stop / new run it'll call our
+    // shutdown callback which frees the struct. Start the engine
+    // hum as a persistent SFX voice.
+    music_source_t* music = music_procedural_create(seed);
+    audio_mixer_set_music(music);
+    sfx_engine_hum_start();
+}
+
+// Tear down per-run audio (music + persistent SFX). Idle-drain in
+// the mixer mutes the speaker amplifier within ~50 ms.
+static void end_run_audio(void) {
+    audio_mixer_set_music(NULL);
+    sfx_engine_hum_stop();
+    sfx_scrape_stop();
+    // Any one-shot SFX in flight (a still-decaying crash sound on
+    // the same frame the run ends) are allowed to play to their
+    // natural end — they'll finish well inside the drain window.
 }
 
 // Classify the end-of-run cause and commit the run summary to the
@@ -982,6 +1054,14 @@ void app_main(void) {
     icons_load();
     input_init();
     input_set_mode(INPUT_MODE_TITLE);
+
+    // Load music/SFX enable flags and bring the mixer + I2S up.
+    // Idempotent — safe even if a later call repeats it.
+    audio_settings_load();
+    res = audio_mixer_init();
+    if (res != ESP_OK) {
+        ESP_LOGW(TAG, "audio_mixer_init failed: %d — audio will be silent", res);
+    }
 
     // Layer caches: tight bounding boxes for the sun bands and the
     // visible mountain band. Both live in PSRAM, both are aligned to
@@ -1150,6 +1230,7 @@ void app_main(void) {
             // proper "abort a run" path is the F4 pause menu's
             // Abort entry, which commits a QUIT run before returning
             // to the main menu.
+            audio_mixer_shutdown();
             bsp_device_restart_to_launcher();
         }
 
@@ -1215,6 +1296,43 @@ void app_main(void) {
             // Used by save_commit_run_end so the duration_s stat
             // doesn't count F4 pauses as gameplay time.
             s_run_play_seconds += (double)dt;
+
+            // ---- Per-frame audio driving ----
+            // Engine-hum pitch follows ship speed normalised against
+            // the standard base speed; boosts push it past 1.0,
+            // shadows pull it back.
+            float const base_speed = (game.ship_base_speed_z > 0.1f) ? game.ship_base_speed_z : 1.0f;
+            float       speed_norm = game.ship_speed_z / base_speed;
+            // Map [0.0, 1.5] to [0.0, 1.0] so even cruise sits in
+            // the middle of the pitch range and boosts run hot.
+            speed_norm *= (1.0f / 1.5f);
+            if (speed_norm < 0.0f) speed_norm = 0.0f;
+            if (speed_norm > 1.0f) speed_norm = 1.0f;
+            sfx_engine_hum_set_pitch(speed_norm);
+
+            // Scrape is persistent — start/stop on edge transitions
+            // so we don't pile up registrations.
+            static bool s_scrape_was_on = false;
+            bool const  scrape_now      = (game.scrape_left || game.scrape_right);
+            if (scrape_now && !s_scrape_was_on) {
+                sfx_scrape_start();
+            }
+            if (scrape_now) {
+                // Intensity rises with speed — bigger slams sound
+                // meatier than a brushing graze.
+                float const intensity = 0.4f + 0.6f * speed_norm;
+                sfx_scrape_set_intensity(intensity > 1.0f ? 1.0f : intensity);
+            }
+            if (!scrape_now && s_scrape_was_on) {
+                sfx_scrape_stop();
+            }
+            s_scrape_was_on = scrape_now;
+
+            // Booster ding — edge flag cleared in game_collide each
+            // frame, so this fires exactly once per pickup.
+            if (game.just_picked_up_booster) {
+                sfx_pickup_ding_play();
+            }
         }
         int64_t const t_after_phys = esp_timer_get_time();
 
@@ -1390,7 +1508,12 @@ void app_main(void) {
                         case MENU_ENTRY_STATS:
                             app_state = APP_STATE_STATS_VIEW;
                             break;
+                        case MENU_ENTRY_AUDIO:
+                            s_audio_cursor = AUDIO_ENTRY_MUSIC;
+                            app_state = APP_STATE_AUDIO_SETTINGS;
+                            break;
                         case MENU_ENTRY_EXIT:
+                            audio_mixer_shutdown();
                             bsp_device_restart_to_launcher();
                             break;
                     }
@@ -1419,6 +1542,28 @@ void app_main(void) {
                     start_run(&game, &world, seed, /*is_custom=*/true);
                     run_end_committed = false;
                     app_state = APP_STATE_PLAYING;
+                }
+                break;
+            }
+
+            case APP_STATE_AUDIO_SETTINGS: {
+                t_after_obs = esp_timer_get_time();
+                draw_audio_settings();
+                draw_exit_hint();
+                if (menu_nav != 0) {
+                    s_audio_cursor -= menu_nav;
+                    if (s_audio_cursor < 0)                   s_audio_cursor = 0;
+                    if (s_audio_cursor >= AUDIO_ENTRY_COUNT)  s_audio_cursor = AUDIO_ENTRY_COUNT - 1;
+                }
+                if (pickup_pressed) {
+                    if (s_audio_cursor == AUDIO_ENTRY_MUSIC) {
+                        audio_settings_set_music_on(!audio_settings_music_on());
+                    } else {
+                        audio_settings_set_sfx_on(!audio_settings_sfx_on());
+                    }
+                }
+                if (menu_esc) {
+                    app_state = APP_STATE_MENU;
                 }
                 break;
             }
@@ -1474,6 +1619,12 @@ void app_main(void) {
                         commit_run_end(&game, &world, head_on);
                         run_end_committed = true;
                     }
+                    // The death sound only plays on the actual
+                    // PLAYING → GAME_OVER edge — guarded by
+                    // run_end_committed (set above) so retriggering
+                    // the same head_on flag next frame does nothing.
+                    sfx_crash_play();
+                    end_run_audio();
                     // Cheap, non-cryptographic per-run flavour roll:
                     // microseconds-since-boot mod count varies enough
                     // for cosmetic text selection.
@@ -1528,6 +1679,7 @@ void app_main(void) {
                                                 &game, peak_stage, run_seconds);
                             run_end_committed = true;
                         }
+                        end_run_audio();
                         app_state = APP_STATE_MENU;
                         input_set_mode(INPUT_MODE_TITLE);
                     }

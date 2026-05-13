@@ -101,6 +101,12 @@ typedef struct game_state_s {
     boost_phase_t boost_phase;
     float         boost_phase_time;
     float         boost_ramp_start_speed;
+
+    // Edge-trigger flag for audio: set true inside `game_collide`
+    // on the same frame a booster is consumed; main.c reads + clears
+    // it once per frame to fire `sfx_pickup_ding_play()`. Lives on
+    // game_state so the audio side stays out of game logic.
+    bool  just_picked_up_booster;
 } game_state_t;
 
 // Reset the run (zeroes the spark pool too).

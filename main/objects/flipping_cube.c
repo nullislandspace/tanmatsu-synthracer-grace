@@ -7,6 +7,7 @@
 #include "direct_565.h"
 #include "magicnumbers.h"
 #include "render.h"   // render_project, RENDER_NEAR_CLIP_Z, RENDER_CAM_Y
+#include "sfx/sfx_cube_bump.h"
 #include "world.h"
 
 // Body palette — a dark blue cube with brighter blue highlights on
@@ -26,7 +27,8 @@
 // did this frame.
 typedef struct {
     int8_t  direction;     // -1 left-roll, +1 right-roll
-    uint8_t pad[3];
+    uint8_t pad[2];
+    bool    landed_fired;  // true after the one-shot landing SFX has played
     float   progress;      // 0 = upright, 1 = fully rolled onto side
     float   x_initial;     // original upright-cube center x (pivot
                            // x = x_initial + direction * HALF_W)
@@ -86,6 +88,13 @@ static void flipping_physics(obstacle_t* o, world_state_t* w, float dt, float ca
             / (FLIPPING_CUBE_ROLL_START_Z - FLIPPING_CUBE_ROLL_END_Z);
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
+    // Edge-trigger: fire the deep bump exactly once, on the frame
+    // the cube hits its final orientation. Subsequent frames clamp
+    // to 1.0 but stay quiet.
+    if (t >= 1.0f && !s->landed_fired) {
+        s->landed_fired = true;
+        sfx_cube_bump_play();
+    }
     s->progress = t;
 
     // Compute current AABB of the rotated cross-section. The pivot
@@ -238,9 +247,10 @@ obstacle_t* flipping_cube_spawn(world_state_t* w, float x, float z, int directio
                                          FLIP_TOP_COLOR,   outline_color);
     if (!o) return NULL;
     flipping_state_t* s = (flipping_state_t*)o->scratch;
-    s->direction = (direction < 0) ? -1 : +1;
-    s->progress  = 0.0f;
-    s->x_initial = x;
+    s->direction    = (direction < 0) ? -1 : +1;
+    s->progress     = 0.0f;
+    s->x_initial    = x;
+    s->landed_fired = false;
     o->physics   = flipping_physics;
     o->draw      = flipping_draw;
     // collide left at NULL → default OBSTACLE_KIND_CUBE dispatch:

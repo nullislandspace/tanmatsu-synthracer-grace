@@ -193,6 +193,7 @@ void game_step(game_state_t* g, float dt, int steer) {
 bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     g->scrape_left  = false;
     g->scrape_right = false;
+    g->just_picked_up_booster = false;
     bool head_on    = false;
 
     float const ship_zN = SHIP_COLLISION_Z_C - SHIP_COLLISION_HALF_D;
@@ -279,6 +280,7 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
                     g->boost_phase_time       = GAME_BOOST_RAMP_UP_SECONDS;
                     g->boost_ramp_start_speed = g->ship_speed_z;
                     g->pickups_speed_boost   += 1;
+                    g->just_picked_up_booster = true;
                     hit                       = OBSTACLE_HIT_IGNORE;
                     break;
                 case OBSTACLE_KIND_PICKUP_TRI:

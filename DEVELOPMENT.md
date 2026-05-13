@@ -1828,6 +1828,178 @@
   `AREA_TYPE_DYNAMIC_PASSAGE` to `AREA_TYPE_DYNAMIC_GATEWAY` so
   the new area is the default smoke-test path.
 
+- 2026-05-13 — **Audio subsystem design locked in.** Phase 7 work
+  starts. Top-level architecture is a software mixer with a
+  swappable music-source interface so the procedural synthwave
+  generator we ship first can be replaced (or A/B'd) with a
+  modplayer, MP3 player, or MIDI source later without touching
+  the mixer or game code.
+
+  **Pipeline format (locked):** 22050 Hz, signed-16-bit, stereo
+  L/R interleaved, throughout. Mixer chunk = 256 stereo frames
+  (~11.6 ms). One sample rate for *everything* (music + every
+  SFX + I2S output) so there's no resampling on the audio path.
+  22050 was picked over 44100 because the procedural synth has
+  several voices doing per-sample work and the CPU budget is
+  shared with the existing 28-FPS render pipeline; 22050 halves
+  the audio CPU bill and is plenty for game audio. The launcher
+  mixer (which we adapted) runs 44100; we deliberately diverge.
+
+  **Mixer (`main/audio_mixer.{c,h}`).** Adapted from
+  `tanmatsu-launcher/main/audio_mixer.c`. Owns the I2S channel
+  exclusively. Single mixer task pinned to core 1 at
+  `configMAX_PRIORITIES - 1` (real-time audio priority). Slots
+  are typed:
+    - **One music slot** holding a `music_source_t*` (or NULL).
+      Mixer renders music into a scratch buffer and scales by
+      MUSIC_GAIN (≈ 30% of full-scale) before summing — gives
+      SFX clear headroom. NULL = silent music slot.
+    - **N SFX voice slots** (initial N=8) holding `sfx_voice_t*`.
+      Each voice's `render(self, out, frames)` writes into a
+      per-voice scratch buffer; mixer sums at unity gain; voice
+      sets `self->finished = true` when done and the mixer
+      reaps it. One-shots and persistent voices share the same
+      mechanism — persistent voices simply never set `finished`
+      until their owner stops them.
+    - Master gate from `audio_settings`: if `music_on==0` the
+      mixer skips the music render call entirely (saves CPU);
+      `sfx_on==0` skips the SFX pass.
+  Power management mirrors the launcher mixer: after every slot
+  has been silent long enough to drain the I2S DMA queue
+  (`MIXER_DRAIN_CHUNKS` ≈ 46 ms of silence pushed), the task
+  mutes the amplifier and disables the I2S channel, then blocks
+  on `ulTaskNotifyTake` until a producer wakes it. Two
+  *explicit* shutdown paths exist for the cases the user
+  called out (game-over and Esc-to-launcher): clearing the
+  music slot + stopping all SFX lets the idle-drain path fire
+  within ~50 ms (no "few seconds of noise"); for app exit we
+  also call `audio_mixer_shutdown()` which mutes + disables
+  synchronously before `bsp_device_restart_to_launcher()`.
+
+  **Music source interface (`main/audio_source.h`).** Trait-style
+  function table so the mixer is backend-agnostic:
+  ```c
+  typedef struct music_source_s {
+      void (*render)(struct music_source_s* self,
+                     int16_t* stereo_out, size_t frames);
+      void (*on_seed)(struct music_source_s* self, uint32_t seed);
+      void (*shutdown)(struct music_source_s* self);
+      // backend-specific state follows in the embedding struct
+  } music_source_t;
+  ```
+  Each backend (procedural now; future modplayer / MP3 / MIDI)
+  exposes a constructor returning `music_source_t*`. Caller
+  installs via `audio_mixer_set_music(source)`; mixer doesn't
+  care what's behind the pointer. Files for future backends
+  will live in `main/modplayer/`, `main/mp3player/`, etc. — one
+  directory per backend, mirroring the existing structure.
+
+  **Procedural synthwave generator (`main/music/music_procedural.{c,h}` +
+  helpers).** Initial music source. Composition is rule-based:
+    - **Section length** ≈ 16 bars. At the start of each section
+      the composer may pick a new chord progression, swap drum
+      pattern, drop or re-add a layer (bass/arp/pad/drums),
+      vary the lead style.
+    - **Chord-progression bank**: ~12 canonical synthwave
+      progressions (i–VII–VI–VII, vi–IV–I–V, i–v–VI–IV, etc.).
+    - **Layers**: bass (saw + lowpass, pulsing 8ths on root),
+      arp (square + envelope, walking chord tones), pad
+      (detuned saws + slow filter sweep), drums (synthesised
+      kick/snare/hi-hat).
+    - **Seed-derived determinism**: a **second PRNG** is split
+      off at `world_init` from the same level seed:
+      `stage_prng = hash(seed, "world")`,
+      `music_prng = hash(seed, "music")`. The two never share
+      state, so playing the same daily seed with music on vs.
+      music off produces identical obstacles. Same custom seed
+      ⇒ same music + same world; different seed ⇒ different
+      musical personality.
+    - **Tempo** ~110 BPM (synthwave canonical). Section/bar/beat
+      counters are sample-accurate so the composer can sync
+      drum hits and chord changes precisely.
+
+  **Sound effects (`main/sfx/sfx_*.{c,h}` — one .c/.h per effect).**
+  Procedurally generated; no PCM data on disk. Five for the
+  current feature set:
+    - **`sfx_engine_hum`** — persistent. Pitch follows
+      `ship_speed_z` (continuous, not stepped — caller pokes a
+      `set_pitch(float)` API each frame; the voice reads it at
+      the start of each mixer chunk so it stays sample-accurate
+      but doesn't fight zero-cross artifacts). Sawtooth + lowpass,
+      maybe two detuned saws for thickness.
+    - **`sfx_pickup_ding`** — one-shot. Two short
+      sine-tone-with-fast-decay-envelope hits a major-third
+      apart (like an electric doorbell). ~250 ms total.
+    - **`sfx_crash`** — one-shot. Filtered noise burst with a
+      pitched low-sine "thud" layered in, fast attack, ~500 ms
+      decay.
+    - **`sfx_scrape`** — persistent. Bandpass-filtered noise +
+      slow LFO on the filter cutoff to get the metallic
+      shimmer. Caller controls start/stop and an
+      `intensity` parameter (depth of contact).
+    - **`sfx_cube_bump`** — one-shot. Deep sine + filtered
+      noise for the "thump", maybe ~80 Hz, with a fast pitch
+      drop for the impact feel. ~300 ms.
+  Each SFX has its own typed API (`sfx_engine_hum_start()`,
+  `sfx_engine_hum_set_pitch()`, `sfx_engine_hum_stop()`;
+  `sfx_pickup_ding_play()`; …). Internally each returns or
+  registers an `sfx_voice_t` with the mixer.
+
+  **Shared DSP primitives (`main/audio_dsp.{c,h}`).** Both the
+  procedural music voices and the SFX generators sit on top of
+  the same primitive layer:
+    - Sine oscillator via a single 1024-entry int16 lookup
+      table; saw / square / triangle as cheap arithmetic on a
+      phase accumulator; white-noise generator (xorshift on
+      uint32, scaled).
+    - ADSR envelope (single-precision, lerped between sample
+      blocks for cheap evaluation).
+    - Biquad filter (lowpass / highpass / bandpass) using the
+      standard RBJ cookbook coefficients.
+    - Soft-clip / tanh-shape for the final sum to avoid
+      clicks when SFX pile up.
+  These are *not* shared with the existing render pipeline —
+  the audio task owns its own scratch state. Sample lookup
+  tables are PSRAM-allocated once at boot.
+
+  **Settings (`main/audio_settings.{c,h}`).** Two u8 NVS keys
+  in the existing `synthracer` namespace (no new namespace):
+    - `audio_music_on` — default 1.
+    - `audio_sfx_on` — default 1.
+  Loaded at boot, checkable via `audio_settings_music_on()` /
+  `_sfx_on()` (live, no per-frame NVS read). Toggled via a new
+  "Audio" menu entry on the main menu — checkbox panel, F4 / B
+  to leave. Changes apply live and persist immediately.
+
+  **State-machine integration (`main/main.c`).**
+    - Boot: `audio_settings_load()` → `audio_mixer_init(22050)`.
+    - On `start_run()`: build `music_procedural_create(seed)`,
+      install via `audio_mixer_set_music()`. Start
+      `sfx_engine_hum`. Pause-screen keeps both running (music
+      *and* hum) — pause is "still in the run".
+    - On `STATE_GAME_OVER` entry: `audio_mixer_set_music(NULL)`,
+      stop engine hum and any persistent scrape. Idle drain
+      mutes the amp within ~50 ms.
+    - On F1-to-launcher (or any explicit app exit):
+      `audio_mixer_shutdown()` *before*
+      `bsp_device_restart_to_launcher()` to silence the
+      speaker synchronously.
+    - SFX trigger sites: booster pickup callback →
+      `sfx_pickup_ding_play()`; collision → `sfx_crash_play()`
+      then game over; wall-graze / cube-side-touch →
+      `sfx_scrape_start()` while contact persists, `_stop()`
+      when contact ends; flipping cube `landing` event →
+      `sfx_cube_bump_play()`.
+
+  **What this does *not* commit to yet.** Volume-key handling
+  and audio-jack hot-swap (originally planned in this section
+  as part of the audio module) still match the launcher
+  pattern — that's an integration job that lands separately,
+  not a design choice that needed to be made today. System
+  volume continues to live in the `"system"` NVS namespace
+  (launcher-shared), independent of the new `audio_music_on` /
+  `audio_sfx_on` toggles.
+
 ---
 
 ## Future FPS improvements
@@ -2465,29 +2637,52 @@ user starts a seeded run; the seed-input screen prefills its
 buffer from this field. Phase 11 will add the per-seed best
 ring; today only the most-recent value is persisted.
 
-### `audio.c` — SFX + system volume
+### Audio subsystem — mixer + procedural music + procedural SFX
 
-- I2S mixer task pinned to core 1 (mirroring floppybird, lines 139–194).
-- Sample slots: 4 simultaneous voices, mono → stereo expansion.
-- Embedded SFX in `sfx.h` (generated by `xxd -i` from PCM raw 16-bit
-  16 kHz mono): `sfx_pickup_tri`, `sfx_pickup_special`, `sfx_crash`,
-  `sfx_boost`, `sfx_jump`, `sfx_shield`, `sfx_levelup`, `sfx_sunset`.
-  Total ~80 KB embedded.
-- System-volume handling, **mirroring `tanmatsu-launcher/main/global_event_handler.c`**:
-  - On boot: read audio-jack state via
-    `bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, …)`. Open
-    NVS namespace `"system"`, read `"speaker.volume"` or `"hp.volume"`
-    (default 50). Call `bsp_audio_set_amplifier(!hp_inserted)` and
-    `bsp_audio_set_volume(percent)`.
-  - On VOLUME_UP / VOLUME_DOWN navigation key (state=pressed): step ±5,
-    clamp 0..100, write back to the appropriate `"system"` NVS key, call
-    `bsp_audio_set_volume(percent)`. Optionally flash a small overlay
-    bar in `render.c` for a second.
-  - On `BSP_INPUT_ACTION_TYPE_AUDIO_JACK` action: update jack state,
-    re-read NVS for the new output, re-apply both volume and amplifier.
-  - **Important**: this writes to the launcher-shared `"system"`
-    namespace, so the volume change persists across apps — exactly what
-    the user wants.
+Replaces the original single-`audio.c` plan with a layered design.
+See the **2026-05-13 audio subsystem** decisions-log entry above
+for the full rationale; the bullet list below is the short
+reference.
+
+- **`main/audio_mixer.{c,h}`** — owns I2S, runs the mixer task,
+  enforces the 22050 Hz / s16 / stereo pipeline format. One
+  music slot (gain ≈ 30%), N=8 SFX voice slots, idle-drain
+  power-down (mute amp + disable I2S after ~46 ms silence),
+  explicit `audio_mixer_shutdown()` for app exit.
+- **`main/audio_source.h`** — `music_source_t` trait struct
+  (render / on_seed / shutdown). Mixer is backend-agnostic so
+  procedural now / modplayer or MP3 / MIDI later all plug in
+  without touching the mixer.
+- **`main/audio_dsp.{c,h}`** — shared primitives used by both
+  music and SFX: oscillators (sine via lookup, saw, square,
+  triangle, noise), ADSR, biquad filters, soft-clip.
+- **`main/music/music_procedural.{c,h}`** — initial music source.
+  Algorithmic synthwave: chord-progression bank, bass / arp /
+  pad / drum layers, structural mutation every ~16 bars,
+  seeded by a *separate* `music_prng` split from the run seed
+  (so music vs. world generation never perturb each other).
+- **`main/sfx/sfx_*.{c,h}`** — five effects, one `.c/.h` per
+  effect: `sfx_engine_hum` (persistent, set_pitch(ship_speed_z)),
+  `sfx_pickup_ding` (one-shot), `sfx_crash` (one-shot),
+  `sfx_scrape` (persistent + intensity), `sfx_cube_bump`
+  (one-shot). Procedurally generated — no PCM data on disk.
+  Each exposes its own typed API; internally each registers
+  one `sfx_voice_t` with the mixer.
+- **`main/audio_settings.{c,h}`** — two u8 NVS flags
+  (`audio_music_on`, `audio_sfx_on`, default 1) in the
+  existing `synthracer` namespace. Master gates inside the
+  mixer skip music / SFX render passes entirely when disabled.
+- **Music life cycle** — installed on `start_run()`, present
+  through `STATE_PAUSED` (pause is "still in the run"),
+  cleared on `STATE_GAME_OVER` entry. Idle-drain handles the
+  speaker mute within ~50 ms.
+- **System volume** continues to mirror
+  `tanmatsu-launcher/main/global_event_handler.c`: VOLUME_UP /
+  VOLUME_DOWN keys read/write the `"system"` NVS namespace's
+  `speaker.volume` / `hp.volume` u8s, audio-jack-insert
+  re-applies the amplifier + volume for the new output. This
+  is *separate* from the per-app `audio_music_on` /
+  `audio_sfx_on` toggles in `audio_settings`.
 
 ### `input.c` — event drain + polled steering
 

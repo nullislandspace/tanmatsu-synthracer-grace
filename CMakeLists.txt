@@ -34,6 +34,15 @@ set(APP_SOURCES
     main/nbt.c
     main/save.c
     main/save_nbt.c
+    main/audio_dsp.c
+    main/audio_mixer.c
+    main/audio_settings.c
+    main/music/music_procedural.c
+    main/sfx/sfx_engine_hum.c
+    main/sfx/sfx_pickup_ding.c
+    main/sfx/sfx_crash.c
+    main/sfx/sfx_scrape.c
+    main/sfx/sfx_cube_bump.c
 )
 
 # Include directories — add paths to your headers here
