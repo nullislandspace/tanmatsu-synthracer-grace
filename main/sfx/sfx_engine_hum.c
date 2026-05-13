@@ -2,6 +2,7 @@
 
 #include "audio_dsp.h"
 #include "audio_mixer.h"
+#include "audio_settings.h"
 #include "audio_source.h"
 
 #include <stdatomic.h>
@@ -14,9 +15,13 @@
 #define HUM_F_MAX  220.0f
 #define HUM_DETUNE_HZ 0.6f
 
-// Master amplitude relative to int16 full-scale. Engine hum sits
-// underneath the rest of the soundscape; ~10% is plenty.
-#define HUM_AMP 0.10f
+// Per-voice amplitude. The hum is routed through the SFX master
+// gain (AUDIO_SFX_GAIN ≈ 0.35) along with all one-shot SFX, so
+// the effective peak in the mixer accumulator is HUM_AMP ×
+// AUDIO_SFX_GAIN. We want effective ≈ 0.04 (the level that
+// played nicely under the music in earlier testing), which means
+// nominal ≈ 0.04 / 0.35 ≈ 0.11.
+#define HUM_AMP 0.11f
 
 // Lowpass cutoff, also scaled with speed so the hum opens up
 // when accelerating.
@@ -43,6 +48,17 @@ static float lerpf(float a, float b, float t) {
 
 static void hum_render(sfx_voice_t* self, int16_t* out, size_t frames) {
     hum_state_t* st = (hum_state_t*)self;
+
+    // Live mute: the menu can toggle the hum off independently of
+    // other SFX. We still keep the voice registered so toggling
+    // back on doesn't have to re-allocate / re-register — we just
+    // emit zeros. Mixer sees zero contribution and treats the slot
+    // as inactive on the running source count.
+    if (!audio_settings_hum_on()) {
+        // out is pre-zeroed by the mixer; nothing to do but skip
+        // the per-sample work.
+        return;
+    }
 
     float speed = atomic_load(&st->speed_norm);
     if (speed < 0.0f) speed = 0.0f;

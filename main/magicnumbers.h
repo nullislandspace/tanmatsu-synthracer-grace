@@ -225,3 +225,35 @@
 // these.
 #define GAME_STAGE_LENGTH_Z  (GAME_STAGE_SECONDS * GAMEPLAY_CRUISE_SPEED)
 #define GAME_REST_LENGTH_Z   (GAME_REST_SECONDS  * GAMEPLAY_CRUISE_SPEED)
+
+
+// =============================================================
+// Audio gain staging — applied by the mixer (audio_mixer.c).
+// =============================================================
+//
+// Linear-amplitude master gains for the two contributing groups
+// (music stream + one-shot SFX voices). The engine hum is itself
+// a voice, so it goes through the SFX gain. The mixer applies
+// these *after* each source has rendered its samples and *before*
+// summing into the accumulator — so individual SFX `*_AMP`
+// constants stay tuned to their own dynamics (relative loudness
+// between a ding and a crash), and the master gains here set the
+// overall balance against music + the int16 clip ceiling.
+//
+// Headroom budget: the mixer hard-clips at ±1.0 (int16 ±32767),
+// and we want to stay clean with up to **5 concurrent SFX +
+// music + engine hum** firing on the same frame. Random-phase
+// summing scales peak by √N, so 5 random-phase voices at
+// effective peak A sit around A·√5 ≈ 2.24·A; worst-case in-phase
+// is 5·A. With AUDIO_SFX_GAIN = 0.35 and per-voice nominal amps
+// in the 0.4–0.6 range, effective per-voice peaks are 0.14–0.21,
+// 5-voice RMS ≈ 0.31–0.47, leaving ~0.5 for the music + hum bed
+// (music at ~0.30, hum well under 0.05).
+//
+// Perceived loudness is logarithmic, not linear: each 0.5×
+// amplitude step is -6 dB, "twice as loud" is closer to ×3.16
+// (+10 dB). So bigger numeric steps here translate to subtler
+// perceived changes than instinct suggests. Tune by ear, then
+// verify headroom math on paper rather than the other way around.
+#define AUDIO_MUSIC_GAIN  0.30f
+#define AUDIO_SFX_GAIN    0.35f

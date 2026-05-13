@@ -20,8 +20,13 @@ static char const TAG[] = "sfx_crash";
 #define CRASH_NOISE_HPF_HZ  150.0f
 #define CRASH_SINE_F0_HZ   120.0f
 #define CRASH_SINE_F1_HZ    40.0f
-#define CRASH_AMP_NOISE     0.55f
-#define CRASH_AMP_SINE      0.45f
+// Per-voice nominal amplitudes. Crash is the loudest one-shot
+// by design (it's a kill cue) — set roughly equal here so the
+// noise crunch and the low-end thud carry equal weight, then the
+// SFX master gain (AUDIO_SFX_GAIN) scales the whole voice down
+// at mix-down.
+#define CRASH_AMP_NOISE     0.45f
+#define CRASH_AMP_SINE      0.40f
 
 #define CRASH_ATTACK_S   0.005f
 #define CRASH_DECAY_S    0.50f

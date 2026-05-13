@@ -4,6 +4,11 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "hw_settings.h"
+
+// Volume keys step in 5% increments — matches the launcher and the
+// volume_howto.md guidance.
+#define INPUT_VOLUME_STEP_PERCENT 5
 
 static char const TAG[] = "input";
 
@@ -52,7 +57,23 @@ bool input_drain_events(void) {
                     } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
                         s_speed_delta -= 1;
                         s_menu_nav     = -1;
+                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_VOLUME_UP) {
+                        // Master volume — read/write goes straight to
+                        // the launcher-shared NVS via hw_settings.
+                        // No latch + main-loop poll because volume is
+                        // system housekeeping, not gameplay input.
+                        hw_settings_step_volume(+INPUT_VOLUME_STEP_PERCENT);
+                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN) {
+                        hw_settings_step_volume(-INPUT_VOLUME_STEP_PERCENT);
                     }
+                }
+                break;
+            case INPUT_EVENT_TYPE_ACTION:
+                if (event.args_action.type == BSP_INPUT_ACTION_TYPE_AUDIO_JACK) {
+                    // event.args_action.state == true → jack inserted
+                    // → switch the codec to the headphone volume and
+                    // mute the speaker amp.
+                    hw_settings_on_jack_event(event.args_action.state);
                 }
                 break;
             case INPUT_EVENT_TYPE_SCANCODE:

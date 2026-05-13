@@ -24,6 +24,7 @@
 #include "audio_settings.h"
 #include "game.h"
 #include "hal/lcd_types.h"
+#include "hw_settings.h"
 #include "icons.h"
 #include "input.h"
 #include "magicnumbers.h"
@@ -173,6 +174,7 @@ enum {
 enum {
     AUDIO_ENTRY_MUSIC = 0,
     AUDIO_ENTRY_SFX,
+    AUDIO_ENTRY_HUM,
     AUDIO_ENTRY_COUNT,
 };
 static int s_audio_cursor = AUDIO_ENTRY_MUSIC;
@@ -694,10 +696,12 @@ static void draw_audio_settings(void) {
     char const* const labels[AUDIO_ENTRY_COUNT] = {
         [AUDIO_ENTRY_MUSIC] = "Music",
         [AUDIO_ENTRY_SFX]   = "Sound effects",
+        [AUDIO_ENTRY_HUM]   = "Engine hum",
     };
     bool const states[AUDIO_ENTRY_COUNT] = {
         [AUDIO_ENTRY_MUSIC] = audio_settings_music_on(),
         [AUDIO_ENTRY_SFX]   = audio_settings_sfx_on(),
+        [AUDIO_ENTRY_HUM]   = audio_settings_hum_on(),
     };
 
     float const row_h = 44.0f;
@@ -935,11 +939,31 @@ static void start_run(game_state_t* game, world_state_t* world, uint32_t seed, b
     // Install fresh procedural music seeded from the run seed. The
     // mixer takes ownership; on stop / new run it'll call our
     // shutdown callback which frees the struct. Start the engine
-    // hum as a persistent SFX voice.
+    // hum as a persistent SFX voice — but only if the player
+    // hasn't muted it via the Audio settings menu. The hum render
+    // function also defensively returns silence if the flag is off,
+    // but checking here avoids registering the voice at all and
+    // keeps the mixer fully idle when both music and the other
+    // SFX are quiet.
+    ESP_LOGI(TAG, "start_run: seed=%u is_custom=%d — bringing up audio",
+             (unsigned)seed, (int)is_custom);
     music_source_t* music = music_procedural_create(seed);
+    if (music == NULL) {
+        ESP_LOGW(TAG, "music_procedural_create returned NULL — no music this run");
+    }
     audio_mixer_set_music(music);
-    sfx_engine_hum_start();
+    if (audio_settings_hum_on()) {
+        if (!sfx_engine_hum_start()) {
+            ESP_LOGW(TAG, "sfx_engine_hum_start failed");
+        }
+    }
 }
+
+// Edge tracker for the scrape SFX, file-scope so the pause-menu
+// and end-of-run transitions can reset it after silencing the
+// scrape voice. Without that, scrape held over the boundary
+// would skip its restart edge on resume.
+static bool s_scrape_was_on = false;
 
 // Tear down per-run audio (music + persistent SFX). Idle-drain in
 // the mixer mutes the speaker amplifier within ~50 ms.
@@ -947,13 +971,49 @@ static void end_run_audio(void) {
     audio_mixer_set_music(NULL);
     sfx_engine_hum_stop();
     sfx_scrape_stop();
+    s_scrape_was_on = false;
     // Any one-shot SFX in flight (a still-decaying crash sound on
     // the same frame the run ends) are allowed to play to their
     // natural end — they'll finish well inside the drain window.
 }
 
+// PLAYING → PAUSED. Music keeps playing (pause is "still in the
+// run" per the audio design), but every SFX voice is silenced so
+// the frozen scene also sounds frozen — no engine hum droning,
+// no scrape ringing, no in-flight one-shot tails. The per-effect
+// stop calls clear the singleton "is running" flags inside
+// sfx_engine_hum / sfx_scrape so resume can cleanly restart them;
+// audio_mixer_stop_all_voices() catches the one-shot voices that
+// don't have a typed stop API (ding, crash, cube_bump).
+static void pause_audio_for_pause_menu(void) {
+    sfx_engine_hum_stop();
+    sfx_scrape_stop();
+    audio_mixer_stop_all_voices();
+    s_scrape_was_on = false;
+}
+
+// PAUSED → PLAYING. Restart the persistent hum if the player has
+// it enabled (the audio settings menu isn't reachable from PAUSED
+// today, but reading the flag here makes the resume path future-
+// proof against that). Scrape restarts naturally on the next
+// collision frame via the s_scrape_was_on edge logic; one-shots
+// only fire on their own trigger events.
+static void resume_audio_from_pause_menu(void) {
+    if (audio_settings_hum_on()) {
+        sfx_engine_hum_start();
+    }
+}
+
 // Classify the end-of-run cause and commit the run summary to the
 // active slot. Called once on the PLAYING → GAME_OVER transition.
+//
+// The save itself is a `fastopen("wb")` + NBT serialise + close
+// chain that hits flash synchronously — it can stall the main
+// loop for hundreds of ms. We deliberately call this *after* the
+// state-machine has already switched to GAME_OVER and the audio
+// teardown has happened, so the audible / visible feedback the
+// player sees on a crash is immediate and the slow flash write
+// hides behind the first GAME_OVER frame.
 static void commit_run_end(game_state_t const* g, world_state_t const* w, bool head_on) {
     save_end_reason_t reason;
     if (head_on) {
@@ -965,7 +1025,12 @@ static void commit_run_end(game_state_t const* g, world_state_t const* w, bool h
     }
     int   const peak_stage   = (s_peak_stage > (int)w->stage) ? s_peak_stage : (int)w->stage;
     double const run_seconds = s_run_play_seconds;
+
+    int64_t const t0 = esp_timer_get_time();
     save_commit_run_end(s_active_slot, &s_save, reason, g, peak_stage, run_seconds);
+    int64_t const t1 = esp_timer_get_time();
+    ESP_LOGI(TAG, "save commit: reason=%d took %lld ms",
+             (int)reason, (long long)((t1 - t0) / 1000));
 }
 
 void app_main(void) {
@@ -1062,6 +1127,12 @@ void app_main(void) {
     if (res != ESP_OK) {
         ESP_LOGW(TAG, "audio_mixer_init failed: %d — audio will be silent", res);
     }
+    // Apply launcher-persisted display/keyboard/LED brightness and
+    // speaker/headphone volume + initial audio-jack routing. Has to
+    // run after audio_mixer_init() because the mixer's own init
+    // sets the amplifier from raw jack state (no NVS); hw_settings
+    // then overlays the persisted volume on top.
+    hw_settings_init();
 
     // Layer caches: tight bounding boxes for the sun bands and the
     // visible mountain band. Both live in PSRAM, both are aligned to
@@ -1311,8 +1382,12 @@ void app_main(void) {
             sfx_engine_hum_set_pitch(speed_norm);
 
             // Scrape is persistent — start/stop on edge transitions
-            // so we don't pile up registrations.
-            static bool s_scrape_was_on = false;
+            // so we don't pile up registrations. The "was on" flag
+            // lives at module scope (s_scrape_was_on, declared
+            // near the audio helpers) so the pause-menu transition
+            // can reset it after silencing the scrape voice — without
+            // that, scrape staying held across the pause boundary
+            // would skip its restart edge.
             bool const  scrape_now      = (game.scrape_left || game.scrape_right);
             if (scrape_now && !s_scrape_was_on) {
                 sfx_scrape_start();
@@ -1556,10 +1631,16 @@ void app_main(void) {
                     if (s_audio_cursor >= AUDIO_ENTRY_COUNT)  s_audio_cursor = AUDIO_ENTRY_COUNT - 1;
                 }
                 if (pickup_pressed) {
-                    if (s_audio_cursor == AUDIO_ENTRY_MUSIC) {
-                        audio_settings_set_music_on(!audio_settings_music_on());
-                    } else {
-                        audio_settings_set_sfx_on(!audio_settings_sfx_on());
+                    switch (s_audio_cursor) {
+                        case AUDIO_ENTRY_MUSIC:
+                            audio_settings_set_music_on(!audio_settings_music_on());
+                            break;
+                        case AUDIO_ENTRY_SFX:
+                            audio_settings_set_sfx_on(!audio_settings_sfx_on());
+                            break;
+                        case AUDIO_ENTRY_HUM:
+                            audio_settings_set_hum_on(!audio_settings_hum_on());
+                            break;
                     }
                 }
                 if (menu_esc) {
@@ -1615,19 +1696,27 @@ void app_main(void) {
                 if ((int)world.stage > s_peak_stage) s_peak_stage = (int)world.stage;
 
                 if (head_on) {
-                    if (!run_end_committed) {
-                        commit_run_end(&game, &world, head_on);
-                        run_end_committed = true;
-                    }
-                    // The death sound only plays on the actual
-                    // PLAYING → GAME_OVER edge — guarded by
-                    // run_end_committed (set above) so retriggering
-                    // the same head_on flag next frame does nothing.
+                    // Order matters here. The end-of-run save commits
+                    // an NBT file to flash, which on this hardware
+                    // can stall the main loop for several hundred ms
+                    // (and the audio mixer task on core 1 picks up
+                    // brief cache-disable stalls during the write,
+                    // so I2S DMA loops the previous buffer if it
+                    // underruns). To keep the crash feel snappy:
+                    //   1. Fire crash SFX *first* — the audio task
+                    //      now has a fresh sample to play through
+                    //      the stall.
+                    //   2. Tear down music + persistent voices so
+                    //      the engine hum doesn't keep humming
+                    //      under the game-over panel.
+                    //   3. Transition app_state so the state machine
+                    //      knows we're done with PLAYING.
+                    //   4. Defer the save to the GAME_OVER state's
+                    //      first frame (below) so the slow flash
+                    //      write hides behind a static screen
+                    //      instead of mid-action.
                     sfx_crash_play();
                     end_run_audio();
-                    // Cheap, non-cryptographic per-run flavour roll:
-                    // microseconds-since-boot mod count varies enough
-                    // for cosmetic text selection.
                     s_gameover_flavour_idx = (int)((uint32_t)esp_timer_get_time() % (uint32_t)GAMEOVER_FLAVOUR_COUNT);
                     app_state = APP_STATE_GAME_OVER;
                     input_set_mode(INPUT_MODE_GAME_OVER);
@@ -1635,6 +1724,7 @@ void app_main(void) {
                     s_pause_cursor = PAUSE_ENTRY_RESUME;
                     app_state      = APP_STATE_PAUSED;
                     input_set_mode(INPUT_MODE_PAUSED);
+                    pause_audio_for_pause_menu();
                 }
                 break;
             }
@@ -1666,10 +1756,12 @@ void app_main(void) {
                     // the prompt at the bottom of the overlay).
                     app_state = APP_STATE_PLAYING;
                     input_set_mode(INPUT_MODE_PLAYING);
+                    resume_audio_from_pause_menu();
                 } else if (pickup_pressed) {
                     if (s_pause_cursor == PAUSE_ENTRY_RESUME) {
                         app_state = APP_STATE_PLAYING;
                         input_set_mode(INPUT_MODE_PLAYING);
+                        resume_audio_from_pause_menu();
                     } else { // PAUSE_ENTRY_ABORT
                         if (!run_end_committed) {
                             int    const peak_stage  = (s_peak_stage > (int)world.stage)
@@ -1688,6 +1780,19 @@ void app_main(void) {
             }
 
             case APP_STATE_GAME_OVER: {
+                // Deferred from the PLAYING head_on path so the slow
+                // flash write happens after the audio teardown has
+                // already queued the crash SFX. Runs once on the
+                // first GAME_OVER frame; `run_end_committed` keeps
+                // it from re-firing every frame. The head_on
+                // argument is `true` because PLAYING's head_on flag
+                // already collapses real head-on and stall into one
+                // signal — same behaviour as before the deferral.
+                if (!run_end_committed) {
+                    commit_run_end(&game, &world, /*head_on=*/true);
+                    run_end_committed = true;
+                }
+
                 // World frozen at the crash. No sparks here — they
                 // are a per-frame radial flash that only reads as
                 // a scrape indication during PLAYING. Sun readout

@@ -22,10 +22,12 @@ static char const TAG[] = "sfx_ding";
 #define DING_NOTE_DECAY_S  0.18f
 #define DING_NOTE_GAP_S    0.08f
 
-// Volume relative to int16 full-scale. Stays well under 1.0 so
-// the saturation pass doesn't bite when this overlaps with the
-// engine hum.
-#define DING_AMP 0.55f
+// Per-voice nominal amplitude. The SFX master gain
+// (AUDIO_SFX_GAIN) scales this down at mix-down time, so this
+// value sets relative loudness against other one-shots and the
+// magicnumbers gain handles the overall bus level + headroom
+// for 5 concurrent voices.
+#define DING_AMP 0.50f
 
 typedef struct {
     sfx_voice_t voice;

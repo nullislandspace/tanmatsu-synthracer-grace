@@ -8,9 +8,11 @@ static char const TAG[]       = "audio_settings";
 static char const NS[]        = "synthracer";
 static char const KEY_MUSIC[] = "audio_music_on";
 static char const KEY_SFX[]   = "audio_sfx_on";
+static char const KEY_HUM[]   = "audio_hum_on";
 
 static bool s_music_on = true;
 static bool s_sfx_on   = true;
+static bool s_hum_on   = true;
 
 static void load_one(nvs_handle_t h, char const* key, bool* out) {
     uint8_t v = 1;
@@ -35,13 +37,16 @@ esp_err_t audio_settings_load(void) {
     }
     load_one(h, KEY_MUSIC, &s_music_on);
     load_one(h, KEY_SFX,   &s_sfx_on);
+    load_one(h, KEY_HUM,   &s_hum_on);
     nvs_close(h);
-    ESP_LOGI(TAG, "Loaded audio settings: music=%d sfx=%d", s_music_on, s_sfx_on);
+    ESP_LOGI(TAG, "Loaded audio settings: music=%d sfx=%d hum=%d",
+             s_music_on, s_sfx_on, s_hum_on);
     return ESP_OK;
 }
 
 bool audio_settings_music_on(void) { return s_music_on; }
 bool audio_settings_sfx_on(void)   { return s_sfx_on; }
+bool audio_settings_hum_on(void)   { return s_hum_on; }
 
 static void save_one(char const* key, bool value) {
     nvs_handle_t h;
@@ -72,4 +77,10 @@ void audio_settings_set_sfx_on(bool on) {
     if (s_sfx_on == on) return;
     s_sfx_on = on;
     save_one(KEY_SFX, on);
+}
+
+void audio_settings_set_hum_on(bool on) {
+    if (s_hum_on == on) return;
+    s_hum_on = on;
+    save_one(KEY_HUM, on);
 }

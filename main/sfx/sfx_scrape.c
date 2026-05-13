@@ -21,7 +21,11 @@
 #define SCRAPE_Q_MIN 0.6f
 #define SCRAPE_Q_MAX 3.5f
 
-#define SCRAPE_AMP_MAX 0.45f
+// Per-voice nominal amplitude (max — actual amp scales with
+// the intensity driver). Scrape can run concurrently with up
+// to four other one-shots; the SFX master gain takes care of
+// the overall headroom budget.
+#define SCRAPE_AMP_MAX 0.40f
 
 typedef struct {
     sfx_voice_t   voice;

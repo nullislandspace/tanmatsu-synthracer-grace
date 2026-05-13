@@ -2000,6 +2000,65 @@
   (launcher-shared), independent of the new `audio_music_on` /
   `audio_sfx_on` toggles.
 
+- 2026-05-13 — **Master volume + brightness honour the launcher.**
+  Cherry-picked the upstream template commit that exports the
+  `nicolaielectronics/tanmatsu-settings` module (was
+  `tanmatsu-template-grace` `1fa3ab4`; landed in our tree as the
+  most recent commit). The new `nvs_settings_*` API gives apps
+  read/write access to the same launcher-persisted NVS namespace
+  for display backlight, keyboard backlight, LED brightness, and
+  speaker/headphone volume.
+
+  New module `main/hw_settings.{c,h}` implements the
+  "Respect the master volume" model from
+  `../volume_howto.md`:
+    - At boot (`hw_settings_init`, called from `app_main` right
+      after `audio_mixer_init`): pull each of the five persisted
+      values via the upstream helpers, push to its BSP setter
+      (`bsp_display_set_backlight_brightness`,
+      `bsp_input_set_backlight_brightness`,
+      `bsp_led_set_brightness`, `bsp_audio_set_volume`,
+      `bsp_audio_set_amplifier`). Audio output (speaker vs.
+      headphone) is picked from the initial jack state read via
+      `bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK)`.
+    - On audio-jack hot-swap (event delivered by the BSP as
+      `INPUT_EVENT_TYPE_ACTION` /
+      `BSP_INPUT_ACTION_TYPE_AUDIO_JACK`):
+      `hw_settings_on_jack_event(state)` re-picks the NVS key,
+      pushes the persisted value into the codec, and mutes the
+      speaker amplifier when headphones are inserted (the codec
+      drives both lines but the speaker amp is a separate
+      chip).
+    - On VOLUME_UP / VOLUME_DOWN navigation keys:
+      `hw_settings_step_volume(±5)` reads the active output's
+      NVS value, clamps to [0,100], writes it back via the
+      upstream `nvs_settings_set_*_volume` helper (so the
+      launcher sees the change next boot), and re-applies via
+      `bsp_audio_set_volume`. Same 5% step the launcher uses.
+  `input.c` dispatches both events directly inside its drain
+  loop — no edge latch + main-loop poll, because volume / amp
+  routing is system housekeeping rather than gameplay input.
+  This intentionally diverges from the rest of `input.c`
+  (which buffers everything for `main.c` to consume per frame).
+
+  **Not** mixed up with `audio_settings.{c,h}`:
+  the per-app `audio_music_on` / `audio_sfx_on` toggles
+  continue to live in our private `synthracer` NVS namespace.
+  Those flags gate the procedural synth and SFX render passes
+  in the mixer; they're orthogonal to the codec master volume.
+  We could refactor `audio_settings.c` to use the upstream
+  `nvs_settings_get_u8` / `set_u8` generic helpers — but those
+  write to the launcher's namespace and would pollute it with
+  app-specific keys, so we keep our own.
+
+  **What's still TODO.** F2 / F3 weren't wired to live
+  brightness adjustment yet (the per-frame "dim / bright"
+  keys the template originally documented). Boot-time loading
+  of the persisted brightness covers the "honour the launcher
+  setting" half; the in-app step would be a small follow-up
+  using `nvs_settings_set_display_brightness` etc. — same
+  pattern as `hw_settings_step_volume`.
+
 ---
 
 ## Future FPS improvements

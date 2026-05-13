@@ -2,6 +2,7 @@
 
 #include "audio_dsp.h"
 #include "audio_settings.h"
+#include "magicnumbers.h"
 
 #include "bsp/audio.h"
 #include "bsp/input.h"
@@ -23,8 +24,16 @@ static char const TAG[] = "audio_mixer";
 #define MIXER_CHUNK_SAMPLES (MIXER_CHUNK_FRAMES * 2)       // L+R
 #define MIXER_CHUNK_BYTES   (MIXER_CHUNK_FRAMES * MIXER_FRAME_BYTES)
 
-// Music is mixed at ~30% so SFX have headroom. Q15 scale factor.
-#define MIXER_MUSIC_GAIN_Q15 ((int32_t)(0.30f * 32768.0f))
+// Master gain factors derived from `magicnumbers.h`. Both are
+// applied in Q15 fixed-point at mix-down time, so the per-voice
+// `*_AMP` constants in each `sfx_*.c` stay tuned to relative
+// loudness between effects and these set the overall balance.
+//
+// See the "Audio gain staging" block in magicnumbers.h for the
+// headroom math (target: 5 concurrent SFX + music + hum without
+// hard-clipping the int16 mixer accumulator).
+#define MIXER_MUSIC_GAIN_Q15 ((int32_t)(AUDIO_MUSIC_GAIN * 32768.0f))
+#define MIXER_SFX_GAIN_Q15   ((int32_t)(AUDIO_SFX_GAIN   * 32768.0f))
 
 // Number of consecutive silent chunks the mixer pushes through the
 // I2S DMA queue before powering down. ~46 ms covers the worst case
@@ -72,8 +81,8 @@ static void power_up(void) {
     if (g_powered_on) return;
 
     esp_err_t err = i2s_channel_enable(g_i2s);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "i2s_channel_enable failed: %s", esp_err_to_name(err));
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "power_up: i2s_channel_enable failed: %s", esp_err_to_name(err));
     }
 
     bool jack_inserted = false;
@@ -83,7 +92,8 @@ static void power_up(void) {
     bsp_audio_set_amplifier(!jack_inserted);
 
     g_powered_on = true;
-    ESP_LOGD(TAG, "Audio resumed");
+    ESP_LOGI(TAG, "power_up: I2S enabled, amp=%s (jack=%s)",
+             jack_inserted ? "off" : "on", jack_inserted ? "in" : "out");
 }
 
 static void power_down(void) {
@@ -93,11 +103,11 @@ static void power_down(void) {
 
     esp_err_t err = i2s_channel_disable(g_i2s);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "i2s_channel_disable failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "power_down: i2s_channel_disable failed: %s", esp_err_to_name(err));
     }
 
     g_powered_on = false;
-    ESP_LOGD(TAG, "Audio idle — powered down");
+    ESP_LOGI(TAG, "power_down: amp+I2S off (idle drain complete)");
 }
 
 // ---------------------------------------------------------------
@@ -127,7 +137,10 @@ static void reap_finished_voices_locked(void) {
 
 static void mixer_task_fn(void* arg) {
     (void)arg;
-    int silence_chunks = 0;
+    int  silence_chunks         = 0;
+    bool logged_first_audio_out = false;
+
+    ESP_LOGI(TAG, "mixer task started");
 
     while (1) {
         if (g_shutdown) {
@@ -157,6 +170,11 @@ static void mixer_task_fn(void* arg) {
         }
 
         // ---- SFX voices ----
+        // Apply the SFX master gain at sum-in time (Q15 fixed
+        // point). Per-voice `*_AMP` constants in each sfx_*.c set
+        // relative loudness; this knob sets the overall SFX bus
+        // level against the music + clip ceiling. See magicnumbers.h
+        // for the 5-concurrent-voice headroom budget.
         if (sfx_gate) {
             for (int i = 0; i < MIXER_VOICE_SLOTS; i++) {
                 sfx_voice_t* v = g_voices[i].voice;
@@ -164,7 +182,7 @@ static void mixer_task_fn(void* arg) {
                 memset(g_mix_voice, 0, sizeof(g_mix_voice));
                 v->render(v, g_mix_voice, MIXER_CHUNK_FRAMES);
                 for (size_t j = 0; j < MIXER_CHUNK_SAMPLES; j++) {
-                    g_accum[j] += g_mix_voice[j];
+                    g_accum[j] += ((int32_t)g_mix_voice[j] * MIXER_SFX_GAIN_Q15) >> 15;
                 }
                 active_sources++;
             }
@@ -197,16 +215,27 @@ static void mixer_task_fn(void* arg) {
         if (!g_powered_on) power_up();
         silence_chunks = 0;
 
-        // ---- Saturate accum → out ----
+        // ---- Saturate accum → out + peak sampling ----
+        int32_t peak = 0;
         for (size_t j = 0; j < MIXER_CHUNK_SAMPLES; j++) {
             int32_t s = g_accum[j];
             if (s >  32767) s =  32767;
             if (s < -32768) s = -32768;
             g_out[j] = (int16_t)s;
+            int32_t a = s < 0 ? -s : s;
+            if (a > peak) peak = a;
         }
 
-        size_t written = 0;
-        i2s_channel_write(g_i2s, g_out, sizeof(g_out), &written, portMAX_DELAY);
+        size_t    written = 0;
+        esp_err_t werr    = i2s_channel_write(g_i2s, g_out, sizeof(g_out), &written, portMAX_DELAY);
+        if (!logged_first_audio_out) {
+            ESP_LOGI(TAG, "first audible chunk: write_err=%s bytes=%u peak=%ld sources=%d",
+                     esp_err_to_name(werr), (unsigned)written, (long)peak, active_sources);
+            logged_first_audio_out = true;
+        } else if (werr != ESP_OK) {
+            // Don't spam every chunk; only log unexpected errors.
+            ESP_LOGW(TAG, "i2s_channel_write: %s (bytes=%u)", esp_err_to_name(werr), (unsigned)written);
+        }
     }
 }
 
@@ -217,29 +246,61 @@ static void mixer_task_fn(void* arg) {
 esp_err_t audio_mixer_init(void) {
     if (g_initialised) return ESP_OK;
 
+    ESP_LOGI(TAG, "audio_mixer_init: begin");
+
     esp_err_t err = audio_dsp_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio_dsp_init failed: %d", err);
         return err;
     }
 
-    err = bsp_audio_set_rate(AUDIO_SAMPLE_RATE_HZ);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bsp_audio_set_rate failed: %d", err);
-        return err;
-    }
-
+    // The BSP enables the I2S channel inside `bsp_device_initialize()`
+    // at whatever sample rate the boot config picked (typically
+    // 16 kHz). The ESP-IDF i2s_std driver rejects clock reconfigure
+    // on an enabled channel with ESP_ERR_INVALID_STATE (259), so we
+    // have to disable → set rate → re-enable. Grab the handle first
+    // so we can disable it ourselves.
     err = bsp_audio_get_i2s_handle(&g_i2s);
     if (err != ESP_OK || g_i2s == NULL) {
-        ESP_LOGE(TAG, "Failed to get I2S handle: %d", err);
+        ESP_LOGE(TAG, "bsp_audio_get_i2s_handle failed: %d (handle=%p)", err, g_i2s);
         return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+    }
+    ESP_LOGI(TAG, "bsp_audio_get_i2s_handle ok: handle=%p", g_i2s);
+
+    err = i2s_channel_disable(g_i2s);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "i2s_channel_disable before set_rate failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "i2s_channel_disable ok (pre-rate-change)");
+    }
+
+    err = bsp_audio_set_rate(AUDIO_SAMPLE_RATE_HZ);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_audio_set_rate(%u) failed: %d", AUDIO_SAMPLE_RATE_HZ, err);
+        // Try to leave the I2S channel enabled so any subsequent
+        // BSP audio path still works at the old rate.
+        i2s_channel_enable(g_i2s);
+        return err;
+    }
+    ESP_LOGI(TAG, "bsp_audio_set_rate(%u) ok", AUDIO_SAMPLE_RATE_HZ);
+
+    err = i2s_channel_enable(g_i2s);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "i2s_channel_enable ok");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "i2s_channel_enable: already enabled");
+    } else {
+        ESP_LOGE(TAG, "i2s_channel_enable failed: %s", esp_err_to_name(err));
     }
 
     // Match the launcher's amp policy: speaker on unless headphones
-    // are inserted.
+    // are inserted. hw_settings_init() will overwrite the volume
+    // value with the launcher-persisted one immediately after.
     bool jack = false;
     if (bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &jack) != ESP_OK) jack = false;
-    bsp_audio_set_amplifier(!jack);
+    err = bsp_audio_set_amplifier(!jack);
+    ESP_LOGI(TAG, "initial amp policy: jack=%s amp=%s err=%d",
+             jack ? "in" : "out", jack ? "off" : "on", err);
 
     g_slots_mutex = xSemaphoreCreateMutex();
     if (g_slots_mutex == NULL) {
@@ -266,8 +327,8 @@ esp_err_t audio_mixer_init(void) {
     }
 
     g_initialised = true;
-    ESP_LOGI(TAG, "Audio mixer started (%d Hz, %d frames/chunk, %d voices)",
-             AUDIO_SAMPLE_RATE_HZ, MIXER_CHUNK_FRAMES, MIXER_VOICE_SLOTS);
+    ESP_LOGI(TAG, "audio_mixer_init: done (%d Hz, %d frames/chunk, %d voices, task=%p)",
+             AUDIO_SAMPLE_RATE_HZ, MIXER_CHUNK_FRAMES, MIXER_VOICE_SLOTS, g_mixer_task);
     return ESP_OK;
 }
 
@@ -311,7 +372,10 @@ void audio_mixer_shutdown(void) {
 }
 
 void audio_mixer_set_music(music_source_t* src) {
-    if (!g_initialised || g_shutdown) return;
+    if (!g_initialised || g_shutdown) {
+        ESP_LOGW(TAG, "set_music skipped: init=%d shutdown=%d", g_initialised, g_shutdown);
+        return;
+    }
 
     music_source_t* prev = NULL;
     xSemaphoreTake(g_slots_mutex, portMAX_DELAY);
@@ -326,25 +390,33 @@ void audio_mixer_set_music(music_source_t* src) {
     if (src != NULL && g_mixer_task != NULL) {
         xTaskNotifyGive(g_mixer_task);
     }
+    ESP_LOGI(TAG, "set_music: %s (prev=%p new=%p)",
+             src ? "installed" : "cleared", prev, src);
 }
 
 bool audio_mixer_register_voice(sfx_voice_t* v) {
-    if (!g_initialised || g_shutdown || v == NULL) return false;
+    if (!g_initialised || g_shutdown || v == NULL) {
+        ESP_LOGW(TAG, "register_voice skipped: init=%d shutdown=%d v=%p",
+                 g_initialised, g_shutdown, v);
+        return false;
+    }
 
     bool placed = false;
+    int  idx    = -1;
     xSemaphoreTake(g_slots_mutex, portMAX_DELAY);
-    int idx = find_free_slot_locked();
+    idx = find_free_slot_locked();
     if (idx >= 0) {
-        v->finished     = false;
+        v->finished        = false;
         g_voices[idx].voice = v;
-        placed          = true;
+        placed             = true;
     }
     xSemaphoreGive(g_slots_mutex);
 
     if (placed && g_mixer_task != NULL) {
         xTaskNotifyGive(g_mixer_task);
+        ESP_LOGI(TAG, "register_voice: slot=%d voice=%p", idx, v);
     } else if (!placed) {
-        ESP_LOGW(TAG, "All SFX voice slots full — dropping voice");
+        ESP_LOGW(TAG, "register_voice: all SFX voice slots full — dropping voice");
     }
     return placed;
 }

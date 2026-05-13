@@ -16,6 +16,12 @@ esp_err_t audio_settings_load(void);
 
 bool audio_settings_music_on(void);
 bool audio_settings_sfx_on(void);
+bool audio_settings_hum_on(void);
 
 void audio_settings_set_music_on(bool on);
 void audio_settings_set_sfx_on(bool on);
+// The engine hum is a persistent low drone whose presence /
+// absence is more about taste than about CPU load. Some players
+// find the constant tone fatiguing on long sessions even when
+// they want the one-shot SFX on, so it gets its own toggle.
+void audio_settings_set_hum_on(bool on);
