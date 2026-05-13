@@ -18,6 +18,14 @@ set(APP_SOURCES
     main/game.c
     main/world.c
     main/render.c
+    main/obstacle.c
+    main/objects/cube.c
+    main/objects/wall.c
+    main/objects/booster.c
+    main/areas/pixel_field.c
+    main/areas/big_blocks.c
+    main/areas/gateways.c
+    main/areas/rest.c
     main/nbt.c
     main/save.c
     main/save_nbt.c

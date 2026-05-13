@@ -236,49 +236,59 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
         // overlap window in one frame and the cube landed past
         // ship centre with the player still aimed dead at it.
         bool const came_from_ahead = obs_zN_prev >= ship_zF;
-        bool       is_scrape       = false;
-        bool       skip_response   = false;  // for non-blocking kinds (pickups, future ramps)
-        switch (o->kind) {
-            case OBSTACLE_KIND_WALL:
-                // Walls are scrape-only by definition. Side walls
-                // sit just beyond the ship's lateral clamp; any
-                // future "ridable" wall (e.g. an in-track barrier)
-                // gets tagged WALL too and gets the same response.
-                is_scrape = true;
-                break;
-            case OBSTACLE_KIND_CUBE:
-                // Hit from ahead → head-on (fatal). Already-passing
-                // → trailing scrape (push out and slow).
-                is_scrape = !came_from_ahead;
-                break;
-            case OBSTACLE_KIND_PICKUP_BOOST:
-                // Collect the booster: deactivate the obstacle, kick
-                // the boost state machine into RAMPING from the
-                // current speed. Picking up another booster
-                // mid-boost just restarts at RAMPING from the new
-                // current speed (which might already be near the
-                // target).
-                o->active                 = false;
-                g->boost_phase            = BOOST_RAMPING;
-                g->boost_phase_time       = GAME_BOOST_RAMP_UP_SECONDS;
-                g->boost_ramp_start_speed = g->ship_speed_z;
-                g->pickups_speed_boost   += 1;
-                skip_response             = true;
-                break;
-            case OBSTACLE_KIND_PICKUP_TRI:
-            case OBSTACLE_KIND_PICKUP_JUMP:
-            case OBSTACLE_KIND_PICKUP_SHIELD:
-            case OBSTACLE_KIND_RAMP:
-                // Not implemented yet — ignore the overlap so
-                // collision doesn't kill the ship on contact with
-                // a future pickup that happens to share the pool.
-                // Phase 6 / 9 / future will fill these in.
-                skip_response = true;
-                break;
-        }
-        if (skip_response) continue;
 
-        if (is_scrape) {
+        // Per-object collision callback takes precedence; if the
+        // object hasn't set one, fall back to kind-dispatched
+        // default behaviour. Either way the result is a tristate the
+        // outer loop turns into the right physics response.
+        obstacle_hit_result_t hit;
+        if (o->collide) {
+            hit = o->collide(o, g, came_from_ahead);
+        } else {
+            switch (o->kind) {
+                case OBSTACLE_KIND_WALL:
+                    // Walls are scrape-only by definition. Side walls
+                    // sit just beyond the ship's lateral clamp; any
+                    // future "ridable" wall (e.g. an in-track barrier)
+                    // gets tagged WALL too and gets the same response.
+                    hit = OBSTACLE_HIT_SCRAPE;
+                    break;
+                case OBSTACLE_KIND_CUBE:
+                    // Hit from ahead → head-on (fatal). Already-passing
+                    // → trailing scrape (push out and slow).
+                    hit = came_from_ahead ? OBSTACLE_HIT_HEAD_ON : OBSTACLE_HIT_SCRAPE;
+                    break;
+                case OBSTACLE_KIND_PICKUP_BOOST:
+                    // Collect the booster: deactivate the obstacle, kick
+                    // the boost state machine into RAMPING from the
+                    // current speed. Picking up another booster
+                    // mid-boost just restarts at RAMPING from the new
+                    // current speed (which might already be near the
+                    // target).
+                    obstacle_despawn(o);
+                    g->boost_phase            = BOOST_RAMPING;
+                    g->boost_phase_time       = GAME_BOOST_RAMP_UP_SECONDS;
+                    g->boost_ramp_start_speed = g->ship_speed_z;
+                    g->pickups_speed_boost   += 1;
+                    hit                       = OBSTACLE_HIT_IGNORE;
+                    break;
+                case OBSTACLE_KIND_PICKUP_TRI:
+                case OBSTACLE_KIND_PICKUP_JUMP:
+                case OBSTACLE_KIND_PICKUP_SHIELD:
+                case OBSTACLE_KIND_RAMP:
+                    // Not implemented yet — ignore so collision
+                    // doesn't kill the ship on contact with a future
+                    // pickup. Phase 6 / 9 / future will fill these in.
+                    hit = OBSTACLE_HIT_IGNORE;
+                    break;
+                default:
+                    hit = OBSTACLE_HIT_IGNORE;
+                    break;
+            }
+        }
+        if (hit == OBSTACLE_HIT_IGNORE) continue;
+
+        if (hit == OBSTACLE_HIT_SCRAPE) {
             // Push the ship out of the obstacle laterally so it
             // physically can't penetrate. Side is decided by
             // which side of the ship the obstacle's centre lies
@@ -297,7 +307,7 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
             // push-out shoved us past one of them.
             if (g->ship_x_world > SHIP_X_MAX_WORLD) g->ship_x_world = SHIP_X_MAX_WORLD;
             if (g->ship_x_world < SHIP_X_MIN_WORLD) g->ship_x_world = SHIP_X_MIN_WORLD;
-        } else {
+        } else /* OBSTACLE_HIT_HEAD_ON */ {
             head_on = true;
         }
     }

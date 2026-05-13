@@ -58,10 +58,14 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
         obstacle_t const* o = &w->obstacles[i];
         if (!o->active) continue;
-        // Walls run along z and are outside the playfield — their
-        // shadows wouldn't show on the visible floor. Pickups /
-        // ramps are too short to cast meaningful shadows. Only
-        // cubes get shadow quads today.
+        // Per-object shadow callback wins when set. Otherwise default
+        // dispatch: only cubes get the trapezoid shadow; walls run
+        // along z outside the playfield and pickups / ramps are too
+        // short for a meaningful shadow.
+        if (o->shadow) {
+            o->shadow(fb, o, cam_x, sun_y);
+            continue;
+        }
         if (o->kind != OBSTACLE_KIND_CUBE) continue;
 
         float const xL          = o->x_world - o->half_w;
@@ -202,9 +206,13 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
     for (int k = 0; k < n; k++) {
         obstacle_t const* o = &w->obstacles[idx[k]];
 
-        // Booster pickups render as a pyramid, not a cube. Same
-        // sort order so painter's algorithm interleaves them with
-        // surrounding cubes correctly.
+        // Per-object draw callback wins when set. Otherwise default
+        // dispatch: pickup boosters as a pyramid, everything else as
+        // a cube.
+        if (o->draw) {
+            o->draw(fb, o, cam_x);
+            continue;
+        }
         if (o->kind == OBSTACLE_KIND_PICKUP_BOOST) {
             render_booster_pyramid(fb_pixels, o, cam_x, rev_endian, pulse_factor);
             continue;

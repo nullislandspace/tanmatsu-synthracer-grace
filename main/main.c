@@ -1137,7 +1137,7 @@ void app_main(void) {
             // signal as a head-on collision.
             bool const stalled = game_after_collide(&game, &world, dt);
             head_on            = head_on || stalled;
-            world_advance(&world, dt, game.ship_speed_z);
+            world_advance(&world, dt, game.ship_speed_z, game.cam_x);
             // Accumulate active play time (excludes paused frames).
             // Used by save_commit_run_end so the duration_s stat
             // doesn't count F4 pauses as gameplay time.
