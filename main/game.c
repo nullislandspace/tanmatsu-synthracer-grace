@@ -172,7 +172,16 @@ void game_step(game_state_t* g, float dt, int steer) {
     g->bank += bank_delta;
 
     // --- Lateral motion ---------------------------------------------------
-    g->ship_x_world += g->bank * SHIP_TURN_RATE * dt;
+    // Turn rate scales linearly with forward speed: at cruise the
+    // lateral rate equals the tunable SHIP_TURN_RATE; at boost
+    // (2× cruise) it doubles, so the ship maintains the same
+    // lateral-to-longitudinal ratio at any speed. Without this,
+    // a flat lateral rate over 2× the forward distance reads as
+    // pronounced understeer. At stall the rate drops toward zero,
+    // which is physically consistent — you can't bank-turn a ship
+    // that isn't moving forward — and adds tension to shadow stalls.
+    float const turn_rate = SHIP_TURN_RATE * (g->ship_speed_z / GAMEPLAY_CRUISE_SPEED);
+    g->ship_x_world += g->bank * turn_rate * dt;
     if (g->ship_x_world > SHIP_X_MAX_WORLD) {
         g->ship_x_world = SHIP_X_MAX_WORLD;
     } else if (g->ship_x_world < SHIP_X_MIN_WORLD) {
