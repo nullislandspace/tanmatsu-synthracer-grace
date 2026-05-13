@@ -2,6 +2,7 @@
 
 #include "areas/big_blocks.h"
 #include "areas/bridges.h"
+#include "areas/dynamic_gateway.h"
 #include "areas/dynamic_passage.h"
 #include "areas/gateways.h"
 #include "areas/pixel_field.h"
@@ -72,6 +73,7 @@ static bool area_is_applicable(area_type_t t, uint16_t stage) {
         case AREA_TYPE_BIG_BLOCKS:      min_stage = 1; max_stage = 0xFFFF; break;
         case AREA_TYPE_BRIDGES:         min_stage = 1; max_stage = 0xFFFF; break;
         case AREA_TYPE_DYNAMIC_PASSAGE: min_stage = 2; max_stage = 5;      break;
+        case AREA_TYPE_DYNAMIC_GATEWAY: min_stage = 3; max_stage = 6;      break;
         case AREA_TYPE_REST:            min_stage = 1; max_stage = 0xFFFF; break;  // never picked anyway
         default:                        min_stage = 1; max_stage = 0xFFFF; break;
     }
@@ -92,6 +94,7 @@ static area_type_t pick_area_type(uint16_t stage, uint32_t* prng) {
         AREA_TYPE_BIG_BLOCKS,
         AREA_TYPE_BRIDGES,
         AREA_TYPE_DYNAMIC_PASSAGE,
+        AREA_TYPE_DYNAMIC_GATEWAY,
     };
     int const n = (int)(sizeof(candidates) / sizeof(candidates[0]));
 
@@ -117,6 +120,7 @@ static void start_next_area(world_state_t* w) {
         case AREA_TYPE_BIG_BLOCKS:      area_big_blocks_init     (&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_BRIDGES:         area_bridges_init        (&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_DYNAMIC_PASSAGE: area_dynamic_passage_init(&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_DYNAMIC_GATEWAY: area_dynamic_gateway_init(&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_REST:            area_rest_init           (&w->area);                           break;
     }
 }
@@ -129,6 +133,7 @@ static bool area_tick(world_state_t* w, float dz) {
         case AREA_TYPE_GATEWAYS:        return area_gateways_tick       (w, a, dz);
         case AREA_TYPE_BRIDGES:         return area_bridges_tick        (w, a, dz);
         case AREA_TYPE_DYNAMIC_PASSAGE: return area_dynamic_passage_tick(w, a, dz);
+        case AREA_TYPE_DYNAMIC_GATEWAY: return area_dynamic_gateway_tick(w, a, dz);
         case AREA_TYPE_REST:            return area_rest_tick           (w, a, dz);
     }
     return false;

@@ -1765,6 +1765,69 @@
   thus point at the same physical layout via the cube's roll
   axis rather than the "left wall / right wall" labels.
 
+- 2026-05-13 — **Dynamic gateway area.** Second area type built
+  around the flipping cube. New `main/areas/dynamic_gateway.{h,c}`
+  spawns 3..5 gateway walls back-to-back with two distinguishing
+  rules: the hole's x is fixed for the whole area run (chosen once
+  from the stage PRNG at init) so the player can pre-align after
+  the first wall, and a flipping cube sits right behind each hole
+  whose width exactly equals the hole — blocking the passage
+  until the cube rolls away as the player approaches.
+
+  Roll direction is always **toward the playfield centre**: hole
+  right of centre → cube rolls LEFT, hole left of centre → cube
+  rolls RIGHT. The hole-at-exactly-zero edge case snaps to
+  left-roll via `dir = (hole_x >= 0.0f) ? -1 : +1`, so there's no
+  deadband.
+
+  Geometry: wall slab at `z = WORLD_Z_FAR_SPAWN`, flipping cube at
+  `z = WORLD_Z_FAR_SPAWN + (CUBE_GATE_HALF_D + FLIPPING_CUBE_HALF_D)`
+  (= +1.2 u behind the wall plane). Hole half-width =
+  `FLIPPING_CUBE_HALF_W` (= 0.8). The cube's rolled-AABB outer edge
+  ends flush with the inner edge of the wall slab on the roll-
+  toward side — the rolled cube exactly fills the gap between
+  the wall slab on one side and the hole edge on the other, so
+  the safe passage through the hole stays open after the roll.
+  Painter's sort renders the cube first (larger z) then the wall
+  slabs on top, giving correct occlusion (cube partially hidden
+  behind the slab it rolled toward).
+
+  Inter-wall pad = **10 u** (vs. standard gateways's 50 u).
+  Standard gateways needs 50 because the hole shifts wall-to-wall
+  and the player has to traverse the full track width to re-align.
+  Here the hole is fixed for the whole area run so the player
+  holds position — the pad only needs to give the cubes room to
+  cascade through their roll animations without visually
+  overlapping, and 10 u (= 0.5 s at cruise) gives a punchy
+  staggered rhythm. Centre-to-centre wall spacing is 10.8 u
+  (pad + slab thickness 0.8).
+
+  Booster placement: scoped to the FIRST wall only. The area's
+  init clears `passage_mirror` to 0 (overloaded as a "first-wall
+  pending" flag for this area type — same int field that
+  dynamic_passage uses for its mirror/non-mirror subtype). The
+  tick checks that flag on each wall spawn; on the first wall,
+  if `boosters_owed > 0` it spawns a booster at
+  `(gate_hole_x, WORLD_Z_FAR_SPAWN)` (in the hole, in front of
+  the flipping cube) and decrements `boosters_owed`, then sets
+  `passage_mirror = 1`. Subsequent walls inside the same area
+  don't consume from `boosters_owed`, so any booster the
+  scheduler flags mid-area (after the first wall has already
+  spawned) carries over to the next area instead. Predictable
+  reward: the first wall is the only "free" pass.
+
+  Stage gate: `min_stage = 3`, `max_stage = 6` (overlaps the
+  back half of dynamic_passage's 2..5 window, with shared
+  real estate at stages 3..5 and a one-stage tail at 6 after
+  dynamic_passage has aged out). Wired into the picker
+  candidates list and init/tick dispatch in `world.c`; sources
+  added to
+  `CMakeLists.txt`; new field `float gate_hole_x` on
+  `area_state_t` to carry the per-area-run hole x (unused for
+  other area types). TAB debug-force target moved from
+  `AREA_TYPE_DYNAMIC_PASSAGE` to `AREA_TYPE_DYNAMIC_GATEWAY` so
+  the new area is the default smoke-test path.
+
 ---
 
 ## Future FPS improvements

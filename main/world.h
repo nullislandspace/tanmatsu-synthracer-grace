@@ -60,6 +60,7 @@ typedef enum {
     AREA_TYPE_BIG_BLOCKS,          // sparser, larger grey cubes (2× pixel cubes laterally)
     AREA_TYPE_BRIDGES,             // concrete archways spanning the track — visual + shadow only
     AREA_TYPE_DYNAMIC_PASSAGE,     // flipping cubes along one wall + heavy pixel-field clutter
+    AREA_TYPE_DYNAMIC_GATEWAY,     // gateway walls with a per-area fixed hole, each blocked by a flipping cube
     AREA_TYPE_REST,                // empty stretch between stages
 } area_type_t;
 
@@ -76,16 +77,26 @@ typedef struct area_state_s {
     float       gate_pad_z;          // GATEWAYS only: empty z between gates (and lead-in / trailing)
     int         boosters_owed;       // count of boosters the top-level scheduler has flagged but not placed
 
-    // DYNAMIC_PASSAGE only: 0 = non-mirrored (cubes against right
-    // wall, roll left); 1 = mirrored (against left wall, roll right).
-    // Picked at area-init from the stage PRNG; unused / left at 0
-    // for other area types.
+    // Overloaded int slot — semantics depend on area type:
+    //   DYNAMIC_PASSAGE: 0 = non-mirrored (cubes against right wall,
+    //                    roll left); 1 = mirrored (against left
+    //                    wall, roll right). Picked at area-init.
+    //   DYNAMIC_GATEWAY: 0 = first wall not yet spawned; 1 = first
+    //                    wall already spawned. Used to anchor the
+    //                    area's booster spawn (if any) to the first
+    //                    wall's hole exclusively.
+    // Unused / zeroed for other area types.
     int         passage_mirror;
     // DYNAMIC_PASSAGE only: z-units until the next pixel-field
     // clutter cube spawns. Independent of `next_event_z` (which the
     // area uses for the flipping-cube cadence) so the two streams
     // overlap deterministically without sharing a timer.
     float       clutter_event_z;
+    // DYNAMIC_GATEWAY only: per-area fixed x of the hole through
+    // each wall (consistent across every wall in this area run; a
+    // fresh value is drawn next time the area is picked). Unused
+    // for other area types.
+    float       gate_hole_x;
 } area_state_t;
 
 typedef struct world_state_s {
