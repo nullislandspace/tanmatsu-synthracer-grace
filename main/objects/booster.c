@@ -4,7 +4,11 @@
 #include "world.h"
 
 obstacle_t* booster_spawn(world_state_t* w) {
-    float const x = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * TRACK_HALF_WIDTH;
+    // Same wall-clearance rule as cubes: the booster's outer face
+    // must stay inside the playfield, so cap the x extent by
+    // GAME_BOOSTER_HALF_W.
+    float const x_extent = TRACK_HALF_WIDTH - GAME_BOOSTER_HALF_W;
+    float const x        = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * x_extent;
     return booster_spawn_at(w, x, WORLD_Z_FAR_SPAWN);
 }
 

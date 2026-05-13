@@ -28,7 +28,11 @@
 #define GATE_OUTLINE_COLOR  0xFF31FBFBu
 
 obstacle_t* cube_spawn_pixel(world_state_t* w) {
-    float const x = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * TRACK_HALF_WIDTH;
+    // x range chosen so the cube's outer faces stay inside the side
+    // walls (`±TRACK_HALF_WIDTH`). Without this, a cube at the extreme
+    // x would have its outer face poking through the wall by half_w.
+    float const x_extent = TRACK_HALF_WIDTH - CUBE_PIXEL_HALF_W;
+    float const x        = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * x_extent;
     return obstacle_spawn(w, OBSTACLE_KIND_CUBE,
                           x, WORLD_Z_FAR_SPAWN,
                           CUBE_PIXEL_HALF_W, CUBE_PIXEL_HALF_W, CUBE_PIXEL_HEIGHT,
@@ -37,7 +41,8 @@ obstacle_t* cube_spawn_pixel(world_state_t* w) {
 }
 
 obstacle_t* cube_spawn_big(world_state_t* w) {
-    float const x = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * TRACK_HALF_WIDTH;
+    float const x_extent = TRACK_HALF_WIDTH - CUBE_BIG_HALF_W;
+    float const x        = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * x_extent;
     return obstacle_spawn(w, OBSTACLE_KIND_CUBE,
                           x, WORLD_Z_FAR_SPAWN,
                           CUBE_BIG_HALF_W, CUBE_BIG_HALF_D, CUBE_BIG_HEIGHT,

@@ -174,11 +174,24 @@ void world_init(world_state_t* w, uint32_t seed) {
     w->left_wall_far_z  = WALL_SEGMENT_HALF_D;
     wall_top_up(w, &w->right_wall_far_z, WALL_X_RIGHT);
     wall_top_up(w, &w->left_wall_far_z,  WALL_X_LEFT);
-    // Stage 1 starts immediately. The first area's lead-in plus the
-    // far-plane spawn distance gives the player ~5 s of clear track
-    // before the first obstacle reaches them — that's our "starting
-    // rest" without needing an explicit rest area up front.
-    start_stage(w, 1);
+    // Begin with a pre-stage-1 rest area so the "Stage: 1" banner
+    // shows for a brief clear lead-in before any obstacles arrive.
+    // w->stage stays at 0 during this rest; when the rest area
+    // finishes, the standard area-done handler fires
+    // `start_stage(0 + 1)` which sets up stage 1 normally. The rest
+    // dump still spawns its quota of boosters so the player gets a
+    // greeting boost before the first stage proper.
+    w->stage             = 0;
+    w->stage_z_remaining = 0.0f;          // already "at stage end" — rest end will fire start_stage(1)
+    w->stage_prng        = mix_stage_seed(w->level_seed, 0);
+    w->area.boosters_owed = 0;
+    for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
+        w->booster_due_at_progress[i] = -1.0f;  // nothing scheduled yet
+    }
+    area_rest_init(&w->area);
+    for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
+        booster_spawn(w);
+    }
 }
 
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {

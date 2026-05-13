@@ -430,16 +430,15 @@ static void draw_centered(float cy, float h, pax_col_t color, char const* text) 
     rendertext_draw(fb, color, NULL, h, x, cy, text);
 }
 
-// Top-right readout stack. Slot 0 is reserved for the score line
-// (drawn separately by draw_score_readout), so v= sits at slot 1 and
-// sun= at slot 2.
+// Top-right readout stack. Slot 0 = score, slot 1 = stage, slot 2 = v,
+// slot 3 = sun. Each line is `text_h + 4` px below the previous.
 static void draw_speed_readout(float speed_z) {
     char        buf[32];
     snprintf(buf, sizeof(buf), "v=%.1f", speed_z);
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
     float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
-    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + (text_h + 4.0f), buf);
+    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 2.0f * (text_h + 4.0f), buf);
 }
 
 static void draw_sun_readout(float sun_y) {
@@ -448,7 +447,7 @@ static void draw_sun_readout(float sun_y) {
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
     float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
-    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 2.0f * (text_h + 4.0f), buf);
+    rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 3.0f * (text_h + 4.0f), buf);
 }
 
 // Bottom-left HUD: a solid green upward-pointing triangle that's
@@ -489,6 +488,28 @@ static void draw_exit_hint(void) {
         rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, text_x, y, prompt);
     } else {
         char const* fallback = "F1 to exit";
+        rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
+    }
+}
+
+// F4-to-pause hint, drawn below the F1 exit hint during PLAYING.
+// Same icon-then-text layout as draw_exit_hint, slotted at y = 34
+// (= 12 + 18 + 4) so it sits one line below F1.
+static void draw_pause_hint(void) {
+    char const* prompt   = "to pause";
+    float const prompt_h = 18.0f;
+    int         icon_w   = icons_width(ICON_F4);
+    float const x_margin = 12.0f;
+    float const y        = 12.0f + (prompt_h + 4.0f);
+    if (icon_w > 0) {
+        float const gap    = 8.0f;
+        int         icon_h = icons_height(ICON_F4);
+        float       icon_y = y + prompt_h / 2.0f - (float)icon_h / 2.0f;
+        float       text_x = x_margin + (float)icon_w + gap;
+        icons_blit(fb, ICON_F4, x_margin, icon_y);
+        rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, text_x, y, prompt);
+    } else {
+        char const* fallback = "F4 to pause";
         rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
     }
 }
@@ -770,6 +791,48 @@ static void draw_score_readout(game_state_t const* g) {
     pax_vec2f sz = rendertext_size(NULL, text_h, buf);
     rendertext_draw(fb, 0xFFFFFF6Bu, NULL, text_h,
                     fbw - sz.x - 12.0f, 12.0f, buf);
+}
+
+// Top-right HUD slot 1 — stage number. Same upcoming-stage rule as
+// the rest-area banner: during a rest area between stages N and
+// N+1, w->stage is still N, so we add 1 so the HUD shows the same
+// number as the banner above. Green to match the banner.
+static void draw_stage_readout(world_state_t const* w) {
+    int const stage = (int)w->stage + (w->area.type == AREA_TYPE_REST ? 1 : 0);
+    char      buf[32];
+    snprintf(buf, sizeof(buf), "Stage: %d", stage);
+    float const text_h = 18.0f;
+    pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
+    float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
+    rendertext_draw(fb, GAME_BOOSTER_FRONT_COLOR, NULL, text_h,
+                    x, 12.0f + (text_h + 4.0f), buf);
+}
+
+// "Stage: N" banner shown during rest areas (between stages and at
+// run start). Translucent dark panel sized to fit the text, centred
+// horizontally near the top of the screen.
+static void draw_stage_banner(int stage) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Stage: %d", stage);
+
+    float const fbw    = pax_buf_get_widthf(fb);
+    float const fbh    = pax_buf_get_heightf(fb);
+    float const text_h = 48.0f;
+    pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
+
+    int const pad_x = 32;
+    int const pad_y = 14;
+    int const pw    = (int)sz.x + 2 * pad_x;
+    int const ph    = (int)text_h + 2 * pad_y;
+    int const px    = (int)((fbw - (float)pw) * 0.5f);
+    int const py    = (int)(fbh * 0.04f);
+
+    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
+
+    float const tx = (fbw - sz.x) * 0.5f;
+    float const ty = (float)py + (float)pad_y;
+    rendertext_draw(fb, GAME_BOOSTER_FRONT_COLOR, NULL, text_h, tx, ty, buf);
 }
 
 // Build the daily seed from the RTC date — `year*10000 + month*100
@@ -1387,8 +1450,17 @@ void app_main(void) {
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
                 game_draw_sparks(fb, &game);
+                if (world.area.type == AREA_TYPE_REST) {
+                    // Rest areas (pre-stage-1 lead-in + between-stage
+                    // breathers) show the upcoming stage number.
+                    // w->stage is N during the rest that leads into
+                    // stage N+1, and 0 during the pre-run rest.
+                    draw_stage_banner((int)world.stage + 1);
+                }
                 draw_exit_hint();
+                draw_pause_hint();
                 draw_score_readout(&game);
+                draw_stage_readout(&world);
                 draw_speed_readout(game.ship_speed_z);
                 draw_sun_readout(game.sun_y);
                 draw_boost_indicator(&game);
@@ -1423,7 +1495,11 @@ void app_main(void) {
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
+                if (world.area.type == AREA_TYPE_REST) {
+                    draw_stage_banner((int)world.stage + 1);
+                }
                 draw_score_readout(&game);
+                draw_stage_readout(&world);
                 draw_sun_readout(game.sun_y);
                 draw_pause_overlay();
                 draw_exit_hint();
@@ -1467,9 +1543,13 @@ void app_main(void) {
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
+                if (world.area.type == AREA_TYPE_REST) {
+                    draw_stage_banner((int)world.stage + 1);
+                }
                 draw_game_over_overlay();
                 draw_exit_hint();
                 draw_score_readout(&game);
+                draw_stage_readout(&world);
                 draw_sun_readout(game.sun_y);
 
                 if (pickup_pressed) {

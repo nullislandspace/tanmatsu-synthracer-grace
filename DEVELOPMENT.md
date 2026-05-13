@@ -1624,6 +1624,50 @@
     drop one in the gap of the next gate, rest dumps any
     leftovers on entry.
 
+- 2026-05-13 — **Stage banner + pre-stage-1 rest area.**
+  Rest areas (the breathers between obstacle stages, plus the
+  new run-start rest) now show a big green "Stage: N" banner
+  top-centre, sized to the text with a translucent dim panel
+  behind it (same `direct_565_dim_rect` as the menu panels).
+  N is the *upcoming* stage — during the rest that leads into
+  stage N+1, `world.stage` is still N (the rollover happens
+  when rest ends), so we display `world.stage + 1`. World
+  init now sets `world.stage = 0` and initialises an
+  `AREA_TYPE_REST` area *before* the first stage; when that
+  rest ends, the existing area-done handler fires
+  `start_stage(0 + 1) = start_stage(1)` — no special-casing
+  in the transition logic. The pre-stage-1 rest still spawns
+  its `GAME_BOOSTERS_PER_REST` quota so the player gets a
+  greeting boost before any obstacles arrive.
+
+- 2026-05-13 — **HUD additions: F4 pause hint + stage line.**
+  Left side gained a second hint slot below "F1 to exit":
+  `draw_pause_hint()` mirrors the F1 pattern with the F4 icon
+  and "to pause" text. Drawn only during PLAYING — PAUSED
+  hides it because the pause overlay's footer already says
+  "F4 to resume", and menus / slot-select / game-over have no
+  pause concept so the hint would mislead.
+
+  Right side gained a green "Stage: N" line at slot 1
+  (between `score=` and `v=`). Same upcoming-stage rule as
+  the banner — banner and HUD always agree on the displayed
+  stage. Drawn during PLAYING / PAUSED / GAME_OVER so the
+  context is preserved through the freeze.
+
+- 2026-05-13 — **Obstacle wall-clearance.** Cube and booster
+  spawners used to distribute x over the full track
+  `[-TRACK_HALF_WIDTH, TRACK_HALF_WIDTH]`, so an obstacle at
+  the extreme would have its outer face poking through the
+  side wall by `half_w`. Now `cube_spawn_pixel`,
+  `cube_spawn_big`, and `booster_spawn` all clamp the
+  random-x range to `±(TRACK_HALF_WIDTH - half_w)`:
+  - Pixel cubes: ±4.6 (half_w 0.4)
+  - Big blocks: ±4.2 (half_w 0.8)
+  - Boosters: ±4.6 (half_w 0.4)
+  `booster_spawn_at` (used by the gateway gap-booster path)
+  is unchanged — it takes explicit coords that the gateway
+  generator already constrains.
+
 ---
 
 ## Future FPS improvements
