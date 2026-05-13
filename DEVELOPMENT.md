@@ -10,7 +10,7 @@
 
 ## Current Status
 
-**Phase: Phase 5 complete; persistence + scoring + menus + bridges area landed; Phase 6 (Tris + multiplier) next**
+**Phase: Phases 5 + 7 complete; persistence + scoring + menus + bridges + dynamic gateways landed; audio (mixer + procedural music + procedural SFX + master volume) landed 2026-05-13. Phase 6 (Tris + multiplier) next.**
 
 | Phase | Description | State |
 |-------|-------------|-------|
@@ -20,8 +20,8 @@
 | 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles share one pinhole projection; obstacles render as 3D cubes with per-face culling and near-plane clipping; continuous side walls along the track edges, all stored in the same obstacle pool ready for collision in Phase 4 |
 | 4 | Collision + game over | ✅ TITLE → PLAYING → GAME_OVER state machine; AABB collision against the unified obstacle pool with a boundary-obstacle position rule (scrape on side walls, head-on on any playfield obstacle ahead); push-out resolution + continuous scrape-floor/recovery speed dynamics; per-frame red radial-burst sparks at the banked wingtip while scraping |
 | 5 | Sun timer + shadow + boost | ✅ done — sun, shadows, stall, full-sunset, boost pickups all landed |
-| 6 | Tris + multiplier | ⬜ not started |
-| 7 | Audio + volume keys | ⬜ not started |
+| 6 | Tris + multiplier | ⬜ not started — design updated 2026-05-14: pickup-event scoring (Tri = 5 base pts, booster = 10 base pts, × multiplier), monotonic `pickups_tri` counter (HUD reads `% 5`), top-left opaque grey HUD panel with **4-slot** Tri progress row + multiplier text (5th Tri ticks the multiplier and resets the row, so it's never displayed), ascending pentatonic 5-note plink SFX (the 5th note is the multiplier-bump cue). Tri object copied from `objects/booster.c`, painted blue. Booster shape upgrades pyramid → rotating regular icosahedron (12 verts / 20 faces / 30 edges, ~1 Hz spin around Y, faceted-gem rendering with face-normal lighting). Per-area spawn rules locked: pixel_field half-count / big_blocks equal-count (random + rejection), gateways + dynamic_gateway use the non-booster hole, dynamic_passage one per flipping cube in the clutter, bridges one per bridge on a random-angle line, rest area (except pre-stage-1 lead-in) 10 Tris + booster on a quadratic-Bézier S-curve. Per-run + all-time Tri totals tracked via the existing `pickups_tri` field in `run_stats_t`. See the 2026-05-13 / 2026-05-14 Phase 6 design-update decisions-log entries. |
+| 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
 | 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts). Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, proper main menu, seed-input subscreen, stats screen, basic scoring + per-slot stats tracking are the work for this phase. MVP complete after the rest of this phase. |
 | 9 | Pickups & attachments | ⬜ not started |
 | 10 | Regions | ✅ dissolved into the stage + area system — content variation is added incrementally as stages and area types land (the recent flipping_cube / dynamic_passage / dynamic_gateway additions are concrete examples), rather than as a discrete 7-region table cut-in |
@@ -2197,6 +2197,451 @@
   scrape held over the pause boundary would skip its restart
   edge and stay silent the rest of the contact.
 
+- 2026-05-13 — **Phase 6 design update: Tri pickups + pickup-event
+  scoring + top-left multiplier HUD.** The original Phase 6
+  sketch (`Implementation Phases` numbered item 6, plus the
+  `game.c` Module Responsibilities Multiplier bullet) was a few
+  short lines. Updating it now in the same pre-implementation
+  pass that finished Phase 7, while the design choices are fresh.
+
+  **What's diverging from the original plan.**
+    - **Scoring model is pickup-event-driven, not continuous.**
+      Old design: `score += ship_speed_z * dt * multiplier` each
+      frame. New design: score advances only on pickup events.
+      A **Tri pickup = 5 base points**, a **speed-booster pickup
+      = 10 base points**, each multiplied by the *current*
+      multiplier at the moment of pickup. The continuous
+      distance-based accumulation goes away — `distance_traveled`
+      stays (it's a stat, still useful for the all-time stats
+      panel), but it no longer drives `score`. Rationale: the
+      pickup-driven model is more legible to the player ("I
+      collected that, the number went up by N") and makes the
+      multiplier feel meaningful as a per-event amplifier rather
+      than a per-frame scalar that's hard to see moving.
+    - **Multiplier mechanic: fill-and-reset, not accumulating.**
+      Original sketch said "every 5 Tris collected → +1". New
+      design: a visible Tri counter goes 0/5 → 1/5 → 2/5 → 3/5 →
+      4/5 → multiplier++, counter resets to 0/5. The fill-and-
+      reset model gives a clear visible "almost there" / "just
+      bumped" rhythm in the HUD instead of a counter that only
+      moves arithmetically. Crash penalty (-5 to multiplier,
+      floor at 1 today) is unchanged from the original sketch;
+      Phase 11 will adjust the floor with metaprogression
+      level.
+
+  **Tri object — copy, don't share.** New
+  `main/objects/tri.{c,h}`, **copied** from `main/objects/
+  booster.c` (the existing pyramid-shaped pickup) rather than
+  shared. Same pyramid geometry, recoloured blue (front /
+  side / top / outline all in the cyan-blue band that matches
+  the synthwave palette). Copy-don't-share so the two objects
+  can drift apart independently — tris probably want their
+  own size, pulse rate, and spawn cadence over time without
+  being constrained by the booster's tuning. Cost is small
+  duplication (~150 lines).
+
+  **Scoring constants.** New `magicnumbers.h` block:
+    - `GAME_SCORE_TRI         5`
+    - `GAME_SCORE_BOOSTER    10`
+  Both are int (score is an integer count, not a float —
+  fits the user's "basis points" phrasing). `game.score`'s
+  current `double` type stays the same so we don't have to
+  touch save-format code; we just store integer values in it.
+
+  **Multiplier HUD — top-left grey box (refined 2026-05-14:
+  four slots, not five).** A new opaque (not translucent)
+  dark-grey panel anchored at the top-left corner, containing
+  two visual rows:
+    1. **Tri progress** — **four** small triangles, evenly
+       spaced left-to-right, filled in *blue* for collected
+       and *black* (outline only, or solid dark grey) for
+       the remaining slots toward the next multiplier bump.
+       Why four and not five: the 5th Tri *immediately* ticks
+       the multiplier and the counter resets to 0, so the 5th
+       slot would never be visually held — the moment it
+       would light up, the whole row resets. With four slots
+       the display goes 0/4 → 1/4 → 2/4 → 3/4 → 4/4 (all lit)
+       → next Tri pops the multiplier and clears back to 0/4.
+       Lit-slot count = `pickups_tri % 5` (which is always in
+       {0,1,2,3,4}, so it maps directly without a clamp).
+    2. **Current multiplier** — single line of text rendered
+       below the triangle row, e.g. `×3`.
+  The panel is *opaque* (unlike the menu dim-rect helper) so
+  the multiplier readout is always legible regardless of what
+  scenery sits underneath it. Suggested geometry: ~120 × 60
+  px panel, 4 triangle icons ~22 px wide at 4 px spacing,
+  multiplier text at ~28 px line height below.
+
+  **Plink note count is unchanged.** Even though the HUD only
+  shows four slots, the ascending plink SFX still plays five
+  distinct notes per multiplier cycle: pickups 1–4 audibly
+  fill the HUD (C5/D5/E5/G5), and pickup 5 — the one the HUD
+  never displays — plays the highest note (A5) at the same
+  moment the multiplier ticks. The 5th plink *is* the
+  "multiplier bumped" feedback; the HUD reset is the visual
+  confirmation. Slot index for the plink stays
+  `(pickups_tri - 1) % 5` so all five pitches still get used.
+
+  **HUD shuffle: push F1 / F4 hints down.** The existing
+  `draw_exit_hint()` (F1 icon at `y = 12`) and
+  `draw_pause_hint()` (F4 icon at `y = 34`) currently occupy
+  the corner where the new multiplier panel goes. Move both
+  hints down to clear the panel — easiest is to parameterise
+  their `y_top` (or just hardcode a new baseline of
+  `panel_bottom + 8`). The pause hint stays one line below
+  the exit hint, same +22 px spacing as today.
+
+  **What's already in place (no work needed).**
+    - `game_state_t.pickups_tri`, `.score`, `.multiplier`,
+      `.multiplier_max` fields already exist.
+    - `run_stats_t` already persists `pickups_tri` (sum-merged
+      into all-time on every `save_commit_run_end`) and
+      `multiplier_max` (peak-tracked).
+    - `OBSTACLE_KIND_PICKUP_TRI` enum value already exists,
+      with a `hit = OBSTACLE_HIT_IGNORE` placeholder in the
+      collision dispatcher ready to be replaced by the real
+      collect path.
+
+  **Tracking semantics — `pickups_tri` is monotonic per run.**
+  The HUD's 0/5 fill-and-reset display is purely cosmetic —
+  it reads `pickups_tri % 5` rather than carrying its own
+  state. The underlying `game_state_t.pickups_tri` counter
+  ticks up by 1 on every collect for the entire run and is
+  never reset mid-run (not by crashes, not by multiplier
+  bumps). At `save_commit_run_end` it gets copied into
+  `last_run.pickups_tri` and summed into
+  `all_time.pickups_tri` by the existing run_stats merge.
+  The all-time total is therefore the player's lifetime Tri
+  count across every saved run on the active slot, and the
+  per-run total is the count for that specific run (also
+  visible on the stats screen via `last_run.pickups_tri`).
+  Storing the total rather than the modulo means the stats
+  panel doesn't need any new bookkeeping.
+
+  **Multiplier-bump condition.** With the monotonic counter,
+  the multiplier ticks on the precise transitions: bump when
+  `pickups_tri % 5 == 0 && pickups_tri > 0` after the
+  increment. Crash penalty stays on the multiplier itself
+  (-5, floor 1); the Tri counter and HUD progress are not
+  rewound by a crash — that would feel doubly punishing for
+  a single mistake.
+
+  **Pickup SFX: melodic ascending plink.** New
+  `main/sfx/sfx_pickup_plink.{c,h}` — distinct from the
+  booster's `sfx_pickup_ding`. Frequency steps with the
+  Tri's slot in the current cycle so the player audibly
+  hears the HUD filling up. Use a C-major-pentatonic
+  ascending pattern (C5, D5, E5, G5, A5 — frequencies
+  523.25 / 587.33 / 659.25 / 783.99 / 880.00 Hz) so the
+  five pickups across a multiplier cycle form a brief
+  musical phrase that resolves on the 5th note as the
+  multiplier bumps. Implementation: pass the slot index
+  (0..4 = `(pickups_tri - 1) % 5` after increment) to the
+  factory function — e.g. `sfx_pickup_plink_play(int
+  slot_index)` — and the voice picks the frequency from a
+  static lookup. Shape: short sine pulse, ~5 ms attack,
+  ~140 ms decay, no noise component (it should sound
+  bell-like, not a percussion hit). Amplitude similar to
+  the ding (around 0.50 per-voice nominal, scaled by the
+  SFX master gain).
+
+  **Estimated touch points.**
+    - `main/objects/tri.{c,h}` — new, copied from
+      `objects/booster.c`.
+    - `main/sfx/sfx_pickup_plink.{c,h}` — new, ascending-
+      pentatonic pickup tone driven by the in-cycle slot
+      index.
+    - `main/magicnumbers.h` — `GAME_SCORE_TRI`,
+      `GAME_SCORE_BOOSTER`, optional tri-specific tuning
+      constants.
+    - `main/game.c` — replace the `IGNORE` placeholder in the
+      `OBSTACLE_KIND_PICKUP_TRI` case with the real collect:
+      increment `pickups_tri`, bump score by `GAME_SCORE_TRI
+      × multiplier`, fire `sfx_pickup_plink_play((pickups_tri
+      - 1) % 5)`, and if `pickups_tri % 5 == 0` then
+      `multiplier++` (the HUD reads `pickups_tri % 5` so no
+      explicit counter reset is needed). Add the
+      `+= GAME_SCORE_BOOSTER × multiplier` to the existing
+      booster pickup branch. Remove the
+      `score += dz * multiplier` continuous accumulator from
+      `game_after_collide`.
+    - `main/world.c` or one of the area generators — add Tri
+      spawn cadence (probably scattered through
+      `pixel_field` / `big_blocks` at ~5–8 per stage to start
+      with, tuneable).
+    - `main/main.c` — new `draw_multiplier_panel()` helper
+      (opaque grey rect + **4** triangles + multiplier text);
+      `draw_exit_hint()` / `draw_pause_hint()` baseline
+      pushed down. No separate "multiplier bumped" cue —
+      the 5th plink resolving on the high pentatonic note,
+      played at the same instant as the HUD resets to 0/4,
+      is the audio + visual confirmation together.
+    - `main/CMakeLists.txt` — `main/objects/tri.c` and
+      `main/sfx/sfx_pickup_plink.c` added to `APP_SOURCES`.
+
+  **Per-area Tri spawn rules (locked 2026-05-14).** Each area
+  type knows how to populate itself with obstacles; the Tri
+  spawner is the same shape — owned by the area, not by a
+  global rule — so the cadence and density can be tuned per
+  area without one rule's edge cases pulling on every other
+  area. Locked rules:
+
+  - **`pixel_field`** — Tri count = **half** the number of
+    pixel-cube blocks the area would spawn. Tris are placed
+    at random positions within the playfield, with collision
+    avoidance: must not embed in either border wall, must not
+    overlap any other already-placed obstacle (cube or other
+    Tri). Pixel field emits blocks on a cadence
+    (`PIXEL_INTERVAL_Z`), so simplest implementation is a
+    second cadence at twice the interval that emits a Tri,
+    each rejection-sampled against the obstacle pool. Cap
+    retries (e.g. 8) and skip the slot rather than blocking
+    on a full pool.
+
+  - **`big_blocks`** — Tri count = **equal to** the number of
+    big-cube blocks. Same placement + collision-avoidance
+    rule as pixel field. Tighter packing because there are
+    fewer / larger blocks; rejection sampling still works.
+
+  - **`gateways`** — every gateway hole that's **not** holding
+    a speed booster gets a Tri in the hole instead. The
+    Tri sits at `(hole_x, WORLD_Z_FAR_SPAWN, 0)` — same z as
+    the wall slabs, centred on the chosen hole. The
+    boosters-owed gate already decides "booster vs no
+    booster" per gateway; we simply add a `// else spawn
+    Tri` branch.
+
+  - **`dynamic_gateway`** — same rule as `gateways`: every
+    wall not consuming a booster from `boosters_owed` gets a
+    Tri in its hole. The flipping cube behind the hole is
+    a separate object — the Tri sits in front of (or
+    co-located with) the booster slot at
+    `WORLD_Z_FAR_SPAWN`, not at the cube's z offset.
+    Because the hole position is fixed per-area in this
+    type, every Tri in a given dynamic_gateway area lands
+    at the same x.
+
+  - **`dynamic_passage`** — one Tri **per flipping cube**.
+    Placement is in the heavy pixel-field clutter that runs
+    alongside the flipping cubes, randomly within the
+    playfield with the same collision-avoidance rule as the
+    standalone pixel_field. The Tri's z is whatever the
+    clutter scheduler emits at (i.e. it goes into the same
+    emission timer as the clutter pixel cubes, displacing
+    the next cube slot rather than overlapping it). Yields
+    4–7 Tris in a dynamic_passage area (one per flipping
+    cube, count is `PASSAGE_FLIP_MIN`…`PASSAGE_FLIP_MAX`).
+
+  - **`bridges`** — one Tri **per bridge**. Placement is a
+    **straight line** across all the bridges' z positions,
+    with the line's start-x and end-x picked once per area
+    from `[-TRACK_HALF_WIDTH, +TRACK_HALF_WIDTH]` (with a
+    small inset for the Tri's half-width so the endpoints
+    don't clip the border walls). The line can be at any
+    angle including degenerate (start ≈ end). Each Tri's z
+    is the corresponding bridge's z, x is the lerp position
+    along the line. Single line per area drawn at init;
+    bridge-tick co-emits the Tri when it emits each bridge.
+    No collision avoidance needed against the bridge
+    itself — bridges are visual-only spans the player flies
+    under, the Tri at ground level under the bridge is
+    geometrically in a different y-band.
+
+  - **`rest` (except the pre-stage-1 lead-in)** — 10 Tris in
+    a **smooth S-curve**, plus the speed booster as the 11th
+    element on the same curve. Curve construction:
+      - **Start x** is procedurally picked at init: midway
+        between the centre line and one of the two walls,
+        i.e. `start_x = ±0.5 * TRACK_HALF_WIDTH` with the
+        sign drawn from `world_xorshift32`. So the first
+        Tri sits at half-width-left or half-width-right of
+        centre.
+      - **End x** is the mirror of the start (sign flipped),
+        so the curve sweeps from one half-width offset to
+        the opposite one.
+      - **Tangent at start** is along +z (straight ahead),
+        and the curve bends toward the end x over its
+        length. A quadratic Bézier with control points
+        `P0 = (start_x, z0)`, `P1 = (start_x, z_mid)`,
+        `P2 = (end_x, z_end)` does this exactly: zero
+        derivative in x at t=0 (the "starts out straight"
+        property), smooth bend to the mirror by t=1.
+        Sample at `t = i / 10` for `i = 0..10` to get the
+        11 points: positions 0–9 are Tris, position 10 is
+        the booster.
+      - The booster placement here **overrides** the usual
+        booster scheduling: rest areas already exempt
+        themselves from the stage's booster cadence, so
+        this just means "always spawn one booster, at the
+        curve endpoint." `boosters_owed` is still consumed
+        (= 1) so we don't double-spawn one later.
+      - The **pre-stage-1 rest** (the lead-in before
+        stage 1 starts) is deliberately excluded — the
+        player hasn't seen a Tri yet, the HUD multiplier
+        panel reads 0/5 with multiplier ×1, and we want
+        them to encounter Tris in gameplay first rather
+        than discover them in a rest area before learning
+        the rules. The world generator already marks this
+        rest specially (banner reads "STAGE 1" once it
+        leaves, while regular rest areas show "STAGE N+1").
+        Reuse that distinguishing condition.
+
+  **Implementation note on rejection sampling.** The
+  pixel_field / big_blocks / dynamic_passage rules use
+  random placement with collision avoidance against the
+  existing obstacle pool. The pool is small (≤ 512 entries,
+  most active at any time ≈ tens), so an O(N) lateral-
+  distance check per retry is cheap. Standard pattern:
+  draw a candidate `(x, z)`, walk the active pool, reject
+  if any obstacle's footprint overlaps (with a small
+  padding for visual breathing room — maybe 1.5×
+  `TRI_HALF_W`). Cap retries at 8; if the slot can't be
+  filled, skip silently. Tris are scoring incentive, not
+  mandatory path elements — one missed slot per area is
+  fine.
+
+  **Booster shape upgrade — pyramid → rotating regular
+  icosahedron (added 2026-05-14).** Since the Tri inherits
+  the pyramid shape (copy-don't-share), the speed booster
+  needs a fresh visual identity so the two pickups read as
+  obviously different at a glance. Move the booster to a
+  **slowly-rotating regular icosahedron** — looks like a
+  faceted gem, fits the synthwave aesthetic, and is
+  visually unambiguous next to the Tri's pyramid.
+
+  Geometry. The regular icosahedron has 12 vertices, 20
+  triangular faces, 30 edges. Vertices using the golden
+  ratio φ = (1+√5)/2 ≈ 1.618:
+  ```
+      (0, ±1, ±φ), (±1, ±φ, 0), (±φ, 0, ±1)
+  ```
+  All 12 vertices sit at distance `√(1+φ²) = √(2+φ) ≈ 1.902`
+  from the origin. Scaled so the resulting body fits within
+  `GAME_BOOSTER_HALF_W` (0.4u) — i.e. multiplied by
+  `GAME_BOOSTER_HALF_W / √(2+φ)`. The icosahedron's existing
+  AABB (collision footprint) is unchanged; the visual is
+  the only change. Face and edge tables are `static const`
+  arrays in `objects/booster.c`.
+
+  Rotation. Continuous rotation around the Y axis (vertical)
+  at ~1 full rotation per second. Rotation phase is a
+  per-instance float in the obstacle's 128-byte scratch
+  buffer; the booster's physics callback advances it by
+  `2π / period × dt` each frame. The Y-axis is the natural
+  choice — the icosahedron has a 5-fold rotation symmetry
+  axis through opposite vertices, and putting one of those
+  vertices at the top gives it a clean spinning-gem look.
+  All boosters in the scene share phase so they tick in
+  lockstep (same trick the current pulse uses — one global
+  `time_s` value rather than per-obstacle state).
+
+  Rendering. Existing `render_booster_pyramid()` is replaced
+  by `render_booster_icosahedron()` along the same code
+  path (the kind-dispatched render in `render.c`'s pickup
+  branch). Per-frame steps:
+    1. Apply rotation matrix (just `cos θ`, `sin θ` around
+       Y) to the 12 vertex positions. ~24 multiplies per
+       booster — trivial.
+    2. Translate to world position, project the 12 vertices
+       via `render_project()` to 2D screen-space.
+    3. For each of the 20 faces, compute the face normal in
+       world space (rotated), back-face cull if `n · (cam -
+       face_centre) ≤ 0`. ~10 faces survive on average.
+    4. Draw each visible face via `direct_565_tri` with
+       a face-tinted colour — keep the green booster
+       palette but vary brightness by face normal vs an
+       imaginary light direction (one dot product per
+       face) so the gem looks faceted rather than flat.
+       Cheap "lighting": tint factor =
+       `0.6 + 0.4 * max(0, dot(face_normal, light_dir))`,
+       with `light_dir` set to a fixed top-down-ish
+       vector.
+    5. Stroke every visible edge with
+       `GAME_BOOSTER_OUTLINE_COLOR` (the existing bright
+       green) via `direct_565_line`. The wireframe + the
+       face fills together is what makes it read as a
+       glowing gem rather than a faceted blob. Edge list
+       is built from the face list at compile time (each
+       edge is shared by exactly two faces, draw each
+       once even if both faces are visible).
+
+  Pulse behaviour. The existing booster has a brightness
+  pulse driven by `GAME_BOOSTER_PULSE_PERIOD_S /
+  GAME_BOOSTER_PULSE_AMPLITUDE`. The rotation gives the
+  icosahedron its own attention-grabbing motion, so the
+  pulse is redundant — **drop the pulse**. The pulse
+  constants in `magicnumbers.h` can stay parked
+  (`PULSE_AMPLITUDE` = 0 effectively disables it) or be
+  removed if no other object grows to use them.
+
+  Tunables (suggested defaults in `magicnumbers.h`):
+    - `GAME_BOOSTER_ROTATION_PERIOD_S 1.0f` — one full
+      rotation per second; slow enough that the player
+      can read each face, fast enough to draw the eye.
+    - The icosahedron's vertex / face / edge tables are
+      hardcoded in `objects/booster.c` — they're not
+      tunable, they're geometry.
+
+  Touch points (added on top of the Phase 6 list above):
+    - `main/objects/booster.c` — new vertex / face / edge
+      tables, rotation phase in scratch, new draw callback
+      (or kind-dispatched render function in `render.c`).
+    - `main/render.c` — replace `render_booster_pyramid()`
+      with `render_booster_icosahedron()`. The new function
+      lives alongside the old until the migration is done.
+    - `main/magicnumbers.h` — add
+      `GAME_BOOSTER_ROTATION_PERIOD_S`. Pulse constants
+      can be set to 0 amplitude or removed.
+
+  Why icosahedron specifically (and not, say, a dodecahedron
+  or a sphere). Icosahedron has the most triangular faces
+  of the regular polyhedra (20) — that gives it the most
+  facets to catch the light while still being clearly a
+  *gem* and not a low-poly sphere. The dodecahedron's
+  pentagonal faces would force a face-triangulation step in
+  the renderer. A UV-sphere would need many more faces to
+  look round and would defeat the "faceted gem" aesthetic.
+  The icosahedron is the right primitive for "slowly-
+  rotating loot crystal".
+
+  **Collision stays AABB — visual-only change.** The current
+  collision model (`game_collide()` in `main/game.c`) is a
+  swept 2D AABB on the **xz-plane**: each obstacle has
+  `(x_world, z_world, half_w, half_d, height)` stored at
+  spawn, but the actual head-on / scrape / pickup test
+  walks the pool and tests only **x-overlap + swept-z-overlap**
+  against the ship's AABB. There is no y-axis test — the
+  ship is treated as always at `y = 0`, no "fly under"
+  semantics today. The `height` field is metadata: it
+  drives shadow-length rendering and is reserved for a
+  future jump pickup that would unlock fly-under behaviour,
+  but it's not part of any current collision dispatch.
+
+  Consequence for the icosahedron upgrade: **collision
+  math is unchanged**. The booster's AABB at spawn
+  (`half_w = GAME_BOOSTER_HALF_W = 0.4`, same for `half_d`,
+  `height = GAME_BOOSTER_HEIGHT = 0.8`) stays the same; the
+  icosahedron is scaled to sit inside that 0.8 × 0.8 × 0.8
+  bounding box. Same player-favouring "AABB is generous"
+  feel the existing pyramid pickup has — corner-clip near-
+  misses still count as collected, by design. Per-vertex /
+  per-face collision against the rotating icosahedron is
+  *not* added (would cost ~12 rotated-vertex transforms
+  and per-face plane tests every frame per booster, with
+  no gameplay benefit since the AABB is already
+  intentionally forgiving). A tighter cylindrical
+  `(Δx² + Δz²) < r²` check is parked as a possibility
+  via the existing per-obstacle `collide` callback hook
+  (same hook `flipping_cube` uses today) — easy to add
+  later if playtesting shows the AABB is *too* generous,
+  but not done in Phase 6.
+
+  **What's deliberately not in Phase 6.**
+    - Metaprogression multiplier floor (lv6 → 2 etc.) — Phase 11.
+    - Tri colour / shape variation per region — Phase 13.
+    - "Air tris" / "tris in one region" challenge variants —
+      Phase 11.
+
 ---
 
 ## Future FPS improvements
@@ -2643,8 +3088,27 @@ the function makes it explicit and lets us animate the sun.
   `sun_seconds_left` AND clamps `ship.speed` back to `base_speed` so it
   doubles as an "escape from a shadow stall" tool. Reaching `<= 0` ends
   the run.
-- Multiplier: every 5 Tris collected → +1; crash drops by 5; floor is
-  determined by player level (lv6→2, lv12→3, lv23→4, lv24→max).
+- Multiplier (Phase 6 — design refreshed 2026-05-13 /
+  2026-05-14). `game_state_t.pickups_tri` is **monotonic per
+  run**: it counts every Tri collected and never resets
+  mid-run. The HUD's 0/5 fill-and-reset display is just
+  `pickups_tri % 5` — cosmetic, no separate state. On every
+  Tri pickup: `pickups_tri++`; if it's now a non-zero
+  multiple of 5, `multiplier++`. The "(pickups_tri - 1) % 5"
+  slot index drives both the HUD's lit-triangle position
+  and the ascending pentatonic plink SFX. Crash drops
+  `multiplier` by 5; floor is `1` until Phase 11
+  metaprogression raises it (lv6→2, lv12→3, lv23→4,
+  lv24→max). Tri counters and HUD progress are *not* rewound
+  by a crash. Scoring is **pickup-event driven**, not
+  continuous: Tri pickup adds `GAME_SCORE_TRI × multiplier`,
+  booster pickup adds `GAME_SCORE_BOOSTER × multiplier`. The
+  previous `score += dz * multiplier` per-frame accumulation
+  is removed; `distance_traveled` is still tracked for the
+  stats panel but no longer drives `score`. Persistence is
+  free — `last_run.pickups_tri = pickups_tri` at run end and
+  the existing `run_stats_merge_into_all_time` sums it into
+  the all-time total.
 
 ### `render.c` — projection and scene draw
 
@@ -3085,11 +3549,51 @@ Done in this order so each phase produces a runnable build:
    the visual sun (verify it disappears behind the mountain silhouette),
    end run on sunset. Implement `is_ship_in_shadow()` and the speed
    slowdown. Spawn boost pickups; collect → +time and speed reset.
-6. **Tris + multiplier**: pickup pool extended, draw blue triangles,
-   multiplier rule, score accumulator, HUD score readout.
-7. **Audio**: spawn mixer task, embed first 4 SFX, trigger on
-   pickup/crash/boost. Wire volume keys + audio-jack handling into the
-   event drain. Test that volume persists to launcher.
+6. **Tris + multiplier**. Design updated 2026-05-13 (then
+   refined 2026-05-14) — see the matching decisions-log
+   entries for the full reasoning. Headline changes from the
+   original sketch: scoring is pickup-event driven
+   (Tri = 5 base pts, booster = 10 base pts, both × the
+   current multiplier) rather than per-frame `distance × mult`;
+   `pickups_tri` is monotonic per run so persistence is free,
+   and the HUD reads `pickups_tri % 5` for display; the
+   top-left opaque grey panel shows **four** Tri-slot
+   triangles + the current multiplier on a second line — the
+   5th Tri immediately ticks the multiplier and resets the
+   row, so the 5th slot is never actually held. Per-pickup
+   audio: new ascending-pentatonic plink SFX with five
+   distinct pitches (C5/D5/E5/G5/A5 per slot index) so the
+   5 pickups in a multiplier cycle form a brief musical
+   phrase, the 5th plink doubles as the audio cue for the
+   multiplier bump. Per-area Tri spawn rules locked
+   (pixel_field / big_blocks / both gateway types /
+   dynamic_passage / bridges / rest area). The Tri object
+   is copied (not shared) from `main/objects/booster.c` so
+   the two pickups can drift apart independently — and as
+   part of that drift, the **booster shape upgrades from
+   a pyramid to a slowly-rotating regular icosahedron**
+   (12 verts, 20 triangular faces, 30 edges, ~1 Hz Y-axis
+   spin, faceted-gem rendering with cheap face-normal
+   lighting) so the two pickups read as visually
+   unambiguous side-by-side. Crash penalty (-5 to
+   multiplier, floor 1) and "fill the score readout with
+   a meaningful number" goals are unchanged.
+7. ✅ **Audio** (landed 2026-05-13). Diverged from the original
+   "embed PCM via xxd" plan: SFX are procedurally generated by
+   shared DSP primitives (`main/audio_dsp.{c,h}` — oscillators,
+   ADSR, biquad), music is a procedural synthwave generator
+   seeded from a per-run `music_prng` split from the world seed,
+   and the mixer (`main/audio_mixer.c`) talks to sources through
+   a swappable `music_source_t` trait so a future `.mod` /
+   MP3 / MIDI backend slots in without touching the mixer.
+   Master gains in `magicnumbers.h` set the music-vs-SFX balance
+   with headroom for 5 concurrent SFX. Volume keys + audio-jack
+   hot-swap go through the upstream `nvs_settings_*` module
+   (cherry-picked from `tanmatsu-template-grace`) so the values
+   match the launcher's. Pause stops SFX but keeps music. See
+   the 2026-05-13 decisions-log entries for the full story
+   (Phase 7 design, master volume integration, audio first-light
+   + tuning).
 8. **Daily seed + custom seed + persistence**: read RTC, derive daily
    seed, persist highscore/level/points to NVS namespace `synthracer`.
    Validate the "last known date" anti-cheat. Add the title-screen
