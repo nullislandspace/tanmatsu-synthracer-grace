@@ -2,8 +2,10 @@
 
 #include <math.h>
 
+#include "magicnumbers.h"
 #include "objects/booster.h"
 #include "objects/bridge.h"
+#include "objects/tri.h"
 #include "objects/wall.h"   // for WALL_SEGMENT_LEN / WALL_SEGMENT_HALF_D
 #include "world.h"
 
@@ -45,6 +47,18 @@ void area_bridges_init(area_state_t* a, uint16_t stage, uint32_t* prng) {
     a->next_event_z       = gap;      // one gap of lead-in before the first bridge
     // boosters_owed deliberately left untouched so unfulfilled
     // boosters carry over from the previous area into this one.
+
+    // Phase 6 Tri line. Pick start- and end-x independently and
+    // uniformly within the playfield (inset by a Tri half-width so
+    // endpoints can't clip the border wall). Each bridge gets a Tri
+    // at the lerp position along this line; the line can be at any
+    // angle including degenerate (start ≈ end) — that's a feature,
+    // not a bug, it gives the player occasional "stacked column of
+    // Tris" runs that are easy mode visually.
+    float const tri_x_extent = TRACK_HALF_WIDTH - GAME_TRI_HALF_W;
+    a->tri_line_x0 = (world_frand(prng) * 2.0f - 1.0f) * tri_x_extent;
+    a->tri_line_x1 = (world_frand(prng) * 2.0f - 1.0f) * tri_x_extent;
+    a->passage_mirror = n;  // total bridge count (see world.h overload doc)
 }
 
 bool area_bridges_tick(world_state_t* w, area_state_t* a, float dz) {
@@ -60,6 +74,22 @@ bool area_bridges_tick(world_state_t* w, area_state_t* a, float dz) {
 
     while (a->next_event_z <= 0.0f && a->gates_remaining > 0) {
         bridge_spawn(w, spawn_z);
+
+        // Phase 6: one Tri per bridge, placed at the lerp position
+        // along the area's pre-picked line. Bridge index is
+        // (n_total - gates_remaining) BEFORE we decrement
+        // gates_remaining below — index 0 for the first spawn,
+        // n_total-1 for the last. With n_total == 1 we use t = 0
+        // (the line's start endpoint) to avoid a divide-by-zero.
+        int   const n_total      = a->passage_mirror;
+        int   const bridge_index = n_total - a->gates_remaining;
+        float       t            = 0.0f;
+        if (n_total > 1) {
+            t = (float)bridge_index / (float)(n_total - 1);
+        }
+        float const tri_x = a->tri_line_x0 + (a->tri_line_x1 - a->tri_line_x0) * t;
+        tri_spawn_at(w, tri_x, spawn_z);
+
         a->gates_remaining--;
         a->next_event_z += a->gate_pad_z + thick;
 

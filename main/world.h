@@ -85,6 +85,11 @@ typedef struct area_state_s {
     //                    wall already spawned. Used to anchor the
     //                    area's booster spawn (if any) to the first
     //                    wall's hole exclusively.
+    //   BRIDGES:         total number of bridges in the area (Phase
+    //                    6) — needed at spawn time to compute the
+    //                    `t` parameter for the per-bridge Tri line
+    //                    lerp (t = (n_total - gates_remaining) /
+    //                    (n_total - 1)).
     // Unused / zeroed for other area types.
     int         passage_mirror;
     // DYNAMIC_PASSAGE only: z-units until the next pixel-field
@@ -97,6 +102,25 @@ typedef struct area_state_s {
     // fresh value is drawn next time the area is picked). Unused
     // for other area types.
     float       gate_hole_x;
+
+    // Phase 6 — Tri pickup spawn state. Used by area types whose
+    // Tri rule is a separate cadence rather than co-spawn with
+    // another event:
+    //   PIXEL_FIELD: emit a Tri every 2×PIXEL_INTERVAL (half-count
+    //                rule) on this counter, parallel to the cube
+    //                cadence on `next_event_z`.
+    //   BIG_BLOCKS:  emit a Tri every BIG_INTERVAL (equal-count
+    //                rule) on this counter.
+    // Other areas co-spawn Tris with their primary objects and
+    // ignore this field.
+    float       tri_event_z;
+
+    // BRIDGES only: line endpoints for the per-bridge Tri row.
+    // Picked once at area-init from a random angle within the
+    // playfield bounds. Each bridge co-spawns its Tri at the
+    // lerp position along this line (t = bridge_index / (n-1)).
+    float       tri_line_x0;
+    float       tri_line_x1;
 } area_state_t;
 
 typedef struct world_state_s {
@@ -156,3 +180,16 @@ uint32_t world_xorshift32(uint32_t* s);
 float    world_frand(uint32_t* s);                       // uniform [0, 1)
 float    world_lerp_by_stage(uint16_t stage, float at_one, float at_ten);
 float    world_stage_interval_scale(uint16_t stage);
+
+// Try to find a free `(x, z)` slot for a Tri (or any small pickup)
+// at the requested `z_target`. `half_w` is the proposed footprint
+// half-width on the x-axis; the function picks a candidate x
+// uniformly in the playfield with a wall inset of `half_w + pad`,
+// then rejects if any active obstacle's footprint overlaps the
+// candidate's AABB (with `pad` breathing room). Up to `max_tries`
+// retries; returns true and writes `*out_x` on success, false if
+// every candidate was rejected. `pad` should reflect "visible
+// breathing room" — ~1.5× the pickup half-width is a good default.
+bool world_find_free_x(struct world_state_s const* w, uint32_t* prng,
+                       float z_target, float half_w, float pad,
+                       int max_tries, float* out_x);

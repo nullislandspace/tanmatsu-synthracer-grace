@@ -7,7 +7,9 @@
 #include "areas/gateways.h"
 #include "areas/pixel_field.h"
 #include "areas/rest.h"
+#include "magicnumbers.h"
 #include "objects/booster.h"
+#include "objects/tri.h"
 #include "objects/wall.h"
 
 // --- PRNG / stage helpers ------------------------------------------
@@ -52,6 +54,50 @@ float world_stage_interval_scale(uint16_t stage) {
     if (s < 0.5f) s = 0.5f;
     if (s > 1.0f) s = 1.0f;
     return s;
+}
+
+bool world_find_free_x(world_state_t const* w, uint32_t* prng,
+                       float z_target, float half_w, float pad,
+                       int max_tries, float* out_x) {
+    // Candidate range inset from the wall by half_w + pad so the
+    // Tri's full footprint stays inside the playfield by at least
+    // `pad`. Z range for overlap testing is half_w + pad either
+    // side of z_target (same breathing budget on the depth axis).
+    float const inset    = half_w + pad;
+    float const x_extent = TRACK_HALF_WIDTH - inset;
+    if (x_extent <= 0.0f || max_tries <= 0) return false;
+
+    float const z_lo = z_target - half_w - pad;
+    float const z_hi = z_target + half_w + pad;
+
+    for (int attempt = 0; attempt < max_tries; attempt++) {
+        float const cand_x = (world_frand(prng) * 2.0f - 1.0f) * x_extent;
+        float const x_lo   = cand_x - half_w - pad;
+        float const x_hi   = cand_x + half_w + pad;
+
+        bool clash = false;
+        for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+            obstacle_t const* o = &w->obstacles[i];
+            if (!o->active) continue;
+
+            // AABB overlap on (x, z) with breathing-room pad on both.
+            float const o_x_lo = o->x_world - o->half_w;
+            float const o_x_hi = o->x_world + o->half_w;
+            float const o_z_lo = o->z_world - o->half_d;
+            float const o_z_hi = o->z_world + o->half_d;
+
+            if (x_hi > o_x_lo && x_lo < o_x_hi &&
+                z_hi > o_z_lo && z_lo < o_z_hi) {
+                clash = true;
+                break;
+            }
+        }
+        if (!clash) {
+            *out_x = cand_x;
+            return true;
+        }
+    }
+    return false;
 }
 
 // --- Area state machine --------------------------------------------
@@ -137,6 +183,53 @@ static bool area_tick(world_state_t* w, float dz) {
         case AREA_TYPE_REST:            return area_rest_tick           (w, a, dz);
     }
     return false;
+}
+
+// Phase 6: spawn the rest area's Tri + booster S-curve. 10 Tris
+// and one booster sampled along a quadratic Bézier whose control
+// points are picked so:
+//   - the start (t=0) sits midway between the centreline and one
+//     of the two walls (`start_x = ±0.5 × TRACK_HALF_WIDTH`),
+//     direction picked by the PRNG;
+//   - the curve's x-tangent at t=0 is zero — the curve "starts
+//     pointing straight ahead" — by setting the Bézier control
+//     point's x equal to the start's x;
+//   - the end (t=1) is the mirror of the start across the
+//     centreline, so the curve sweeps from one side of the track
+//     to the other.
+// z linearly spans most of the rest area's length, so the 11
+// pickups are visually spread out as the player traverses.
+//
+// The 11th sample (`i == 10`) is a booster, satisfying
+// GAME_BOOSTERS_PER_REST without a separate scatter spawn.
+//
+// Math: with P0.x = P1.x = start_x and P2.x = end_x, the Bézier
+// formula `(1-t)² P0 + 2(1-t)t P1 + t² P2` simplifies to
+//   x(t) = start_x · (1 − t²) + end_x · t²
+// which is the line we use.
+static void spawn_rest_tri_curve(world_state_t* w) {
+    float const half_offset = 0.5f * TRACK_HALF_WIDTH;
+    bool  const start_right = (world_xorshift32(&w->stage_prng) & 1u) != 0u;
+    float const start_x     = start_right ? +half_offset : -half_offset;
+    float const end_x       = -start_x;
+
+    // Spread the 11 samples over 70% of the rest area's length
+    // starting at WORLD_Z_FAR_SPAWN. Trailing 30% gives time for
+    // the player to traverse the curve before the next stage's
+    // first area begins spawning at the far plane.
+    float const z_first = WORLD_Z_FAR_SPAWN;
+    float const z_last  = WORLD_Z_FAR_SPAWN + WORLD_REST_LENGTH_Z * 0.7f;
+
+    for (int i = 0; i <= 10; i++) {
+        float const t  = (float)i / 10.0f;
+        float const x  = start_x * (1.0f - t * t) + end_x * (t * t);
+        float const z  = z_first + (z_last - z_first) * t;
+        if (i < 10) {
+            tri_spawn_at(w, x, z);
+        } else {
+            booster_spawn_at(w, x, z);
+        }
+    }
 }
 
 static void start_stage(world_state_t* w, uint16_t stage) {
@@ -254,17 +347,31 @@ void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
         if (w->area.type == AREA_TYPE_REST) {
             start_stage(w, (uint16_t)(w->stage + 1));
         } else if (w->stage_z_remaining <= 0.0f) {
+            // Between-stage rest area. This is the path that runs
+            // *after* stage 1 onwards — the pre-stage-1 lead-in at
+            // world_init() takes a different path and is
+            // deliberately excluded from the Tri curve below.
+            //
             // Capture leftovers before area_rest_init overwrites
             // most of the area state (it doesn't touch
             // boosters_owed, but read it explicitly so the intent
             // is local).
             int const leftover_boosters = w->area.boosters_owed;
             area_rest_init(&w->area);
-            int const total = leftover_boosters + GAME_BOOSTERS_PER_REST;
-            for (int i = 0; i < total; i++) {
+            w->area.boosters_owed = 0;
+
+            // Phase 6: spawn the 10-Tri + 1-booster quadratic-Bezier
+            // S-curve through the rest area. The booster on the
+            // curve fulfils GAME_BOOSTERS_PER_REST exactly.
+            spawn_rest_tri_curve(w);
+
+            // Leftover boosters carried over from the prior stage
+            // can't fit the curve cleanly — drop them on the floor
+            // at random x as a "make-good" so the player isn't
+            // robbed of accrued bonus pickups.
+            for (int i = 0; i < leftover_boosters; i++) {
                 booster_spawn(w);
             }
-            w->area.boosters_owed = 0;
         } else {
             start_next_area(w);
         }

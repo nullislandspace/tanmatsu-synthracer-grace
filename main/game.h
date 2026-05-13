@@ -107,6 +107,14 @@ typedef struct game_state_s {
     // it once per frame to fire `sfx_pickup_ding_play()`. Lives on
     // game_state so the audio side stays out of game logic.
     bool  just_picked_up_booster;
+
+    // Same pattern for the Tri pickup (Phase 6). `tri_pickup_slot`
+    // is the slot index 0..4 within the current multiplier cycle —
+    // used to pick the plink SFX's pitch (C5/D5/E5/G5/A5). Set to
+    // `(pickups_tri - 1) % 5` after the increment; ignored when
+    // `just_picked_up_tri` is false.
+    bool  just_picked_up_tri;
+    int   tri_pickup_slot;
 } game_state_t;
 
 // Reset the run (zeroes the spark pool too).

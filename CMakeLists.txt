@@ -24,6 +24,7 @@ set(APP_SOURCES
     main/objects/booster.c
     main/objects/bridge.c
     main/objects/flipping_cube.c
+    main/objects/tri.c
     main/areas/pixel_field.c
     main/areas/big_blocks.c
     main/areas/gateways.c
@@ -41,6 +42,7 @@ set(APP_SOURCES
     main/music/music_procedural.c
     main/sfx/sfx_engine_hum.c
     main/sfx/sfx_pickup_ding.c
+    main/sfx/sfx_pickup_plink.c
     main/sfx/sfx_crash.c
     main/sfx/sfx_scrape.c
     main/sfx/sfx_cube_bump.c

@@ -3,6 +3,7 @@
 #include "objects/booster.h"
 #include "objects/cube.h"
 #include "objects/flipping_cube.h"
+#include "objects/tri.h"
 #include "world.h"
 
 #define DYN_GATE_COUNT_MIN   3
@@ -100,20 +101,26 @@ bool area_dynamic_gateway_tick(world_state_t* w, area_state_t* a, float dz) {
     while (a->next_event_z <= 0.0f && a->gates_remaining > 0) {
         spawn_dyn_gate(w, a->gate_hole_x);
 
-        // Booster handling: only the FIRST wall in this area is
-        // eligible. Sits in the hole in front of the flipping cube
-        // (cube z = WORLD_Z_FAR_SPAWN + offset, booster at
-        // WORLD_Z_FAR_SPAWN). Subsequent walls do not consume from
-        // boosters_owed — any owed booster flagged later in the
-        // area carries over to the next area instead. This keeps
-        // the gameplay reward predictable: the first wall is the
-        // only "free" pass through the cube barrier.
+        // Pickup handling. Booster slot is reserved for the FIRST
+        // wall in this area, and only if one is owed by the stage
+        // scheduler — that one "free pass" through the cube
+        // barrier is the gameplay reward. Every other hole gets a
+        // Tri instead (Phase 6 rule: every wall not consuming a
+        // booster gets a Tri). The Tri sits in the hole at
+        // WORLD_Z_FAR_SPAWN, in front of the flipping cube which
+        // is at WORLD_Z_FAR_SPAWN + DYN_GATE_CUBE_Z_OFFSET — so
+        // the player collects the Tri before the cube reaches its
+        // landed-and-blocking position.
         if (a->passage_mirror == 0) {
             if (a->boosters_owed > 0) {
                 booster_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
                 a->boosters_owed--;
+            } else {
+                tri_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
             }
             a->passage_mirror = 1;
+        } else {
+            tri_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
         }
 
         a->gates_remaining--;

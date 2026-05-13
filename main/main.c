@@ -37,6 +37,7 @@
 #include "sfx/sfx_crash.h"
 #include "sfx/sfx_engine_hum.h"
 #include "sfx/sfx_pickup_ding.h"
+#include "sfx/sfx_pickup_plink.h"
 #include "sfx/sfx_scrape.h"
 #include "synthwave.h"
 #include "world.h"
@@ -492,12 +493,36 @@ static void draw_boost_indicator(game_state_t const* g) {
     direct_565_tri(fb_pixels, apex_x, apex_y, bl_x, base_y, br_x, base_y, packed);
 }
 
+// Phase 6 multiplier-HUD layout. Constants live up here so the
+// F1 / F4 hint y baselines (which sit *below* the panel across
+// every state) can reference them. The draw helper itself
+// lives further down in the file beside the other HUD draws.
+#define MUL_PANEL_X        12
+#define MUL_PANEL_Y        12
+#define MUL_PANEL_W        128
+#define MUL_PANEL_H        72
+#define MUL_TRI_COUNT      4
+#define MUL_TRI_W          22
+#define MUL_TRI_H          18
+#define MUL_TRI_GAP        4
+#define MUL_TRI_ROW_Y      (MUL_PANEL_Y + 10)
+#define MUL_TEXT_Y         (MUL_PANEL_Y + MUL_PANEL_H - 30)
+#define MUL_PANEL_BG       0xFF181828u
+#define MUL_TRI_LIT_RGB    GAME_TRI_FRONT_COLOR
+#define MUL_TRI_DARK_RGB   0xFF333344u
+#define HUD_HINT_Y_BASE    ((float)(MUL_PANEL_Y + MUL_PANEL_H + 12))
+
 static void draw_exit_hint(void) {
     char const* prompt   = "to exit";
     float const prompt_h = 18.0f;
     int         icon_w   = icons_width(ICON_F1);
     float const x_margin = 12.0f;
-    float const y        = 12.0f;
+    // Pushed down to clear the Phase 6 multiplier HUD panel
+    // (top-left at y = MUL_PANEL_Y, height = MUL_PANEL_H, so
+    // first available y below the panel is HUD_HINT_Y_BASE).
+    // Applies uniformly across all states — menus look the same
+    // as gameplay, which keeps the input affordances stable.
+    float const y        = HUD_HINT_Y_BASE;
     if (icon_w > 0) {
         float const gap    = 8.0f;
         int         icon_h = icons_height(ICON_F1);
@@ -519,7 +544,9 @@ static void draw_pause_hint(void) {
     float const prompt_h = 18.0f;
     int         icon_w   = icons_width(ICON_F4);
     float const x_margin = 12.0f;
-    float const y        = 12.0f + (prompt_h + 4.0f);
+    // One line below the F1 exit hint — same +22 px stack as
+    // before, just rebased on the post-panel HUD_HINT_Y_BASE.
+    float const y        = HUD_HINT_Y_BASE + (prompt_h + 4.0f);
     if (icon_w > 0) {
         float const gap    = 8.0f;
         int         icon_h = icons_height(ICON_F4);
@@ -848,6 +875,52 @@ static void draw_score_readout(game_state_t const* g) {
     pax_vec2f sz = rendertext_size(NULL, text_h, buf);
     rendertext_draw(fb, 0xFFFFFF6Bu, NULL, text_h,
                     fbw - sz.x - 12.0f, 12.0f, buf);
+}
+
+// Top-left HUD: multiplier panel (Phase 6). Opaque dark-grey
+// rectangle holding two rows:
+//   1. Four small triangles, filled blue for collected and dark
+//      grey for empty. Lit count = `pickups_tri % 5` (always
+//      0..4 — the 5th Tri ticks the multiplier and resets the
+//      row, so the 5th slot never visually holds).
+//   2. The current multiplier as `×N`.
+// Layout constants are hoisted up the file (near draw_exit_hint)
+// so the F-key hint y baselines can reference them.
+static void draw_multiplier_panel(game_state_t const* g) {
+    // Opaque background fill — uses pax_simple_rect (not direct_565
+    // dim) so the panel is fully readable regardless of scenery.
+    pax_simple_rect(fb, MUL_PANEL_BG,
+                    (float)MUL_PANEL_X, (float)MUL_PANEL_Y,
+                    (float)MUL_PANEL_W, (float)MUL_PANEL_H);
+
+    // 4-slot Tri progress row. `pickups_tri` is monotonic per run;
+    // `pickups_tri % 5` is the count of slots to light up. The 5th
+    // slot is never visually held — picking up the 5th Tri ticks
+    // the multiplier and resets the row in the same instant.
+    int const lit_count = (int)(g->pickups_tri % 5);
+    int const total_row_w = MUL_TRI_COUNT * MUL_TRI_W + (MUL_TRI_COUNT - 1) * MUL_TRI_GAP;
+    int const row_x0    = MUL_PANEL_X + (MUL_PANEL_W - total_row_w) / 2;
+
+    for (int i = 0; i < MUL_TRI_COUNT; i++) {
+        int const tx     = row_x0 + i * (MUL_TRI_W + MUL_TRI_GAP);
+        pax_col_t const col = (i < lit_count) ? MUL_TRI_LIT_RGB : MUL_TRI_DARK_RGB;
+        // Upward-pointing triangle: apex top-centre, base on the
+        // bottom edge. Same shape as the in-world Tri pyramid from
+        // the player's viewpoint (apex up).
+        pax_simple_tri(fb, col,
+                       (float)(tx + MUL_TRI_W / 2), (float)MUL_TRI_ROW_Y,
+                       (float)tx,                   (float)(MUL_TRI_ROW_Y + MUL_TRI_H),
+                       (float)(tx + MUL_TRI_W),     (float)(MUL_TRI_ROW_Y + MUL_TRI_H));
+    }
+
+    // Multiplier text on the bottom row. "×N" centred horizontally
+    // within the panel.
+    char buf[16];
+    snprintf(buf, sizeof(buf), "x%d", g->multiplier);
+    float const text_h = 24.0f;
+    pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
+    float const tx     = (float)MUL_PANEL_X + ((float)MUL_PANEL_W - sz.x) * 0.5f;
+    rendertext_draw(fb, 0xFFFFFF6Bu, NULL, text_h, tx, (float)MUL_TEXT_Y, buf);
 }
 
 // Top-right HUD slot 1 — stage number. Same upcoming-stage rule as
@@ -1408,6 +1481,16 @@ void app_main(void) {
             if (game.just_picked_up_booster) {
                 sfx_pickup_ding_play();
             }
+
+            // Tri plink — pitch steps with the in-cycle slot index
+            // so the five pickups of a multiplier cycle form a
+            // brief ascending pentatonic phrase (C5/D5/E5/G5/A5).
+            // The 5th plink resolves on A5 at the exact frame the
+            // HUD progress row resets — audio + visual confirm
+            // the multiplier bump together.
+            if (game.just_picked_up_tri) {
+                sfx_pickup_plink_play(game.tri_pickup_slot);
+            }
         }
         int64_t const t_after_phys = esp_timer_get_time();
 
@@ -1684,6 +1767,7 @@ void app_main(void) {
                     // stage N+1, and 0 during the pre-run rest.
                     draw_stage_banner((int)world.stage + 1);
                 }
+                draw_multiplier_panel(&game);
                 draw_exit_hint();
                 draw_pause_hint();
                 draw_score_readout(&game);
@@ -1740,6 +1824,7 @@ void app_main(void) {
                 if (world.area.type == AREA_TYPE_REST) {
                     draw_stage_banner((int)world.stage + 1);
                 }
+                draw_multiplier_panel(&game);
                 draw_score_readout(&game);
                 draw_stage_readout(&world);
                 draw_sun_readout(game.sun_y);
@@ -1805,6 +1890,7 @@ void app_main(void) {
                     draw_stage_banner((int)world.stage + 1);
                 }
                 draw_game_over_overlay();
+                draw_multiplier_panel(&game);
                 draw_exit_hint();
                 draw_score_readout(&game);
                 draw_stage_readout(&world);

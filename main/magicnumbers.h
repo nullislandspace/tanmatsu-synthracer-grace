@@ -192,21 +192,65 @@
 // Number of boosters in each inter-stage rest area.
 #define GAME_BOOSTERS_PER_REST             1
 
-// Booster geometry — square-based pyramid. Footprint matches a
-// pixel-cube (so the player can read it as "obstacle-sized"),
-// height equals the footprint side (so apex sits at base-width
-// above the floor).
+// Booster geometry — collision AABB stays a 0.8×0.8×0.8 box (the
+// HALF_W of 0.4 matches a pixel-cube footprint). Visual is a
+// slowly-rotating regular icosahedron inscribed in that box (see
+// `render_booster_icosahedron` in render.c). Phase 6 (2026-05-14)
+// replaced the original pyramid visual; collision math unchanged.
 #define GAME_BOOSTER_HALF_W                0.4f
 #define GAME_BOOSTER_HEIGHT                (2.0f * GAME_BOOSTER_HALF_W)
 
-// Booster colour palette and pulse animation. The base colour is
-// a bright neon green; per-pixel brightness modulates between
-// `1.0 - PULSE_AMPLITUDE` and `1.0` over `PULSE_PERIOD_S`.
+// Booster colour palette. Bright neon green; faceted-gem lighting
+// in the renderer tints each face by its normal direction so the
+// icosahedron reads as a 3D crystal rather than a flat blob.
 #define GAME_BOOSTER_FRONT_COLOR           0xFF60FF60u
 #define GAME_BOOSTER_SIDE_COLOR            0xFF20A040u
 #define GAME_BOOSTER_OUTLINE_COLOR         0xFFC0FFC0u
-#define GAME_BOOSTER_PULSE_PERIOD_S        1.2f
-#define GAME_BOOSTER_PULSE_AMPLITUDE       0.3f
+
+// Booster rotation period — full Y-axis rotation per second.
+// Slow enough to read each face cleanly, fast enough to draw the
+// eye. All boosters spin in lockstep using a global time source,
+// so no per-instance phase storage is needed for the visual
+// (only the per-instance position/state matters for collision).
+#define GAME_BOOSTER_ROTATION_PERIOD_S     1.0f
+
+// Tri pickup (Phase 6). Geometry mirrors the original booster
+// pyramid: same footprint as a pixel-cube, apex at base-width
+// above the floor. Different colour so it reads as obviously
+// different from the icosahedron booster.
+#define GAME_TRI_HALF_W                    0.4f
+#define GAME_TRI_HEIGHT                    (2.0f * GAME_TRI_HALF_W)
+
+// Tri colour palette — synthwave cyan-blue family. Front face
+// is the brightest cyan, side faces are a darker blue, outline
+// is near-white so the silhouette pops against the playfield.
+#define GAME_TRI_FRONT_COLOR               0xFF60E0FFu
+#define GAME_TRI_SIDE_COLOR                0xFF2060B0u
+#define GAME_TRI_OUTLINE_COLOR             0xFFC0E8FFu
+
+// Phase 6 scoring constants.
+//
+// Per-frame distance income: `score += dz × multiplier ×
+// GAME_SCORE_DISTANCE_FACTOR` in `game_after_collide`. The
+// factor scales the always-on baseline relative to the
+// discrete pickup bumps below — with the factor at 0.1, a
+// pickup at multiplier=1 feels like ~50 world-units of
+// distance (= 50 × 0.1 = 5 score units, matching a Tri's
+// bonus), so the player perceives Tris as meaningful events
+// rather than rounding-error-on-top-of-the-distance-counter.
+//
+// Tri / booster pickup bonuses are scaled by the current
+// multiplier at the moment of pickup. The multiplier itself
+// increments on every 5th Tri.
+#define GAME_SCORE_DISTANCE_FACTOR         0.1f
+#define GAME_SCORE_TRI                     5
+#define GAME_SCORE_BOOSTER                 10
+
+// Crash penalty applied to `game.multiplier` on a head-on / stall
+// run-end. Floors at 1 today; Phase 11 will raise the floor with
+// player level (lv6 → 2, lv12 → 3, lv23 → 4, lv24 → max).
+#define GAME_MULTIPLIER_CRASH_PENALTY      5
+#define GAME_MULTIPLIER_FLOOR              1
 
 // Per-stage obstacle play time, seconds at cruise. Implemented
 // as a world-z distance budget so a slow run takes longer in

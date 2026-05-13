@@ -97,15 +97,18 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
     }
 }
 
-// Draw one speed-booster pickup as a square-based pyramid. Apex
-// sits at (obs.x, obs.height, obs.z); the 4 base corners are on
-// the y=0 plane at obs.x±half_w / obs.z±half_d. Painter's order
-// inside the pyramid: visible side faces first, then front. The
-// back face is never visible (camera always sits in front and
-// slightly above), so it's skipped. Pulse modulates each side's
-// fill colour every frame.
-static void render_booster_pyramid(uint16_t* fb_pixels, obstacle_t const* o, float cam_x,
-                                   bool rev_endian, float pulse) {
+// Draw one pickup as a square-based pyramid (used by Tri pickup —
+// Phase 6). Apex sits at (obs.x, obs.height, obs.z); the 4 base
+// corners are on the y=0 plane at obs.x±half_w / obs.z±half_d.
+// Painter's order inside the pyramid: visible side face first,
+// then front. The back face is never visible (camera always
+// sits in front and slightly above), so it's skipped. Colours
+// come from the obstacle's palette unchanged — no pulse — so
+// the same renderer serves any pyramid-shaped pickup that wants
+// to override the cube default; the booster used this shape pre-
+// Phase 6 but now uses `render_booster_icosahedron` below.
+static void render_pickup_pyramid(uint16_t* fb_pixels, obstacle_t const* o, float cam_x,
+                                  bool rev_endian) {
     // Whole-pyramid near-plane cull. Pyramids are short in z
     // (half_d = 0.4) and small, so once the apex is at or behind
     // RENDER_NEAR_CLIP_Z just drop the whole thing — saves the
@@ -132,11 +135,8 @@ static void render_booster_pyramid(uint16_t* fb_pixels, obstacle_t const* o, flo
     bool const show_left  = cam_x < o->x_world;
     bool const show_right = cam_x > o->x_world;
 
-    // Pulse the side / front fill colours but leave the outline at
-    // full brightness — the silhouette stays crisp while the body
-    // breathes.
-    uint16_t const front_packed = direct_565_pack(dim_argb_render(o->front_color, pulse), rev_endian);
-    uint16_t const side_packed  = direct_565_pack(dim_argb_render(o->side_color,  pulse), rev_endian);
+    uint16_t const front_packed = direct_565_pack(o->front_color, rev_endian);
+    uint16_t const side_packed  = direct_565_pack(o->side_color,  rev_endian);
     uint16_t const out_packed   = direct_565_pack(o->outline_color, rev_endian);
 
     // Side first (whichever's facing the camera), then front. Back
@@ -149,8 +149,8 @@ static void render_booster_pyramid(uint16_t* fb_pixels, obstacle_t const* o, flo
     direct_565_tri(fb_pixels, sx_A, sy_A, sx_FR, sy_FR, sx_FL, sy_FL, front_packed);
 
     // Wireframe: apex to each base corner of visible faces + the
-    // visible base edges. Outline stays bright (no pulse) for a
-    // crisp silhouette regardless of the body's brightness.
+    // visible base edges. Outline stays bright for a crisp
+    // silhouette regardless of the body's fill colour.
     direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_FL, (int)sy_FL, out_packed);
     direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_FR, (int)sy_FR, out_packed);
     direct_565_line(fb_pixels, (int)sx_FL, (int)sy_FL, (int)sx_FR, (int)sy_FR, out_packed);
@@ -160,6 +160,181 @@ static void render_booster_pyramid(uint16_t* fb_pixels, obstacle_t const* o, flo
     } else if (show_right) {
         direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_BR, (int)sy_BR, out_packed);
         direct_565_line(fb_pixels, (int)sx_FR, (int)sy_FR, (int)sx_BR, (int)sy_BR, out_packed);
+    }
+}
+
+// ----------------------------------------------------------------
+// Booster icosahedron (Phase 6 — 2026-05-14 design refresh).
+// ----------------------------------------------------------------
+
+// Golden ratio. Regular icosahedron vertices land at
+// (0, ±1, ±φ), (±1, ±φ, 0), (±φ, 0, ±1) — all 12 sit at the same
+// distance from the origin, ~1.902 = √(2+φ).
+#define ICO_PHI 1.618033988749895f
+
+// Local-space vertex coordinates, multiplied by ICO_SCALE at use
+// time to fit GAME_BOOSTER_HALF_W. Max abs coordinate is φ, so
+// the bounding-box half-extent of the un-scaled icosahedron is
+// also φ; ICO_SCALE = HALF_W / φ scales it into the booster's
+// collision footprint.
+#define ICO_SCALE (GAME_BOOSTER_HALF_W / ICO_PHI)
+
+static float const ICO_VERTS[12][3] = {
+    { 0.0f,     1.0f,     ICO_PHI },  // v0
+    { 0.0f,     1.0f,    -ICO_PHI },  // v1
+    { 0.0f,    -1.0f,     ICO_PHI },  // v2
+    { 0.0f,    -1.0f,    -ICO_PHI },  // v3
+    { 1.0f,     ICO_PHI,  0.0f    },  // v4
+    { 1.0f,    -ICO_PHI,  0.0f    },  // v5
+    {-1.0f,     ICO_PHI,  0.0f    },  // v6
+    {-1.0f,    -ICO_PHI,  0.0f    },  // v7
+    { ICO_PHI,  0.0f,     1.0f    },  // v8
+    { ICO_PHI,  0.0f,    -1.0f    },  // v9
+    {-ICO_PHI,  0.0f,     1.0f    },  // v10
+    {-ICO_PHI,  0.0f,    -1.0f    },  // v11
+};
+
+// 20 faces of a regular icosahedron, each a triple of vertex
+// indices. Order chosen so each vertex appears in exactly 5
+// faces (verified by topology). Winding doesn't matter for our
+// back-face cull (which uses the face centroid direction, not the
+// triangle's cross-product normal) — the cull rule is purely
+// geometric for a centered convex polyhedron.
+static uint8_t const ICO_FACES[20][3] = {
+    {  0,  8,  4 }, {  0,  4,  6 }, {  0,  6, 10 }, {  0, 10,  2 }, {  0,  2,  8 },
+    {  3,  1,  9 }, {  3, 11,  1 }, {  3,  7, 11 }, {  3,  5,  7 }, {  3,  9,  5 },
+    {  4,  8,  9 }, {  1,  4,  9 }, {  6,  4,  1 }, {  1, 11,  6 }, {  6, 11, 10 },
+    { 10, 11,  7 }, { 10,  7,  2 }, {  2,  7,  5 }, {  2,  5,  8 }, {  8,  5,  9 },
+};
+
+// Render the booster as a rotating regular icosahedron. The
+// rotation phase (`angle` in radians) is computed once per frame
+// by the caller and shared across all boosters in the scene, so
+// every booster spins in lockstep with the global time clock.
+//
+// Pipeline per booster:
+//   1. Rotate all 12 vertices around the Y axis by `angle`.
+//   2. Translate to world, project to screen.
+//   3. For each face, compute the local rotated centroid; this
+//      direction IS the face's outward normal (property of any
+//      face centroid on a convex polyhedron centred at origin).
+//      Back-face cull via the dot product of that direction with
+//      the view direction (face → camera).
+//   4. For visible faces, compute a face-normal lighting tint and
+//      draw the filled triangle.
+//   5. Stroke each visible face's three edges. Edges shared
+//      between two visible faces get drawn twice but `direct_565_line`
+//      is idempotent and the outline stays crisp.
+//
+// For a convex polyhedron after back-face culling, visible faces
+// don't overlap in 2D projection — no need to z-sort within the
+// icosahedron's own faces.
+static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o, float cam_x,
+                                       bool rev_endian, float angle) {
+    if (o->z_world < RENDER_NEAR_CLIP_Z) return;
+
+    float const cosa = cosf(angle);
+    float const sina = sinf(angle);
+
+    // Y-centre of the icosahedron in world space — collision AABB
+    // sits on the ground (y_base = 0, height = HEIGHT), so the
+    // icosahedron centres at half-height.
+    float const y_centre = GAME_BOOSTER_HEIGHT * 0.5f;
+
+    // Rotated local vertex positions + their projected screen
+    // coordinates. Keep both so face centroid math (back-face cull
+    // + lighting) can use the rotated local vectors directly.
+    float lvx[12], lvy[12], lvz[12];
+    float sx[12], sy[12];
+    for (int i = 0; i < 12; i++) {
+        float const x = ICO_VERTS[i][0] * ICO_SCALE;
+        float const y = ICO_VERTS[i][1] * ICO_SCALE;
+        float const z = ICO_VERTS[i][2] * ICO_SCALE;
+
+        // Y-axis rotation: (x', y', z') = (x cos + z sin, y, -x sin + z cos).
+        float const xr =  x * cosa + z * sina;
+        float const yr =  y;
+        float const zr = -x * sina + z * cosa;
+
+        lvx[i] = xr; lvy[i] = yr; lvz[i] = zr;
+
+        float const wx = o->x_world + xr;
+        float const wy = y_centre   + yr;
+        float const wz = o->z_world + zr;
+        render_project(wx, wy, wz, cam_x, &sx[i], &sy[i]);
+    }
+
+    // Lighting direction (front-top-left, fixed in world space).
+    // Picked so the front faces of the icosahedron — the ones the
+    // player sees most — sit somewhere between the lit and the
+    // mid-tone, making the rotation visibly modulate the brightness
+    // of individual faces over time.
+    float const light_x = -0.4f;
+    float const light_y =  0.7f;
+    float const light_z = -0.6f;
+
+    uint16_t const out_packed = direct_565_pack(o->outline_color, rev_endian);
+
+    for (int f = 0; f < 20; f++) {
+        int const a = ICO_FACES[f][0];
+        int const b = ICO_FACES[f][1];
+        int const c = ICO_FACES[f][2];
+
+        // Local-space face centroid (already rotated, since lvx/y/z
+        // hold rotated positions). For a centred convex polyhedron,
+        // the centroid vector from origin IS the face's outward
+        // normal direction — saves a cross product.
+        float const cx_l = (lvx[a] + lvx[b] + lvx[c]) * (1.0f / 3.0f);
+        float const cy_l = (lvy[a] + lvy[b] + lvy[c]) * (1.0f / 3.0f);
+        float const cz_l = (lvz[a] + lvz[b] + lvz[c]) * (1.0f / 3.0f);
+
+        // World-space centroid + view direction (face → camera).
+        // Camera sits at (cam_x, RENDER_CAM_Y, 0).
+        float const cx_w = o->x_world + cx_l;
+        float const cy_w = y_centre   + cy_l;
+        float const cz_w = o->z_world + cz_l;
+        float const dvx = cam_x         - cx_w;
+        float const dvy = RENDER_CAM_Y  - cy_w;
+        float const dvz = 0.0f          - cz_w;
+
+        // Back-face cull. Outward normal (cx_l, cy_l, cz_l) needs a
+        // positive dot product with the view direction to be facing
+        // the camera.
+        float const dot_view = cx_l * dvx + cy_l * dvy + cz_l * dvz;
+        if (dot_view <= 0.0f) continue;
+
+        // Lighting tint. Normalise the rotated centroid (face
+        // centroids on a regular icosahedron all have similar but
+        // not identical lengths, so we do this to keep brightness
+        // consistent across faces). Then dot with the fixed light
+        // direction; positive = lit, clamp at 0.
+        float const len = sqrtf(cx_l * cx_l + cy_l * cy_l + cz_l * cz_l);
+        float const inv_len = (len > 1e-6f) ? (1.0f / len) : 0.0f;
+        float const nx = cx_l * inv_len;
+        float const ny = cy_l * inv_len;
+        float const nz = cz_l * inv_len;
+        float       d  = nx * light_x + ny * light_y + nz * light_z;
+        if (d < 0.0f) d = 0.0f;
+        float const tint = 0.55f + 0.45f * d;
+
+        // Alternate front_color / side_color by face index so the
+        // icosahedron has visible two-tone faceting even before the
+        // lighting tint kicks in.
+        uint32_t const base_col = (f & 1) ? o->side_color : o->front_color;
+        uint16_t const fill_packed = direct_565_pack(dim_argb_render(base_col, tint),
+                                                     rev_endian);
+
+        direct_565_tri(fb_pixels,
+                       sx[a], sy[a], sx[b], sy[b], sx[c], sy[c],
+                       fill_packed);
+
+        // Edges of this face. Pairs that are shared with another
+        // visible face will be drawn twice; that's cheaper than
+        // building an edge-visibility mask and the line draws are
+        // idempotent.
+        direct_565_line(fb_pixels, (int)sx[a], (int)sy[a], (int)sx[b], (int)sy[b], out_packed);
+        direct_565_line(fb_pixels, (int)sx[b], (int)sy[b], (int)sx[c], (int)sy[c], out_packed);
+        direct_565_line(fb_pixels, (int)sx[c], (int)sy[c], (int)sx[a], (int)sy[a], out_packed);
     }
 }
 
@@ -195,27 +370,36 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
     uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
     bool      const rev_endian = fb->reverse_endianness;
 
-    // Booster pulse factor, computed once per frame and reused
-    // across every booster. Uses a steady time source so the pulse
-    // continues evenly regardless of FPS.
-    int64_t const now_us       = esp_timer_get_time();
-    float   const time_s       = (float)(now_us % 600000000LL) * 1e-6f;
-    float   const pulse_phase  = fmodf(time_s, GAME_BOOSTER_PULSE_PERIOD_S) / GAME_BOOSTER_PULSE_PERIOD_S;
-    float   const pulse_factor = 1.0f - GAME_BOOSTER_PULSE_AMPLITUDE
-                                       * 0.5f * (1.0f - sinf(pulse_phase * 2.0f * (float)M_PI));
+    // Booster rotation angle, computed once per frame and shared by
+    // every booster so they spin in lockstep. The icosahedron does
+    // one full Y-axis rotation per `GAME_BOOSTER_ROTATION_PERIOD_S`
+    // (currently 1.0 s). The modulo on now_us keeps the float small
+    // so the modf into [0, 1) inside sinf/cosf stays well-conditioned
+    // even after the device has been running for hours.
+    int64_t const now_us         = esp_timer_get_time();
+    float   const time_s         = (float)(now_us % 600000000LL) * 1e-6f;
+    float   const booster_angle  = fmodf(time_s, GAME_BOOSTER_ROTATION_PERIOD_S)
+                                   / GAME_BOOSTER_ROTATION_PERIOD_S
+                                   * (2.0f * (float)M_PI);
 
     for (int k = 0; k < n; k++) {
         obstacle_t const* o = &w->obstacles[idx[k]];
 
         // Per-object draw callback wins when set. Otherwise default
-        // dispatch: pickup boosters as a pyramid, everything else as
-        // a cube.
+        // dispatch: pickup boosters as a rotating icosahedron (Phase
+        // 6), Tri pickups as a pyramid (same shape the booster used
+        // pre-Phase-6, copied here so the two pickups visually drift
+        // apart). Everything else falls through to the cube path.
         if (o->draw) {
             o->draw(fb, o, cam_x);
             continue;
         }
         if (o->kind == OBSTACLE_KIND_PICKUP_BOOST) {
-            render_booster_pyramid(fb_pixels, o, cam_x, rev_endian, pulse_factor);
+            render_booster_icosahedron(fb_pixels, o, cam_x, rev_endian, booster_angle);
+            continue;
+        }
+        if (o->kind == OBSTACLE_KIND_PICKUP_TRI) {
+            render_pickup_pyramid(fb_pixels, o, cam_x, rev_endian);
             continue;
         }
 

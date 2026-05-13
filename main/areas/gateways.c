@@ -2,6 +2,7 @@
 
 #include "objects/booster.h"
 #include "objects/cube.h"
+#include "objects/tri.h"
 #include "world.h"
 
 // Ship full collision width is 2 * SHIP_COLLISION_HALF_W = 0.56 u
@@ -32,8 +33,10 @@
 
 // Spawn a gateway: two cube slabs flanking a central gap of width
 // `2 * half_gap`. The gap centre is picked so that both slabs are
-// entirely inside the playfield. If `with_booster` is true, also
-// drops a booster centred in the gap at the same z as the gate.
+// entirely inside the playfield. If `with_booster` is true, drops
+// a booster centred in the gap at the same z; otherwise drops a
+// Tri there instead (Phase 6: every gateway hole holds *something*
+// pickup-able — booster takes priority, Tri fills the rest).
 static void spawn_gate(world_state_t* w, float half_gap, bool with_booster) {
     float const gap_centre_extent = TRACK_HALF_WIDTH - half_gap;
     float       gap_x             = 0.0f;
@@ -52,6 +55,8 @@ static void spawn_gate(world_state_t* w, float half_gap, bool with_booster) {
     cube_spawn_gate_slab(w, right_centre, WORLD_Z_FAR_SPAWN, right_half_w);
     if (with_booster) {
         booster_spawn_at(w, gap_x, WORLD_Z_FAR_SPAWN);
+    } else {
+        tri_spawn_at(w, gap_x, WORLD_Z_FAR_SPAWN);
     }
 }
 

@@ -194,6 +194,7 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     g->scrape_left  = false;
     g->scrape_right = false;
     g->just_picked_up_booster = false;
+    g->just_picked_up_tri     = false;
     bool head_on    = false;
 
     float const ship_zN = SHIP_COLLISION_Z_C - SHIP_COLLISION_HALF_D;
@@ -274,22 +275,45 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
                     // current speed. Picking up another booster
                     // mid-boost just restarts at RAMPING from the new
                     // current speed (which might already be near the
-                    // target).
+                    // target). Phase 6: also add the booster's base
+                    // points to the score, scaled by the current
+                    // multiplier.
                     obstacle_despawn(o);
                     g->boost_phase            = BOOST_RAMPING;
                     g->boost_phase_time       = GAME_BOOST_RAMP_UP_SECONDS;
                     g->boost_ramp_start_speed = g->ship_speed_z;
                     g->pickups_speed_boost   += 1;
+                    g->score                 += (double)GAME_SCORE_BOOSTER * (double)g->multiplier;
                     g->just_picked_up_booster = true;
                     hit                       = OBSTACLE_HIT_IGNORE;
                     break;
                 case OBSTACLE_KIND_PICKUP_TRI:
+                    // Phase 6 Tri pickup. Increment the monotonic
+                    // per-run counter, award TRI base points × the
+                    // *pre-bump* multiplier (the multiplier hasn't
+                    // ticked yet for this pickup), then tick the
+                    // multiplier on every 5th Tri. Slot index for
+                    // the plink SFX is `(pickups_tri - 1) % 5` —
+                    // 0..4 across the five pickups in a cycle.
+                    obstacle_despawn(o);
+                    g->score          += (double)GAME_SCORE_TRI * (double)g->multiplier;
+                    g->pickups_tri    += 1;
+                    g->tri_pickup_slot = (g->pickups_tri - 1) % 5;
+                    g->just_picked_up_tri = true;
+                    if (g->pickups_tri % 5 == 0) {
+                        g->multiplier += 1;
+                        if (g->multiplier > g->multiplier_max) {
+                            g->multiplier_max = g->multiplier;
+                        }
+                    }
+                    hit = OBSTACLE_HIT_IGNORE;
+                    break;
                 case OBSTACLE_KIND_PICKUP_JUMP:
                 case OBSTACLE_KIND_PICKUP_SHIELD:
                 case OBSTACLE_KIND_RAMP:
                     // Not implemented yet — ignore so collision
                     // doesn't kill the ship on contact with a future
-                    // pickup. Phase 6 / 9 / future will fill these in.
+                    // pickup. Phase 9 / future will fill these in.
                     hit = OBSTACLE_HIT_IGNORE;
                     break;
                 default:
@@ -320,6 +344,22 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
             if (g->ship_x_world < SHIP_X_MIN_WORLD) g->ship_x_world = SHIP_X_MIN_WORLD;
         } else /* OBSTACLE_HIT_HEAD_ON */ {
             head_on = true;
+        }
+    }
+
+    // Phase 6: crash penalty on multiplier. Applied once per
+    // crash frame (head_on, set above) — only meaningful in
+    // future scenarios where the player survives the hit
+    // (e.g. Shield pickup absorbs one fatal contact, planned
+    // for Phase 9+). Today the run ends on head_on so the
+    // penalised multiplier never gets used, but we maintain
+    // the rule so the gameplay invariant is correct from
+    // the start. `multiplier_max` deliberately doesn't track
+    // this drop — only increases bump the all-time peak.
+    if (head_on) {
+        g->multiplier -= GAME_MULTIPLIER_CRASH_PENALTY;
+        if (g->multiplier < GAME_MULTIPLIER_FLOOR) {
+            g->multiplier = GAME_MULTIPLIER_FLOOR;
         }
     }
 
@@ -435,17 +475,27 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
     }
 
     // --- Scoring + distance integration ----------------------------------
-    // Distance is the world-units the ship has travelled this run.
-    // Score is `Σ dz * multiplier` so multiplier upgrades (Phase 6)
-    // multiply forward income retroactively from the moment of
-    // collection. Multiplier is currently fixed at 1.
+    // Three streams contribute to `score`, all scaled by the
+    // current multiplier:
+    //   1. Distance (per-frame `dz × multiplier × DISTANCE_FACTOR`
+    //      here) — the always-on income that keeps the score
+    //      climbing even when no pickups are in reach. Factor is
+    //      0.1 so the baseline stays subordinate to pickup bumps
+    //      and Tris/boosters feel like real events instead of
+    //      rounding error on top of the distance counter.
+    //   2. Tri pickups (`GAME_SCORE_TRI × multiplier`) — bonus
+    //      awarded inside `game_collide`'s Tri-collect branch.
+    //   3. Booster pickups (`GAME_SCORE_BOOSTER × multiplier`)
+    //      — bonus awarded in the same place for the booster.
+    // `multiplier_max` is bumped where the multiplier itself
+    // increases (Tri-collect on every 5th pickup), not here.
     {
         float const dz = g->ship_speed_z * dt;
         if (dz > 0.0f) {
             g->distance_traveled += (double)dz;
-            g->score             += (double)dz * (double)g->multiplier;
+            g->score             += (double)dz * (double)g->multiplier
+                                    * (double)GAME_SCORE_DISTANCE_FACTOR;
         }
-        if (g->multiplier > g->multiplier_max) g->multiplier_max = g->multiplier;
     }
 
     // Run ends when the ship has fully coasted to a stop. The

@@ -10,7 +10,7 @@
 
 ## Current Status
 
-**Phase: Phases 5 + 7 complete; persistence + scoring + menus + bridges + dynamic gateways landed; audio (mixer + procedural music + procedural SFX + master volume) landed 2026-05-13. Phase 6 (Tris + multiplier) next.**
+**Phase: Phases 5 + 6 + 7 complete; persistence + scoring + menus + bridges + dynamic gateways landed; audio (mixer + procedural music + procedural SFX + master volume) landed 2026-05-13; Tris + multiplier (Phase 6: blue-pyramid Tri object + rotating-icosahedron booster + plink SFX + multiplier HUD + per-area spawn rules) landed 2026-05-14. MVP-blocking phase 8 (daily seed + persistence) is partial; Phase 9 (pickups + attachments) is the next gameplay phase.**
 
 | Phase | Description | State |
 |-------|-------------|-------|
@@ -20,7 +20,7 @@
 | 3 | 3D projection + obstacles | ✅ runs on-device; floor stripes + lanes + obstacles share one pinhole projection; obstacles render as 3D cubes with per-face culling and near-plane clipping; continuous side walls along the track edges, all stored in the same obstacle pool ready for collision in Phase 4 |
 | 4 | Collision + game over | ✅ TITLE → PLAYING → GAME_OVER state machine; AABB collision against the unified obstacle pool with a boundary-obstacle position rule (scrape on side walls, head-on on any playfield obstacle ahead); push-out resolution + continuous scrape-floor/recovery speed dynamics; per-frame red radial-burst sparks at the banked wingtip while scraping |
 | 5 | Sun timer + shadow + boost | ✅ done — sun, shadows, stall, full-sunset, boost pickups all landed |
-| 6 | Tris + multiplier | ⬜ not started — design updated 2026-05-14: pickup-event scoring (Tri = 5 base pts, booster = 10 base pts, × multiplier), monotonic `pickups_tri` counter (HUD reads `% 5`), top-left opaque grey HUD panel with **4-slot** Tri progress row + multiplier text (5th Tri ticks the multiplier and resets the row, so it's never displayed), ascending pentatonic 5-note plink SFX (the 5th note is the multiplier-bump cue). Tri object copied from `objects/booster.c`, painted blue. Booster shape upgrades pyramid → rotating regular icosahedron (12 verts / 20 faces / 30 edges, ~1 Hz spin around Y, faceted-gem rendering with face-normal lighting). Per-area spawn rules locked: pixel_field half-count / big_blocks equal-count (random + rejection), gateways + dynamic_gateway use the non-booster hole, dynamic_passage one per flipping cube in the clutter, bridges one per bridge on a random-angle line, rest area (except pre-stage-1 lead-in) 10 Tris + booster on a quadratic-Bézier S-curve. Per-run + all-time Tri totals tracked via the existing `pickups_tri` field in `run_stats_t`. See the 2026-05-13 / 2026-05-14 Phase 6 design-update decisions-log entries. |
+| 6 | Tris + multiplier | ✅ done 2026-05-14 — distance × multiplier × 0.1 per-frame income (from the original RTS model, scaled so pickup bonuses stay visible) + Tri pickup bonus (5 × mult) + booster pickup bonus (10 × mult) all stacking; monotonic `pickups_tri` counter (HUD reads `% 5`); top-left opaque grey HUD panel with 4-slot Tri progress row + multiplier text (5th Tri ticks the multiplier and resets the row); ascending pentatonic 5-note plink SFX (`sfx_pickup_plink.c`, the 5th note doubles as the multiplier-bump cue); Tri object copied from `objects/booster.c` into `objects/tri.c`, painted blue; booster shape upgraded pyramid → rotating regular icosahedron (12 verts / 20 faces / 30 edges, ~1 Hz spin around Y, faceted-gem rendering with face-normal lighting + edge wireframe in `render_booster_icosahedron`); per-area spawn rules implemented (pixel_field half-count / big_blocks equal-count via rejection sampling against the live pool, gateways + dynamic_gateway fill the non-booster hole, dynamic_passage emits one per flipping cube in the clutter, bridges co-spawn one per bridge along a random-angle line, rest area between stages lays 10 Tris + booster on a quadratic-Bézier S-curve, pre-stage-1 lead-in deliberately excluded); per-run + all-time Tri totals persist automatically via the existing `run_stats_merge_into_all_time`. Crash penalty (-5 to multiplier, floor 1) wired in `game_collide`. New `world_find_free_x` helper for shared rejection sampling. See the 2026-05-13 / 2026-05-14 Phase 6 design-update + implementation decisions-log entries. |
 | 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
 | 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts). Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, proper main menu, seed-input subscreen, stats screen, basic scoring + per-slot stats tracking are the work for this phase. MVP complete after the rest of this phase. |
 | 9 | Pickups & attachments | ⬜ not started |
@@ -2205,19 +2205,25 @@
   pass that finished Phase 7, while the design choices are fresh.
 
   **What's diverging from the original plan.**
-    - **Scoring model is pickup-event-driven, not continuous.**
-      Old design: `score += ship_speed_z * dt * multiplier` each
-      frame. New design: score advances only on pickup events.
-      A **Tri pickup = 5 base points**, a **speed-booster pickup
-      = 10 base points**, each multiplied by the *current*
-      multiplier at the moment of pickup. The continuous
-      distance-based accumulation goes away — `distance_traveled`
-      stays (it's a stat, still useful for the all-time stats
-      panel), but it no longer drives `score`. Rationale: the
-      pickup-driven model is more legible to the player ("I
-      collected that, the number went up by N") and makes the
-      multiplier feel meaningful as a per-event amplifier rather
-      than a per-frame scalar that's hard to see moving.
+    - **Scoring adds pickup-event bumps on top of the continuous
+      distance income** (refined 2026-05-14 after an initial
+      pickup-only proposal was over-aggressive — the original
+      Race The Sun model is distance-primary, and removing it
+      left the score stuck between bonus events). Final model:
+      `score += dz × multiplier × DISTANCE_FACTOR` per frame
+      (the always-on income stream, mirrors RTS), plus
+      **Tri pickup = +5 × multiplier** and **booster pickup
+      = +10 × multiplier** as discrete bonus bumps the player
+      perceives as "the number jumped".
+      `GAME_SCORE_DISTANCE_FACTOR` is 0.1, so the per-frame
+      baseline is one-tenth of what it would be at unit gain —
+      enough to keep the score climbing visibly between
+      pickups, but not so much that a Tri's +5 disappears as
+      noise on top of it. All three streams are multiplied by
+      the same `multiplier` so a Tri-bumped multiplier
+      amplifies forward distance income too.
+      `distance_traveled` stays separately tracked for the
+      stats panel.
     - **Multiplier mechanic: fill-and-reset, not accumulating.**
       Original sketch said "every 5 Tris collected → +1". New
       design: a visible Tri counter goes 0/5 → 1/5 → 2/5 → 3/5 →
@@ -2362,9 +2368,10 @@
       `multiplier++` (the HUD reads `pickups_tri % 5` so no
       explicit counter reset is needed). Add the
       `+= GAME_SCORE_BOOSTER × multiplier` to the existing
-      booster pickup branch. Remove the
-      `score += dz * multiplier` continuous accumulator from
-      `game_after_collide`.
+      booster pickup branch. The per-frame
+      `score += dz × multiplier` distance accumulator in
+      `game_after_collide` stays put — pickups stack on top
+      of it.
     - `main/world.c` or one of the area generators — add Tri
       spawn cadence (probably scattered through
       `pixel_field` / `big_blocks` at ~5–8 per stage to start
@@ -3100,15 +3107,19 @@ the function makes it explicit and lets us animate the sun.
   `multiplier` by 5; floor is `1` until Phase 11
   metaprogression raises it (lv6→2, lv12→3, lv23→4,
   lv24→max). Tri counters and HUD progress are *not* rewound
-  by a crash. Scoring is **pickup-event driven**, not
-  continuous: Tri pickup adds `GAME_SCORE_TRI × multiplier`,
-  booster pickup adds `GAME_SCORE_BOOSTER × multiplier`. The
-  previous `score += dz * multiplier` per-frame accumulation
-  is removed; `distance_traveled` is still tracked for the
-  stats panel but no longer drives `score`. Persistence is
-  free — `last_run.pickups_tri = pickups_tri` at run end and
-  the existing `run_stats_merge_into_all_time` sums it into
-  the all-time total.
+  by a crash. **Scoring** has three streams, all multiplied
+  by the same `multiplier`: (1) per-frame distance
+  accumulation `score += dz × multiplier ×
+  GAME_SCORE_DISTANCE_FACTOR` (factor = 0.1) in
+  `game_after_collide` — the always-on income stream from the
+  original RTS model, scaled down so pickup bonuses stay
+  perceptible; (2) Tri pickup bonus
+  `GAME_SCORE_TRI × multiplier` in `game_collide`'s
+  Tri-collect branch; (3) booster pickup bonus
+  `GAME_SCORE_BOOSTER × multiplier` in the same place.
+  Persistence is free — `last_run.pickups_tri = pickups_tri`
+  at run end and the existing `run_stats_merge_into_all_time`
+  sums it into the all-time total.
 
 ### `render.c` — projection and scene draw
 
@@ -3549,35 +3560,43 @@ Done in this order so each phase produces a runnable build:
    the visual sun (verify it disappears behind the mountain silhouette),
    end run on sunset. Implement `is_ship_in_shadow()` and the speed
    slowdown. Spawn boost pickups; collect → +time and speed reset.
-6. **Tris + multiplier**. Design updated 2026-05-13 (then
-   refined 2026-05-14) — see the matching decisions-log
-   entries for the full reasoning. Headline changes from the
-   original sketch: scoring is pickup-event driven
-   (Tri = 5 base pts, booster = 10 base pts, both × the
-   current multiplier) rather than per-frame `distance × mult`;
-   `pickups_tri` is monotonic per run so persistence is free,
-   and the HUD reads `pickups_tri % 5` for display; the
-   top-left opaque grey panel shows **four** Tri-slot
-   triangles + the current multiplier on a second line — the
-   5th Tri immediately ticks the multiplier and resets the
-   row, so the 5th slot is never actually held. Per-pickup
-   audio: new ascending-pentatonic plink SFX with five
-   distinct pitches (C5/D5/E5/G5/A5 per slot index) so the
-   5 pickups in a multiplier cycle form a brief musical
-   phrase, the 5th plink doubles as the audio cue for the
-   multiplier bump. Per-area Tri spawn rules locked
-   (pixel_field / big_blocks / both gateway types /
-   dynamic_passage / bridges / rest area). The Tri object
-   is copied (not shared) from `main/objects/booster.c` so
-   the two pickups can drift apart independently — and as
-   part of that drift, the **booster shape upgrades from
-   a pyramid to a slowly-rotating regular icosahedron**
-   (12 verts, 20 triangular faces, 30 edges, ~1 Hz Y-axis
-   spin, faceted-gem rendering with cheap face-normal
-   lighting) so the two pickups read as visually
-   unambiguous side-by-side. Crash penalty (-5 to
-   multiplier, floor 1) and "fill the score readout with
-   a meaningful number" goals are unchanged.
+6. ✅ **Tris + multiplier** (landed 2026-05-14). Three-stream
+   scoring: per-frame `distance × multiplier × 0.1` (mirrors the
+   original RTS distance income, with the 0.1 factor scaling
+   it down so the pickup bumps stay perceptible) plus Tri
+   pickup (5 × mult) and booster pickup (10 × mult) bonuses,
+   all sharing the same `multiplier`. `pickups_tri` is
+   monotonic per run; the top-left opaque grey HUD panel
+   shows four Tri slots filling left-to-right (lit-count =
+   `pickups_tri % 5`) plus the current multiplier — the 5th
+   pickup ticks the multiplier and resets the row in the
+   same frame. New `sfx_pickup_plink` plays one of five
+   ascending pentatonic pitches (C5/D5/E5/G5/A5) keyed to
+   the in-cycle slot index, so the 5 pickups of a cycle
+   form a brief musical phrase that resolves on the 5th
+   note (the audio cue for the multiplier bump). New
+   `objects/tri.c` is a copy of the original
+   `objects/booster.c` pyramid, recoloured cyan-blue; the
+   booster itself moves to a slowly-rotating regular
+   icosahedron in `render_booster_icosahedron` (12 verts /
+   20 faces / 30 edges, ~1 Hz Y-axis spin, faceted-gem
+   shading with face-normal lighting + edge wireframe).
+   Per-area spawn rules (all per the locked 2026-05-14
+   spec): pixel_field half-count + big_blocks equal-count
+   via rejection-sampling against the live obstacle pool
+   (new `world_find_free_x` helper), gateways +
+   dynamic_gateway fill the non-booster hole, dynamic_passage
+   emits one per flipping cube in the clutter (own
+   safe-lane-aware emit_tri), bridges co-spawn one per
+   bridge along a random-angle line picked at area init,
+   rest area between stages lays 10 Tris + 1 booster on a
+   quadratic-Bézier S-curve (P0=P1 in x for zero tangent at
+   t=0); pre-stage-1 lead-in deliberately exempted. Crash
+   penalty (-5 to multiplier, floor 1) wired in
+   `game_collide`. Per-run + all-time Tri totals persist
+   automatically via the existing `run_stats` merge. See
+   the 2026-05-13 / 2026-05-14 Phase 6 decisions-log
+   entries for the full reasoning trail.
 7. ✅ **Audio** (landed 2026-05-13). Diverged from the original
    "embed PCM via xxd" plan: SFX are procedurally generated by
    shared DSP primitives (`main/audio_dsp.{c,h}` — oscillators,

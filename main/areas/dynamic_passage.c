@@ -2,9 +2,11 @@
 
 #include <math.h>
 
+#include "magicnumbers.h"
 #include "objects/booster.h"
 #include "objects/cube.h"
 #include "objects/flipping_cube.h"
+#include "objects/tri.h"
 #include "world.h"
 
 #define PASSAGE_FLIP_MIN              4
@@ -84,6 +86,51 @@ void area_dynamic_passage_init(area_state_t* a, uint16_t stage, uint32_t* prng) 
 // spawn at the last-drawn x — a single clutter cube straddling the
 // safe-lane edge is a far more acceptable failure mode than skipping
 // the spawn entirely (which would visibly thin the clutter wall).
+// Try to place a Tri in the clutter region — outside the safe lane
+// (Phase 6 rule: "placed randomly in the pixel field area", which is
+// the clutter side, not the bait lane) and not overlapping any
+// existing obstacle at WORLD_Z_FAR_SPAWN. Skip silently if every
+// candidate clashes — Tris are bonus pickups, not mandatory path.
+static void emit_tri(world_state_t* w, area_state_t const* a) {
+    float const flip_x       = passage_flip_x(a->passage_mirror);
+    float const safe_radius  = FLIPPING_CUBE_HALF_W + GAME_TRI_HALF_W;
+    float const x_extent     = TRACK_HALF_WIDTH - GAME_TRI_HALF_W - 0.5f;
+    float const pad          = 1.5f * GAME_TRI_HALF_W;
+    float const z_target     = WORLD_Z_FAR_SPAWN;
+    float const z_lo         = z_target - GAME_TRI_HALF_W - pad;
+    float const z_hi         = z_target + GAME_TRI_HALF_W + pad;
+
+    for (int attempt = 0; attempt < 8; attempt++) {
+        float const cand_x = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * x_extent;
+        // Reject if inside the safe lane — the Tri belongs in the
+        // pixel-field clutter, not where the player will already be
+        // steering naturally.
+        if (fabsf(cand_x - flip_x) < safe_radius) continue;
+
+        // Reject overlaps with active obstacles at this z.
+        float const x_lo = cand_x - GAME_TRI_HALF_W - pad;
+        float const x_hi = cand_x + GAME_TRI_HALF_W + pad;
+        bool clash = false;
+        for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+            obstacle_t const* o = &w->obstacles[i];
+            if (!o->active) continue;
+            float const o_x_lo = o->x_world - o->half_w;
+            float const o_x_hi = o->x_world + o->half_w;
+            float const o_z_lo = o->z_world - o->half_d;
+            float const o_z_hi = o->z_world + o->half_d;
+            if (x_hi > o_x_lo && x_lo < o_x_hi &&
+                z_hi > o_z_lo && z_lo < o_z_hi) {
+                clash = true;
+                break;
+            }
+        }
+        if (!clash) {
+            tri_spawn_at(w, cand_x, z_target);
+            return;
+        }
+    }
+}
+
 static void emit_clutter(world_state_t* w, area_state_t const* a) {
     float const x_extent = TRACK_HALF_WIDTH - CUBE_PIXEL_HALF_W;
     float const flip_x   = passage_flip_x(a->passage_mirror);
@@ -126,6 +173,14 @@ bool area_dynamic_passage_tick(world_state_t* w, area_state_t* a, float dz) {
             booster_spawn_at(w, flip_x, WORLD_Z_FAR_SPAWN - 0.5f * PASSAGE_FLIP_SPACING);
             a->boosters_owed--;
         }
+
+        // Phase 6: one Tri per flipping cube, placed in the clutter
+        // region (outside the safe lane). Spawned at the same z as
+        // the cube — the Tri is visible in the clutter as the cube
+        // appears, giving the player a visual reward target tied to
+        // each cube. Co-spawned rather than on its own cadence so
+        // count tracks the cube count exactly.
+        emit_tri(w, a);
 
         a->gates_remaining--;
         a->next_event_z += PASSAGE_FLIP_SPACING;
