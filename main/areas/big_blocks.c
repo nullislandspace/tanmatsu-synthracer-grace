@@ -13,7 +13,7 @@
 #define BIG_INTERVAL_MIN       20.0f
 #define BIG_INTERVAL_MAX       35.0f
 
-void area_big_blocks_init(area_state_t* a, uint8_t stage, uint32_t* prng) {
+void area_big_blocks_init(area_state_t* a, uint16_t stage, uint32_t* prng) {
     float const scale    = world_stage_interval_scale(stage);
     float const interval = (BIG_INTERVAL_MIN
                            + world_frand(prng) * (BIG_INTERVAL_MAX - BIG_INTERVAL_MIN))

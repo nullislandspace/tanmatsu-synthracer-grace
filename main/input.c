@@ -17,6 +17,7 @@ static bool          s_menu_cancel   = false; // latest ESC press
 static bool          s_backspace     = false; // latest BACKSPACE press
 static int           s_digit         = -1;    // 0..9 if a digit was typed, else -1
 static bool          s_pause_toggle  = false; // latest F4 press edge
+static bool          s_force_area    = false; // latest TAB press edge (debug)
 
 void input_init(void) {
     esp_err_t res = bsp_input_get_queue(&s_event_queue);
@@ -77,6 +78,8 @@ bool input_drain_events(void) {
                     s_sun_delta += 1;     // push sun toward sunset
                 } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_A) {
                     s_sun_delta -= 1;     // push sun back toward zenith
+                } else if (event.args_scancode.scancode == BSP_INPUT_SCANCODE_TAB) {
+                    s_force_area = true;  // debug: force next area type
                 }
                 break;
             case INPUT_EVENT_TYPE_KEYBOARD:
@@ -172,5 +175,11 @@ bool input_consume_digit(int* out_digit) {
 bool input_consume_pause_toggle(void) {
     bool e          = s_pause_toggle;
     s_pause_toggle = false;
+    return e;
+}
+
+bool input_consume_force_next_area(void) {
+    bool e        = s_force_area;
+    s_force_area = false;
     return e;
 }

@@ -346,33 +346,24 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
     }
 
     // --- Shadow detection ------------------------------------------------
-    // Past full sunset everything is in shadow. Otherwise check
-    // every active CUBE obstacle ahead of the ship: shadow extends
-    // toward the camera by `obstacle.height * factor`, where factor
-    // ranges from GAME_SHADOW_LEN_FACTOR_MIN (sun high) to
-    // GAME_SHADOW_LEN_FACTOR_MAX (sun about to set).
-    g->in_shadow = false;
+    // Post-sunset is the only synchronous case — `in_shadow = true`
+    // regardless of what last frame's pixel sample said. Below the
+    // sunset threshold, `g->in_shadow` is set by main.c's
+    // floor-pixel sampler in the render pass (after render_shadows
+    // and before lane lines paint over the floor). That sample
+    // reads the actual painted shadow, so every object's
+    // shadow — including custom shadow callbacks like the bridge
+    // span — automatically counts toward the gameplay shadow test
+    // with no per-object math here. We leave the bit alone in this
+    // branch so the previous-frame value carries forward; one frame
+    // of lag at the shadow's edge is well below the perceptual
+    // threshold (~0.33 u of travel at cruise).
     if (g->sun_y >= GAME_SUN_SINK_RANGE_PX) {
         g->in_shadow = true;
-    } else {
-        float const sun_norm = g->sun_y / GAME_SUN_SINK_RANGE_PX;
-        float const factor   = GAME_SHADOW_LEN_FACTOR_MIN
-                             + (GAME_SHADOW_LEN_FACTOR_MAX - GAME_SHADOW_LEN_FACTOR_MIN) * sun_norm;
-        float const ship_z   = SHIP_COLLISION_Z_C;
-        for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
-            obstacle_t const* o = &w->obstacles[i];
-            if (!o->active) continue;
-            if (o->kind != OBSTACLE_KIND_CUBE) continue;
-            if (o->z_world <= ship_z) continue;                       // obstacle is behind us
-            float const obs_zN     = o->z_world - o->half_d;
-            float const shadow_len = o->height * factor;
-            if (obs_zN - shadow_len >= ship_z) continue;              // shadow doesn't reach the ship
-            float const dx = fabsf(o->x_world - g->ship_x_world);
-            if (dx > o->half_w + SHIP_COLLISION_HALF_W) continue;     // lateral miss
-            g->in_shadow = true;
-            break;
-        }
     }
+    // (void)w retained because future logic may want the obstacle
+    // pool again; the loop is gone today.
+    (void)w;
 
     // --- Speed dynamics --------------------------------------------------
     // Priority order (top wins):

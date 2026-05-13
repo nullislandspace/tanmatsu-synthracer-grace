@@ -1118,6 +1118,15 @@ void app_main(void) {
         bool const pickup_pressed = input_consume_pickup();
         int  const steer          = input_steering();
 
+        // Debug: TAB cuts the current area short and forces the
+        // next one to a specific type. Currently hard-wired to
+        // bridges; change the area_type_t argument here to test a
+        // different generator. Only acts during PLAYING so a stray
+        // TAB on a menu doesn't strand the world in an odd state.
+        if (input_consume_force_next_area() && app_state == APP_STATE_PLAYING) {
+            world_force_next_area(&world, AREA_TYPE_BRIDGES);
+        }
+
         int64_t const t_after_input = esp_timer_get_time();
         bool          head_on       = false;
 
@@ -1197,6 +1206,40 @@ void app_main(void) {
         synthwave_step_base(fb, fully_shadowed);
         if (!is_menu_state) {
             render_shadows(fb, &world, game.cam_x, game.sun_y);
+        }
+        // Shadow-under-ship sample. After render_shadows has painted
+        // every shadow quad (both kind-dispatched defaults and the
+        // custom callbacks the bridge span and friends install) on
+        // top of the floor base, and *before* synthwave_step_lines
+        // overlays lane lines, the floor pixel directly under the
+        // ship's foot is either the floor-base 565 (0x5851) or the
+        // shadow 565 (0x284A). A single uint16_t comparison turns
+        // that into the in_shadow bit — automatically respecting
+        // every object's actual painted shadow with no per-object
+        // math. The result feeds *next* frame's game_after_collide
+        // (one-frame stale; ship moves ~0.3 u/frame at cruise, so
+        // the edge transition lags by an imperceptible 0.33 u).
+        // Post-sunset is handled synchronously in game_after_collide
+        // since the floor base is painted shadow-coloured anyway.
+        if (app_state == APP_STATE_PLAYING) {
+            float sx, sy;
+            render_project(game.ship_x_world, 0.0f, SHIP_COLLISION_Z_C,
+                           game.cam_x, &sx, &sy);
+            int lx = (int)sx;
+            int ly = (int)sy;
+            // Ship's foot at z=SHIP_COLLISION_Z_C (~1.98) projects to
+            // sy≈483 — below the 480 px floor. Clamp to the last
+            // visible row; that pixel corresponds to z ≈ 2.02, only
+            // 0.04 u in front of the ship, well inside any normal
+            // shadow's z extent. Without this clamp the in-bounds
+            // check rejects every sample and the bit never updates.
+            if (ly >= DISPLAY_LOG_H) ly = DISPLAY_LOG_H - 1;
+            if (lx >= 0 && lx < DISPLAY_LOG_W && ly >= 0) {
+                uint16_t const px            = ((uint16_t*)pax_buf_get_pixels(fb))[direct_565_logical_index(lx, ly)];
+                uint16_t const shadow_packed = direct_565_pack(GAME_SHADOW_FLOOR_COLOR,
+                                                               fb->reverse_endianness);
+                game.in_shadow = (px == shadow_packed);
+            }
         }
         synthwave_step_lines(fb, floor_scroll, floor_cam_x);
         int64_t const t_after_bgflr = esp_timer_get_time();

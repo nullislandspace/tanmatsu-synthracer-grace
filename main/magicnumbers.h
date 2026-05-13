@@ -128,6 +128,17 @@
 // `0xFF5D0B8B`. Default chosen as a darker, desaturated variant
 // of the same purple so shadows read as "floor in shade" rather
 // than "another colored object".
+//
+// **DO NOT** change this colour to be within ~7 quantization steps
+// (out of 31 per channel for R/B, 63 for G) of the floor base
+// `0xFF5D0B8B` in *any* channel. Today the two pack to RGB565
+// 0x284A vs 0x5851, comfortably distinct on R and B. Main.c's
+// shadow-under-ship sampler does a single uint16_t compare against
+// the packed value of this constant to set `game.in_shadow` — if
+// the floor base ever collapses to the same 565 word, the sampler
+// silently reads "always in shadow". Same caveat applies if anything
+// new in synthwave_step_base paints with a colour that quantises
+// to 0x284A.
 #define GAME_SHADOW_FLOOR_COLOR           0xFF2D0855u
 
 // Multiplier applied to each RGB channel of the ship sprite when

@@ -22,10 +22,11 @@
 // PRNG mixed from the level seed and the stage index, so re-running
 // the same seed reproduces every stage identically.
 //
-// Pool sized for ~33 wall segments per side (left + right cover the
-// 0..100 z range at 3-unit segment length), ~5 gateway slab pairs,
-// plus headroom for dynamic obstacles and future pickups.
-#define WORLD_OBSTACLE_POOL_SIZE 128
+// Pool sized generously so compound objects (bridges = 3 entries
+// each, up to 5 per area; future compounds with more parts) can
+// coexist with the always-on side-wall segments (~66 entries) and
+// the dynamic area spawns without bumping into the cap.
+#define WORLD_OBSTACLE_POOL_SIZE 512
 
 // Stage / rest budgets, world-z units. Derived from the tunable
 // `GAME_STAGE_SECONDS` / `GAME_REST_SECONDS` × `GAMEPLAY_CRUISE_SPEED`
@@ -57,6 +58,7 @@ typedef enum {
     AREA_TYPE_PIXEL_FIELD = 0,     // small cubes, randomly placed across the track
     AREA_TYPE_GATEWAYS,            // wall slabs spanning the track with one ship-sized opening
     AREA_TYPE_BIG_BLOCKS,          // sparser, larger grey cubes (2× pixel cubes laterally)
+    AREA_TYPE_BRIDGES,             // concrete archways spanning the track — visual + shadow only
     AREA_TYPE_REST,                // empty stretch between stages
 } area_type_t;
 
@@ -76,7 +78,7 @@ typedef struct area_state_s {
 
 typedef struct world_state_s {
     obstacle_t obstacles[WORLD_OBSTACLE_POOL_SIZE];
-    uint8_t    stage;                // 1..N, ticks over after each rest area
+    uint16_t   stage;                // 1..N, ticks over after each rest area (16 bits → effectively unlimited)
     float      stage_z_remaining;    // world-z left in the current stage
     area_state_t area;               // active area's state
     uint32_t   level_seed;           // run-wide seed; preserves stage determinism across stage rollovers
@@ -89,6 +91,13 @@ typedef struct world_state_s {
     // start to N evenly-spaced+jittered values; each slot is
     // overwritten with -1 once its scheduled point fires.
     float      booster_due_at_progress[GAME_BOOSTERS_PER_STAGE];
+
+    // Debug-only override: when ≥ 0, the next `start_next_area` call
+    // uses this area type instead of the picker (bypassing all
+    // min-stage gating). Cleared as soon as it's consumed.
+    // Set via `world_force_next_area`, typically wired to a debug
+    // key in main.c. -1 = no override.
+    int        forced_next_area_type;
 } world_state_t;
 
 // Initialize the obstacle pool, seed the per-run PRNG, fill the side
@@ -107,11 +116,20 @@ void world_init(world_state_t* w, uint32_t seed);
 // up so the track edges stay continuous.
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x);
 
+// Debug: force the next `start_next_area` call to use `t`, bypassing
+// the area picker (and any min-stage gating it might gain). Also
+// cuts the current area's length budget to zero so the override
+// takes effect on the very next world-advance pass instead of
+// waiting for the current area to finish naturally. If the stage
+// budget is also exhausted by then, the rest area inserts first and
+// the override applies after the stage rollover.
+void world_force_next_area(world_state_t* w, area_type_t t);
+
 // --- Shared PRNG / staging helpers ---------------------------------
 // Used by the area generators in main/areas/*.c. xorshift state is
 // per-stage so content is reproducible from (level_seed, stage).
 
 uint32_t world_xorshift32(uint32_t* s);
 float    world_frand(uint32_t* s);                       // uniform [0, 1)
-float    world_lerp_by_stage(uint8_t stage, float at_one, float at_ten);
-float    world_stage_interval_scale(uint8_t stage);
+float    world_lerp_by_stage(uint16_t stage, float at_one, float at_ten);
+float    world_stage_interval_scale(uint16_t stage);

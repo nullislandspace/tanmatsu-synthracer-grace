@@ -9,7 +9,7 @@ struct world_state_s;
 // Set `*a` to a freshly-initialised pixel-field area for `stage`.
 // Reads from `*prng` so length budget + first event interval are
 // deterministic from the stage seed.
-void area_pixel_field_init(struct area_state_s* a, uint8_t stage, uint32_t* prng);
+void area_pixel_field_init(struct area_state_s* a, uint16_t stage, uint32_t* prng);
 
 // Tick the area by `dz` world-z units. Spawns due events into the
 // shared obstacle pool (consuming boosters_owed when one is due).

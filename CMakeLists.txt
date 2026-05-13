@@ -22,9 +22,11 @@ set(APP_SOURCES
     main/objects/cube.c
     main/objects/wall.c
     main/objects/booster.c
+    main/objects/bridge.c
     main/areas/pixel_field.c
     main/areas/big_blocks.c
     main/areas/gateways.c
+    main/areas/bridges.c
     main/areas/rest.c
     main/nbt.c
     main/save.c

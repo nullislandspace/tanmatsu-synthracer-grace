@@ -93,6 +93,14 @@ struct obstacle_s {
     float    half_w;
     float    half_d;
     float    height;
+    // y_base = vertical offset of the cube's bottom face above the
+    // ground plane. Default 0 → standard ground-level cube. Elevated
+    // objects (pillars sitting on top of walls, bridge spans, future
+    // floating decals) set this so the renderer puts the geometry
+    // at the right altitude. The cube's y range is
+    // [y_base, y_base + height]. Default render reads this; custom
+    // draw callbacks may override.
+    float    y_base;
 
     // --- Standard colour set (read by the default renderer) -----
     uint32_t front_color;

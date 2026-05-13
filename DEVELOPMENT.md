@@ -10,7 +10,7 @@
 
 ## Current Status
 
-**Phase: Phase 4 complete; stage/area world generation landed early (parts of Phase 10); Phase 5 next**
+**Phase: Phase 5 complete; persistence + scoring + menus + bridges area landed; Phase 6 (Tris + multiplier) next**
 
 | Phase | Description | State |
 |-------|-------------|-------|
@@ -1442,6 +1442,188 @@
   (Phase 11 enforces; today it's just stored on the save
   alongside `last_custom_seed`).
 
+- 2026-05-13 — **World generation modularised.** The previous
+  monolithic `world.c` was carrying object spawners, area
+  generators, the obstacle pool, and the orchestrator. Split
+  along functional lines:
+  - `main/obstacle.{c,h}` — `obstacle_t` + `obstacle_spawn` /
+    `obstacle_despawn` helpers + 5 optional callback typedefs
+    (`physics`, `cleanup`, `collide`, `draw`, `shadow`). Each
+    is NULL-guarded at the call site, falling through to the
+    centralised kind-dispatch default. A 128-byte 16-aligned
+    `scratch` block lives on each pool entry — objects overlay
+    their own state struct via `(my_state_t*)o->scratch`. No
+    heap allocation during gameplay; per-object state is
+    bounded by the inline buffer. Objects needing more can
+    store a heap pointer in scratch and free it in `cleanup`.
+  - `main/objects/{cube,wall,booster,bridge}.{c,h}` — one
+    file per object type, holding its spawners, palette,
+    dimensions, and any custom callbacks it installs.
+  - `main/areas/{pixel_field,big_blocks,gateways,bridges,rest}.{c,h}`
+    — one file per area generator, importing whichever object
+    spawners it composes. Areas no longer touch the
+    palettes/dimensions of the objects they use.
+  - `main/world.c` — slim orchestrator: PRNG helpers, area
+    picker, stage state machine, pool sweep with physics
+    dispatch, booster scheduler. About 230 lines (was ~600).
+  - `WORLD_OBSTACLE_POOL_SIZE` bumped 128 → **512** so compound
+    objects (bridges = 3 entries) can coexist with the always-on
+    wall segments (~66) without crowding. BSS grew 26 KB → 100 KB
+    in internal SRAM; plenty of headroom on the Tanmatsu's 768 KB.
+  - Render and collision still kind-dispatch by default
+    (`render_obstacles`, `render_shadows`, `game_collide`) so
+    every existing object works unchanged; per-object
+    callbacks override when set.
+
+- 2026-05-13 — **Bridges area + concrete-grey bridge object.**
+  New visual area type: 1..5 concrete bridges spanning the
+  playfield. Stage-agnostic (no difficulty scaling).
+  Implementation pattern:
+  - `objects/bridge.c` spawns 3 pool entries per bridge: left
+    pillar, right pillar, horizontal span.
+  - Pillars are cube-kind, sit on top of the side walls (see
+    the y_base entry below). Default cube render handles them.
+  - Span is cube-kind with three custom callbacks:
+    - `draw` — renders the elevated slab (camera below the
+      span, so visible faces are bottom + front + wireframe).
+    - `shadow` — projects a wide rectangle on the ground.
+    - `collide` — returns `OBSTACLE_HIT_IGNORE` so the ship's
+      x-z AABB overlap doesn't kill it (ship at y≈0.22 < span
+      at y≥3.67 — they physically never touch).
+  - `areas/bridges.c` snaps bridge spawn z to the nearest
+    wall-segment centre at or below `WORLD_Z_FAR_SPAWN`, so
+    each bridge sits exactly on one wall segment and one floor
+    stripe. Gap = `2 × BRIDGE_DEPTH = 6 u` (two wall segments)
+    so the projected shadow on the floor at sun-up leaves a
+    clear lit strip between consecutive bridges — sky pattern
+    bridge-open-bridge-open maps to floor pattern
+    shadow-lit-shadow-lit.
+  - The booster scheduler still increments `boosters_owed`
+    during bridge areas; the area's tick fires
+    `booster_spawn(w)` at random x on the floor, anywhere in
+    the run, when one is owed.
+
+- 2026-05-13 — **`y_base` on `obstacle_t` for elevated cubes.**
+  Added `float y_base;` to the obstacle struct, default 0
+  (set by `memset` in `obstacle_spawn`). The default cube
+  renderer now uses `y_base` for the cube's bottom face and
+  `y_base + height` for the top — ground-level cubes are
+  unaffected (y_base = 0 → unchanged math). Two consumers
+  today:
+  - **Bridge pillars** set `y_base = WALL_HEIGHT` so they sit
+    cleanly on top of the side walls instead of overlapping
+    them (the old "pillar from y=0 with height=3" geometry
+    intersected the wall's y=0..0.67 range and produced
+    draw-order flicker).
+  - **Bridge span** sets `BRIDGE_SPAN_Y_BASE = WALL_HEIGHT +
+    BRIDGE_PILLAR_HEIGHT` so it sits on top of the pillars.
+    The span keeps its custom draw because the default
+    renderer assumes camera-above-cube and doesn't have a
+    bottom-face code path (camera at y=1 is below the entire
+    span at y=3.67..4.17).
+
+  The default shadow path still uses just `height * factor`
+  for shadow length, not `(y_base + height) * factor` — that's
+  intentional, kept for ground-cube correctness. Elevated
+  shadows that care (the span) install custom shadow callbacks
+  that compute the right elevation-based length themselves.
+
+- 2026-05-13 — **TAB debug key forces the next area type.**
+  Scancode `BSP_INPUT_SCANCODE_TAB` raises `s_force_area` in
+  `input.c`. Main loop consumes it during `STATE_PLAYING` and
+  calls `world_force_next_area(&world, AREA_TYPE_BRIDGES)`,
+  which zeros the active area's `length_remaining_z` and
+  stashes the forced type in `world.forced_next_area_type`.
+  The next `start_next_area` call reads the field, bypasses
+  `pick_area_type` entirely, and consumes the override. Skips
+  min/max-stage gating — that's the point: forcing into bridges
+  at stage 1 works the same way it would at stage 50. Change
+  the area-type literal in `main.c` to test a different area.
+
+- 2026-05-13 — **Area picker retry loop + min/max stage
+  bounds.** `pick_area_type` now loops up to 32 attempts on
+  rejection — `area_is_applicable(type, stage)` checks
+  `min_stage <= stage <= max_stage`, falls back to
+  `AREA_TYPE_PIXEL_FIELD` (always unlocked at stage 1) if no
+  candidate fits. All current areas use `[1, 0xFFFF]` so the
+  loop never actually re-rolls; the contract is here for
+  Phase 10's area gating. The retry consumes PRNG draws per
+  attempt, so adding a gated area shifts the per-stage PRNG
+  stream for runs that hit the rejection — daily seed
+  determinism within a version preserved; cross-version
+  stability of "what seed X plays like" not.
+
+- 2026-05-13 — **Stage counter bumped uint8_t → uint16_t.**
+  Real-game Race The Sun runs can pass stage 255; the cap was
+  hit in YouTube videos. Now stage is `uint16_t` everywhere
+  (`world_state_t.stage`, `start_stage`, `mix_stage_seed`,
+  `world_lerp_by_stage`, `world_stage_interval_scale`,
+  `area_is_applicable`, `pick_area_type`, all `area_X_init`
+  signatures). Sentinel for "never expires" is now `0xFFFF`
+  (~45 days of continuous cruise to reach). The save struct's
+  `stage_reached` was already int32, no save-format change.
+
+- 2026-05-13 — **Pixel-sample shadow detection.** Replaced
+  `game_after_collide`'s 512-entry obstacle loop with a single
+  framebuffer read. After `render_shadows` paints all the
+  shadow quads on the floor (including custom-callback
+  shadows like the bridge span) and *before*
+  `synthwave_step_lines` overlays lane lines, the floor pixel
+  under the ship's foot is either the floor-base 565 (0x5851)
+  or the shadow 565 (0x284A). A single `uint16_t ==`
+  comparison sets `game.in_shadow` for the next frame.
+  Benefits:
+  - **Automatic respect for custom shadow callbacks.** No
+    parallel math: the painted shadow IS the gameplay shadow.
+  - **Cheaper** — one pixel read + one projection per frame,
+    replacing a per-entry loop over 512 pool slots.
+  - **Compositional** — overlapping shadows from multiple
+    objects produce "in shadow" naturally; no special-casing.
+
+  Sharp edges:
+  - One-frame stale (sample feeds next frame's physics). At
+    cruise (20 u/s) that's 0.33 u of travel — well below a
+    half-cube width.
+  - The ship's foot at z=`SHIP_COLLISION_Z_C`=1.98 projects to
+    sy≈483, just below the 480-pixel floor. `ly` is clamped
+    to `DISPLAY_LOG_H - 1`, sampling at z≈2.02 — 0.04 u in
+    front of the ship, on the floor.
+  - The lane-line collision is avoided by sampling *between*
+    shadows and lines: the centre lane line at world x = cam_x
+    projects to the ship's screen x, so a post-lines sample
+    would hit it.
+  - Post-sunset is handled synchronously in `game_after_collide`
+    (the floor base is the shadow colour anyway, so the
+    sampler would agree — but the sync override beats the
+    one-frame lag at the sunset transition).
+  - 565-quantisation coupling: if the floor base ever shifts
+    to within ~7 quantisation steps in R or B of the shadow
+    constant, the sampler silently reads "always in shadow".
+    Comment block on `GAME_SHADOW_FLOOR_COLOR` in
+    magicnumbers.h flags this.
+
+- 2026-05-13 — **Misc tunings.**
+  - **Turn rate scales with forward speed.** Lateral motion
+    was `bank * SHIP_TURN_RATE * dt` (flat 3.5 u/s). At boost
+    speed the same lateral over 2× longitudinal felt like
+    understeer. Now `turn_rate = SHIP_TURN_RATE *
+    (ship_speed_z / GAMEPLAY_CRUISE_SPEED)` so the
+    lateral-to-longitudinal ratio is constant at any speed.
+    Stall turning drops toward zero — physically right, adds
+    tension to shadow stalls.
+  - **Gateway pad fixed at 50 u.** Used to lerp 30 → 10 over
+    stages 1-10, which made hard-left → hard-right alignment
+    sequences physically unreachable at cruise speed. The
+    entire difficulty curve now lives in the lateral opening
+    width; pad is constant.
+  - **Booster placement delegated to areas.** `boosters_owed`
+    counter on `area_state_t` is bumped by the top-level
+    scheduler when a stage-progress mark is crossed; each
+    area's tick consumes the counter and decides *where*:
+    pixel-field / big-blocks displace a cube spawn, gateways
+    drop one in the gap of the next gate, rest dumps any
+    leftovers on entry.
+
 ---
 
 ## Future FPS improvements
@@ -1680,6 +1862,18 @@ the function makes it explicit and lets us animate the sun.
     set is continuous across wraps.
 
 ### `world.c` — daily seed, stages, areas, content streams
+
+> **Outdated as of 2026-05-13** — the monolithic `world.c` described
+> below has been split: object spawners live in `main/objects/*`,
+> area generators in `main/areas/*`, and `obstacle_t` + pool helpers
+> in `main/obstacle.{c,h}`. `world.c` itself is now a slim
+> orchestrator (~230 lines). The architecture description below is
+> retained for the gameplay-level concepts (stages, areas, booster
+> scheduling, daily seed) which are still accurate. For the
+> file-layout details and the per-object callback contract, see the
+> **2026-05-13 — World generation modularised** entry in the
+> decisions log.
+
 
 - `world_init(world_state_t*, uint32_t level_seed)` — stores the run
   seed, clears the obstacle pool, fills the side walls so they're

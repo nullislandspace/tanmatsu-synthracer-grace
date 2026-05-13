@@ -28,12 +28,13 @@ static inline pax_col_t dim_argb_render(pax_col_t col, float scale) {
 // Near-plane clipping. When the camera moves into a long obstacle's
 // z range (the front edge passes the camera before the back does)
 // the projection of the front face heads to infinity. We don't try
-// to render anything closer than NEAR_CLIP_Z; if the front edge is
+// to render anything closer than RENDER_NEAR_CLIP_Z; if the front edge is
 // past the clip plane we drop the front face entirely and clip the
-// side and top faces' front edges back to NEAR_CLIP_Z. The whole
+// side and top faces' front edges back to RENDER_NEAR_CLIP_Z. The whole
 // cube is skipped if the back edge is also past the clip — by then
 // the obstacle's despawn condition will fire on the next frame.
-#define NEAR_CLIP_Z 0.5f
+// (Constant lives in render.h so custom-draw object modules clip
+// their own geometry consistently.)
 
 void render_project(float x_w, float y_w, float z_w, float cam_x, float* out_sx, float* out_sy) {
     if (z_w < 0.01f) z_w = 0.01f;  // guard against /0 if a near-clip slips through
@@ -77,9 +78,9 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
         // Same near-plane clipping rule as render_obstacles: drop
         // the whole shadow if its far edge is already past the
         // near clip; otherwise clip the near edge of the quad to
-        // NEAR_CLIP_Z so the projection doesn't blow up.
-        if (z_far < NEAR_CLIP_Z) continue;
-        float const z_near = (z_near_raw < NEAR_CLIP_Z) ? NEAR_CLIP_Z : z_near_raw;
+        // RENDER_NEAR_CLIP_Z so the projection doesn't blow up.
+        if (z_far < RENDER_NEAR_CLIP_Z) continue;
+        float const z_near = (z_near_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : z_near_raw;
 
         // Project the four corners of the shadow rectangle on the
         // y = 0 ground plane. The result on screen is a trapezoid
@@ -107,15 +108,15 @@ static void render_booster_pyramid(uint16_t* fb_pixels, obstacle_t const* o, flo
                                    bool rev_endian, float pulse) {
     // Whole-pyramid near-plane cull. Pyramids are short in z
     // (half_d = 0.4) and small, so once the apex is at or behind
-    // NEAR_CLIP_Z just drop the whole thing — saves the
+    // RENDER_NEAR_CLIP_Z just drop the whole thing — saves the
     // projection / clipping math for almost-passed pickups.
-    if (o->z_world < NEAR_CLIP_Z) return;
+    if (o->z_world < RENDER_NEAR_CLIP_Z) return;
 
     float const xL = o->x_world - o->half_w;
     float const xR = o->x_world + o->half_w;
     float const zF = o->z_world - o->half_d;
     float const zB = o->z_world + o->half_d;
-    float const zN = (zF < NEAR_CLIP_Z) ? NEAR_CLIP_Z : zF;
+    float const zN = (zF < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : zF;
 
     // 5 projected vertices: apex + 4 base corners (clockwise from
     // front-left when viewed from above).
@@ -222,7 +223,7 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         // the centre along z; front face sits at zF_raw, back at
         // zB. If the back edge is already past the near clip the
         // whole cube has nothing to draw — bail. Otherwise clip the
-        // front edge to NEAR_CLIP_Z; if zF_raw was further than the
+        // front edge to RENDER_NEAR_CLIP_Z; if zF_raw was further than the
         // clip we keep the real front face, otherwise we drop the
         // front face and the side/top faces use the clipped near
         // edge instead of the geometric front.
@@ -230,26 +231,29 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         float const xR     = o->x_world + o->half_w;
         float const zF_raw = o->z_world - o->half_d;
         float const zB     = o->z_world + o->half_d;
-        float const yT     = o->height;
-        if (zB < NEAR_CLIP_Z) continue;
-        bool  const front_visible = (zF_raw >= NEAR_CLIP_Z);
-        float const zF            = front_visible ? zF_raw : NEAR_CLIP_Z;
+        float const yB     = o->y_base;
+        float const yT     = o->y_base + o->height;
+        if (zB < RENDER_NEAR_CLIP_Z) continue;
+        bool  const front_visible = (zF_raw >= RENDER_NEAR_CLIP_Z);
+        float const zF            = front_visible ? zF_raw : RENDER_NEAR_CLIP_Z;
 
         // Project the 6 corners we actually need (front face + the
         // back edge of the visible side + the back-top edge for the
         // top face). The two unused back-bottom corners (LBB, RBB)
-        // would only be needed if we drew the bottom face, which is
-        // never visible (camera is above ground).
+        // would only be needed if we drew the bottom face, which the
+        // default renderer doesn't handle (cubes whose entire body
+        // sits above the camera want custom draw callbacks — they're
+        // out of scope here).
         float sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_LTF, sy_LTF, sx_RTF, sy_RTF;
         float sx_LTB, sy_LTB, sx_RTB, sy_RTB, sx_LBB, sy_LBB, sx_RBB, sy_RBB;
-        render_project(xL, 0.0f, zF, cam_x, &sx_LBF, &sy_LBF);
-        render_project(xR, 0.0f, zF, cam_x, &sx_RBF, &sy_RBF);
-        render_project(xL, yT,   zF, cam_x, &sx_LTF, &sy_LTF);
-        render_project(xR, yT,   zF, cam_x, &sx_RTF, &sy_RTF);
-        render_project(xL, yT,   zB, cam_x, &sx_LTB, &sy_LTB);
-        render_project(xR, yT,   zB, cam_x, &sx_RTB, &sy_RTB);
-        render_project(xL, 0.0f, zB, cam_x, &sx_LBB, &sy_LBB);
-        render_project(xR, 0.0f, zB, cam_x, &sx_RBB, &sy_RBB);
+        render_project(xL, yB, zF, cam_x, &sx_LBF, &sy_LBF);
+        render_project(xR, yB, zF, cam_x, &sx_RBF, &sy_RBF);
+        render_project(xL, yT, zF, cam_x, &sx_LTF, &sy_LTF);
+        render_project(xR, yT, zF, cam_x, &sx_RTF, &sy_RTF);
+        render_project(xL, yT, zB, cam_x, &sx_LTB, &sy_LTB);
+        render_project(xR, yT, zB, cam_x, &sx_RTB, &sy_RTB);
+        render_project(xL, yB, zB, cam_x, &sx_LBB, &sy_LBB);
+        render_project(xR, yB, zB, cam_x, &sx_RBB, &sy_RBB);
 
         // Visible-face selection. A face is visible when the camera
         // is on the side its outward normal points to.

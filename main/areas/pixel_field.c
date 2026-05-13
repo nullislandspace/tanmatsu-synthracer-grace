@@ -12,7 +12,7 @@
 #define PIXEL_INTERVAL_MIN     12.0f
 #define PIXEL_INTERVAL_MAX     22.0f
 
-void area_pixel_field_init(area_state_t* a, uint8_t stage, uint32_t* prng) {
+void area_pixel_field_init(area_state_t* a, uint16_t stage, uint32_t* prng) {
     float const scale    = world_stage_interval_scale(stage);
     float const interval = (PIXEL_INTERVAL_MIN
                            + world_frand(prng) * (PIXEL_INTERVAL_MAX - PIXEL_INTERVAL_MIN))

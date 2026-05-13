@@ -55,7 +55,7 @@ static void spawn_gate(world_state_t* w, float half_gap, bool with_booster) {
     }
 }
 
-void area_gateways_init(area_state_t* a, uint8_t stage, uint32_t* prng) {
+void area_gateways_init(area_state_t* a, uint16_t stage, uint32_t* prng) {
     int n = GATEWAY_COUNT_MIN
           + (int)(world_frand(prng) * (float)(GATEWAY_COUNT_MAX - GATEWAY_COUNT_MIN + 1));
     if (n > GATEWAY_COUNT_MAX) n = GATEWAY_COUNT_MAX;

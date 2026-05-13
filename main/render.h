@@ -12,6 +12,11 @@
 #define RENDER_FOCAL_LEN    450.0f
 #define RENDER_CAM_Y        1.0f
 
+// Near-plane z below which projections blow up. Shared by render.c
+// and any custom-draw object modules that need to clip their own
+// geometry the same way the default cube renderer does.
+#define RENDER_NEAR_CLIP_Z  0.5f
+
 // Project a world point (x_w, y_w, z_w) onto the screen. y=0 is the
 // ground plane, +y is up; +z is forward (away from the camera).
 // `cam_x` is the camera's lateral position in world units — the camera

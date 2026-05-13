@@ -73,3 +73,8 @@ bool input_consume_digit(int* out_digit);
 // pause menu: PLAYING → PAUSED (overlay with Resume / Abort) and
 // PAUSED → PLAYING (Resume). Self-clears.
 bool input_consume_pause_toggle(void);
+
+// True if TAB was pressed since last call. Debug-only hook for
+// forcing the world generator to a specific next area type.
+// Self-clears.
+bool input_consume_force_next_area(void);
