@@ -33,8 +33,12 @@ obstacle_t* cube_spawn_pixel(world_state_t* w) {
     // x would have its outer face poking through the wall by half_w.
     float const x_extent = TRACK_HALF_WIDTH - CUBE_PIXEL_HALF_W;
     float const x        = (world_frand(&w->stage_prng) * 2.0f - 1.0f) * x_extent;
+    return cube_spawn_pixel_at(w, x, WORLD_Z_FAR_SPAWN);
+}
+
+obstacle_t* cube_spawn_pixel_at(world_state_t* w, float x, float z) {
     return obstacle_spawn(w, OBSTACLE_KIND_CUBE,
-                          x, WORLD_Z_FAR_SPAWN,
+                          x, z,
                           CUBE_PIXEL_HALF_W, CUBE_PIXEL_HALF_W, CUBE_PIXEL_HEIGHT,
                           PIXEL_FRONT_COLOR, PIXEL_SIDE_COLOR,
                           PIXEL_TOP_COLOR,  PIXEL_OUTLINE_COLOR);

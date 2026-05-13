@@ -2,6 +2,7 @@
 
 #include "areas/big_blocks.h"
 #include "areas/bridges.h"
+#include "areas/dynamic_passage.h"
 #include "areas/gateways.h"
 #include "areas/pixel_field.h"
 #include "areas/rest.h"
@@ -66,12 +67,13 @@ float world_stage_interval_scale(uint16_t stage) {
 static bool area_is_applicable(area_type_t t, uint16_t stage) {
     uint16_t min_stage, max_stage;
     switch (t) {
-        case AREA_TYPE_PIXEL_FIELD: min_stage = 1; max_stage = 0xFFFF; break;
-        case AREA_TYPE_GATEWAYS:    min_stage = 1; max_stage = 0xFFFF; break;
-        case AREA_TYPE_BIG_BLOCKS:  min_stage = 1; max_stage = 0xFFFF; break;
-        case AREA_TYPE_BRIDGES:     min_stage = 1; max_stage = 0xFFFF; break;
-        case AREA_TYPE_REST:        min_stage = 1; max_stage = 0xFFFF; break;  // never picked anyway
-        default:                    min_stage = 1; max_stage = 0xFFFF; break;
+        case AREA_TYPE_PIXEL_FIELD:     min_stage = 1; max_stage = 0xFFFF; break;
+        case AREA_TYPE_GATEWAYS:        min_stage = 1; max_stage = 0xFFFF; break;
+        case AREA_TYPE_BIG_BLOCKS:      min_stage = 1; max_stage = 0xFFFF; break;
+        case AREA_TYPE_BRIDGES:         min_stage = 1; max_stage = 0xFFFF; break;
+        case AREA_TYPE_DYNAMIC_PASSAGE: min_stage = 2; max_stage = 5;      break;
+        case AREA_TYPE_REST:            min_stage = 1; max_stage = 0xFFFF; break;  // never picked anyway
+        default:                        min_stage = 1; max_stage = 0xFFFF; break;
     }
     return stage >= min_stage && stage <= max_stage;
 }
@@ -89,6 +91,7 @@ static area_type_t pick_area_type(uint16_t stage, uint32_t* prng) {
         AREA_TYPE_GATEWAYS,
         AREA_TYPE_BIG_BLOCKS,
         AREA_TYPE_BRIDGES,
+        AREA_TYPE_DYNAMIC_PASSAGE,
     };
     int const n = (int)(sizeof(candidates) / sizeof(candidates[0]));
 
@@ -109,22 +112,24 @@ static void start_next_area(world_state_t* w) {
         t = pick_area_type(w->stage, &w->stage_prng);
     }
     switch (t) {
-        case AREA_TYPE_PIXEL_FIELD: area_pixel_field_init(&w->area, w->stage, &w->stage_prng); break;
-        case AREA_TYPE_GATEWAYS:    area_gateways_init   (&w->area, w->stage, &w->stage_prng); break;
-        case AREA_TYPE_BIG_BLOCKS:  area_big_blocks_init (&w->area, w->stage, &w->stage_prng); break;
-        case AREA_TYPE_BRIDGES:     area_bridges_init    (&w->area, w->stage, &w->stage_prng); break;
-        case AREA_TYPE_REST:        area_rest_init       (&w->area);                           break;
+        case AREA_TYPE_PIXEL_FIELD:     area_pixel_field_init    (&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_GATEWAYS:        area_gateways_init       (&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_BIG_BLOCKS:      area_big_blocks_init     (&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_BRIDGES:         area_bridges_init        (&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_DYNAMIC_PASSAGE: area_dynamic_passage_init(&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_REST:            area_rest_init           (&w->area);                           break;
     }
 }
 
 static bool area_tick(world_state_t* w, float dz) {
     area_state_t* a = &w->area;
     switch (a->type) {
-        case AREA_TYPE_PIXEL_FIELD: return area_pixel_field_tick(w, a, dz);
-        case AREA_TYPE_BIG_BLOCKS:  return area_big_blocks_tick (w, a, dz);
-        case AREA_TYPE_GATEWAYS:    return area_gateways_tick   (w, a, dz);
-        case AREA_TYPE_BRIDGES:     return area_bridges_tick    (w, a, dz);
-        case AREA_TYPE_REST:        return area_rest_tick       (w, a, dz);
+        case AREA_TYPE_PIXEL_FIELD:     return area_pixel_field_tick    (w, a, dz);
+        case AREA_TYPE_BIG_BLOCKS:      return area_big_blocks_tick     (w, a, dz);
+        case AREA_TYPE_GATEWAYS:        return area_gateways_tick       (w, a, dz);
+        case AREA_TYPE_BRIDGES:         return area_bridges_tick        (w, a, dz);
+        case AREA_TYPE_DYNAMIC_PASSAGE: return area_dynamic_passage_tick(w, a, dz);
+        case AREA_TYPE_REST:            return area_rest_tick           (w, a, dz);
     }
     return false;
 }

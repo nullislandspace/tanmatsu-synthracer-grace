@@ -1183,11 +1183,12 @@ void app_main(void) {
 
         // Debug: TAB cuts the current area short and forces the
         // next one to a specific type. Currently hard-wired to
-        // bridges; change the area_type_t argument here to test a
-        // different generator. Only acts during PLAYING so a stray
-        // TAB on a menu doesn't strand the world in an odd state.
+        // dynamic passage; change the area_type_t argument here to
+        // test a different generator. Only acts during PLAYING so
+        // a stray TAB on a menu doesn't strand the world in an odd
+        // state.
         if (input_consume_force_next_area() && app_state == APP_STATE_PLAYING) {
-            world_force_next_area(&world, AREA_TYPE_BRIDGES);
+            world_force_next_area(&world, AREA_TYPE_DYNAMIC_PASSAGE);
         }
 
         int64_t const t_after_input = esp_timer_get_time();

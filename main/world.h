@@ -59,6 +59,7 @@ typedef enum {
     AREA_TYPE_GATEWAYS,            // wall slabs spanning the track with one ship-sized opening
     AREA_TYPE_BIG_BLOCKS,          // sparser, larger grey cubes (2× pixel cubes laterally)
     AREA_TYPE_BRIDGES,             // concrete archways spanning the track — visual + shadow only
+    AREA_TYPE_DYNAMIC_PASSAGE,     // flipping cubes along one wall + heavy pixel-field clutter
     AREA_TYPE_REST,                // empty stretch between stages
 } area_type_t;
 
@@ -74,6 +75,17 @@ typedef struct area_state_s {
     float       gate_gap_half_w;     // GATEWAYS only: half-width of the opening
     float       gate_pad_z;          // GATEWAYS only: empty z between gates (and lead-in / trailing)
     int         boosters_owed;       // count of boosters the top-level scheduler has flagged but not placed
+
+    // DYNAMIC_PASSAGE only: 0 = non-mirrored (cubes against right
+    // wall, roll left); 1 = mirrored (against left wall, roll right).
+    // Picked at area-init from the stage PRNG; unused / left at 0
+    // for other area types.
+    int         passage_mirror;
+    // DYNAMIC_PASSAGE only: z-units until the next pixel-field
+    // clutter cube spawns. Independent of `next_event_z` (which the
+    // area uses for the flipping-cube cadence) so the two streams
+    // overlap deterministically without sharing a timer.
+    float       clutter_event_z;
 } area_state_t;
 
 typedef struct world_state_s {

@@ -8,6 +8,12 @@ struct world_state_s;
 // at the far plane with random x across the track.
 obstacle_t* cube_spawn_pixel(struct world_state_s* w);
 
+// Same magenta pixel cube but at an explicit (x, z). Used by areas
+// that decide placement themselves (e.g. dynamic_passage's clutter
+// fill, which avoids one specific lane). No wall-clearance clamp —
+// the caller is responsible for keeping the x inside the playfield.
+obstacle_t* cube_spawn_pixel_at(struct world_state_s* w, float x, float z);
+
 // Big-block cube — 2× the pixel cube laterally + along z, grey
 // palette. Same collision behaviour (head-on fatal, scrape allowed
 // on the trailing edge). Spawns at the far plane, random x.

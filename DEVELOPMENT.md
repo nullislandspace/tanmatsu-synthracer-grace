@@ -1668,6 +1668,103 @@
   is unchanged — it takes explicit coords that the gateway
   generator already constrains.
 
+- 2026-05-13 — **Flipping cube object + dynamic passage area.**
+  New `main/objects/flipping_cube.{h,c}` adds a big-block-sized
+  obstacle (same dimensions as `cube_spawn_big`: 1.6 × 1.6 × 2.0)
+  that rolls 90° around one of its bottom z-running edges as it
+  approaches the camera. Roll progress is a pure function of
+  z position — `t = (START_Z - z) / (START_Z - END_Z)` clamped
+  to [0,1] with START_Z = 50 and END_Z = 8 — so the animation is
+  deterministic, frame-rate independent, and unaffected by speed
+  changes mid-flight. Two visual subtypes share the
+  implementation: `direction = -1` pivots on the bottom-left
+  edge (cube tips LEFT, red outline) and `direction = +1` pivots
+  on the bottom-right edge (cube tips RIGHT, green outline).
+  Body fill is a blue palette (front 0xFF4080FF / side 0xFF2050B0
+  / top 0xFF80B0FF) for both subtypes; the direction is read
+  entirely from the wireframe colour.
+
+  Per-object state lives in the 128-byte scratch buffer
+  (`flipping_state_t`: direction, progress, x_initial). The
+  physics callback runs every frame *before* collision and
+  refreshes the obstacle's `x_world`, `half_w`, and `height` to
+  the AABB of the currently-rotated cross-section. This means
+  `game_collide`'s standard AABB test sees the rolled footprint
+  with no extra plumbing, and the default cube shadow renderer
+  also tracks the roll automatically (it reads those same three
+  fields). `y_base` stays 0 because the pivot stays on the
+  ground throughout the roll. The renderer projects all 8
+  corners of the rotated body (4 cross-section × 2 z faces) and
+  uses face-normal · camera-direction to pick visible side
+  faces; the front-face quad is always drawn when not
+  near-clipped. Geometry math: a corner at offset (dx, dy) from
+  the pivot becomes `(dx·c - dy·s, dx·s + dy·c)` where the
+  rotation angle is `-direction · t · π/2` — left-roll = CCW,
+  right-roll = CW. Since CUBE_BIG is taller than it is wide
+  (height 2.0 vs half-width 0.8), a fully landed cube ends up
+  2.0 u wide in the roll direction and 1.6 u tall (i.e.
+  shorter and wider than upright).
+
+  New `main/areas/dynamic_passage.{h,c}` is a stage-2..5 area
+  with two mirrored layouts. The top-level area picker sees it
+  as one slot; `area_dynamic_passage_init` then rolls one extra
+  bit from the stage PRNG to pick subtype:
+  - Non-mirrored: 4..7 left-rolling cubes (red, dir=-1) spawn
+    pressed against the **right** wall. As they near the
+    camera they tip LEFT, off the wall and into the
+    just-left-of-cubes corridor (the "bait" lane that looked
+    safe before the flips). The actual safe lane runs along
+    the right wall, exposed once the cubes have left it.
+  - Mirrored: same idea swapped — right-rolling green cubes
+    against the left wall, flip right, safe lane along the
+    left wall.
+
+  Two concurrent emission streams run inside the area:
+  flipping cubes at `next_event_z` spacing of `2 × HALF_D`
+  (centre-to-centre = 2 × depth = 3.2 u; user spec: gap
+  between them equals their depth), and pixel-field clutter
+  at `clutter_event_z` cadence of 3.0 u with one-wall-side
+  rejection (clutter x rejected if it would land in the
+  wall-adjacent safe lane, so the player sees a continuous
+  pixel-field wall on the bait side). The clutter timer is
+  separate from `next_event_z` so the two streams overlap
+  without interference. If the booster scheduler flags a
+  booster owed during the area, it spawns in the safe lane
+  half a `PASSAGE_FLIP_SPACING` behind the just-spawned
+  flipping cube — dead-centre in the z-gap between successive
+  cubes once both land. Length budget = `n × spacing` so all
+  flipping cubes spawn before the area ends; clutter continues
+  filling the tail until the budget runs out.
+
+  Two new fields landed on `area_state_t` to support this:
+  `int passage_mirror` (0/1, set at init from the PRNG coin)
+  and `float clutter_event_z` (independent clutter cadence
+  timer). Both are inert for other area types — the struct
+  costs grew by 8 bytes, which is negligible against the
+  `WORLD_OBSTACLE_POOL_SIZE × sizeof(obstacle_t)` line.
+
+  Picker / applicability wiring: `AREA_TYPE_DYNAMIC_PASSAGE`
+  added to the enum, the picker candidates list, the
+  `start_next_area` dispatch, and `area_tick`. Min stage 2 /
+  max stage 5 in `area_is_applicable` — this is the first
+  area with a non-trivial gate, so the picker retry loop now
+  earns its keep (stage 1 + 6+ runs will reject this candidate
+  and re-roll). TAB debug-force target retargeted from
+  `AREA_TYPE_BRIDGES` to `AREA_TYPE_DYNAMIC_PASSAGE` so the
+  new area is the default smoke-test path.
+
+  Design note on the "non-mirrored" wall placement: the user
+  spec described "left-rolling cubes spawn alongside the right
+  wall" alongside "cubes flip to the right, revealing passage
+  close to left wall", which is self-contradictory (a cube
+  pressed against the right wall can't tip into it). We
+  resolved this in conversation to: cubes are pressed against
+  the wall on the OPPOSITE side from their roll direction, and
+  the revealed safe lane runs along that SAME wall (where the
+  cubes were, now empty). Both halves of the original phrasing
+  thus point at the same physical layout via the cube's roll
+  axis rather than the "left wall / right wall" labels.
+
 ---
 
 ## Future FPS improvements
