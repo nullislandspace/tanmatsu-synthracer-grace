@@ -57,6 +57,8 @@ install: build
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon32.png ../../metadata/icon32.png
 	@echo "Uploading icon64.png..."
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon64.png ../../metadata/icon64.png
+	@echo "Uploading music.mod..."
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music.mod ../../metadata/music.mod
 	@echo "Uploading app.so..."
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/app.so ../../$(BUILD)/app.so
 	@echo "=== Installation complete ==="
@@ -77,6 +79,7 @@ apprepo: build
 	cp metadata/icon16.png $(APP_REPO_PATH)/icon16.png
 	cp metadata/icon32.png $(APP_REPO_PATH)/icon32.png
 	cp metadata/icon64.png $(APP_REPO_PATH)/icon64.png
+	cp metadata/music.mod $(APP_REPO_PATH)/music.mod
 	cp $(BUILD)/app.so $(APP_REPO_PATH)/app.so
 	@echo "=== App repository updated at $(APP_REPO_PATH) ==="
 

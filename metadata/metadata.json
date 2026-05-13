@@ -18,7 +18,8 @@
       "interpreter": "at.cavac.graceloader",
       "executable": "app.so",
       "assets": [
-        {"source_file": "app.so", "target_file": "app.so"}
+        {"source_file": "app.so", "target_file": "app.so"},
+        {"source_file": "music.mod", "target_file": "music.mod"}
       ]
     }
   ]
