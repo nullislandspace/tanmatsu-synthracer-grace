@@ -2059,6 +2059,144 @@
   using `nvs_settings_set_display_brightness` etc. — same
   pattern as `hw_settings_step_volume`.
 
+- 2026-05-13 — **Audio first-light + tuning pass.** Phase 7
+  audio went from designed to making sound during this session.
+  Several small bugs and several rounds of subjective tuning;
+  capturing each so the reasoning survives.
+
+  **(1) I2S clock reconfigure on an enabled channel.** First boot
+  failed with `i2s_std: i2s_channel_reconfig_std_clock(290):
+  invalid state` from `bsp_audio_set_rate(22050)`, error 259
+  (ESP_ERR_INVALID_STATE). Root cause: the BSP enables the I2S
+  channel inside `bsp_device_initialize()` at whatever rate it
+  defaults to, and the ESP-IDF i2s_std driver refuses to
+  reconfigure the clock while the channel is enabled. The
+  launcher's mixer doesn't hit this because the launcher has its
+  own `bsp_audio_initialize()` entry point that does
+  enable→configure→disable sequencing for us — that entry isn't
+  exported through graceloader. Fix in `audio_mixer_init`:
+  `bsp_audio_get_i2s_handle()` → `i2s_channel_disable()` →
+  `bsp_audio_set_rate(22050)` → `i2s_channel_enable()`, with
+  fall-through logging so the failure mode is obvious next time.
+
+  **(2) Crash-time stall: reordered head_on path + deferred save
+  commit.** Original flow called `save_commit_run_end()` (NBT
+  serialise + `fastopen("wb")` + write + close — synchronous
+  flash I/O, measured at hundreds of ms) *first* inside the
+  PLAYING head_on branch, then queued the crash SFX, then
+  transitioned to GAME_OVER. Result: the main loop blocked on
+  the flash write before the crash sound was even registered,
+  and the audio task on core 1 hit a brief cache-disable
+  cascade during the write that made the I2S DMA loop its
+  previous buffer (player heard the music's last second
+  repeating, then a delayed crash). New order in
+  `main.c:APP_STATE_PLAYING`:
+    1. `sfx_crash_play()` — audio task gets the new voice
+       *before* the stall begins, so it has fresh PCM to feed
+       I2S even if its code section hiccups briefly.
+    2. `end_run_audio()` — drop music + persistent voices.
+    3. Transition `app_state` and input mode.
+    4. Save commit is deferred to the first GAME_OVER frame
+       (guarded by the existing `run_end_committed` flag) — the
+       slow flash write now hides behind a static screen
+       instead of mid-action. `commit_run_end()` logs its
+       wallclock so we can watch it shrink/grow as the save
+       format evolves.
+
+  **(3) Master gain staging in magicnumbers.h.** Initial design
+  put music at a hard-coded 30% gain and SFX at unity, with each
+  SFX file owning its own amplitude constant. After tuning by
+  ear ("the crash is too loud" → "now they're all too quiet" →
+  "this still clips when scrape + ding + cube_bump fire near
+  each other") it became clear the per-effect amps were doing
+  two unrelated jobs: relative loudness *between* effects and
+  the overall SFX-bus level *against* music + the int16 clip
+  ceiling. Split them:
+    - `AUDIO_MUSIC_GAIN  0.30f` and `AUDIO_SFX_GAIN 0.35f` in
+      `magicnumbers.h` set the bus levels.
+    - The mixer applies both as Q15 multipliers at sum-in time
+      (`audio_mixer.c`).
+    - Per-effect `*_AMP` constants now tune relative loudness
+      only, in the 0.4–0.9 range.
+  Headroom budget: 5 random-phase concurrent SFX + music + hum
+  must stay under the ±1.0 hard-clip ceiling. With per-voice
+  nominal amps ~0.5 and SFX gain 0.35, effective per-voice peak
+  is ~0.18; √5 random-phase summing puts 5 concurrent voices
+  around 0.40, leaves room for music (0.30) + hum and stays
+  comfortably under 1.0.
+
+  **(4) Hum, volume, and balance.** Several rounds:
+    - `HUM_AMP` 0.10 → 0.04 first (felt too prominent in the
+      bed), then 0.04 → 0.11 *nominal* when the master SFX gain
+      landed (× 0.35 master ≈ 0.04 effective — same perceived
+      level, just re-expressed in the new gain-staged units).
+    - One-shot amps rebalanced into the new gain stage: ding
+      0.50, crash 0.45 + 0.40, scrape 0.40 max.
+    - Perceived loudness is logarithmic — every numeric drop
+      here is much smaller perceptually than instinct
+      suggests. "Twice as loud" is +10 dB ≈ ×3.16, not ×2.
+
+  **(5) Engine-hum toggle (third audio settings checkbox).** Some
+  players find the constant low drone fatiguing even when they
+  want one-shot SFX on. Added `audio_hum_on` u8 to the
+  `synthracer` NVS namespace (default 1), exposed as a third
+  entry in the Audio settings panel (`AUDIO_ENTRY_HUM`).
+  Two-layer gate: `start_run()` skips
+  `sfx_engine_hum_start()` when the flag is off (the efficient
+  path — voice never registers with the mixer), and the hum
+  voice's `render()` callback also defensively returns silence
+  when the flag is off (the live-toggle path in case we ever
+  expose the menu from PAUSED, where the voice is already
+  registered).
+
+  **(6) Cube-bump shape: kick-drum, not noisy clonk, *and*
+  speaker-audible.** Two passes.
+
+  *First pass* — replaced the original noise-heavy click with a
+  pitched sine sweep (190 → 55 Hz) + sub-octave + brief lowpassed
+  click transient. Critical bug spotted on listening: the
+  sweep was tied to the body envelope's total length, so making
+  the decay longer (for "ringier" tail) also slowed the pitch
+  drop into a glide and the sound stopped reading as a hit.
+  Fix: decoupled the sweep clock from the envelope —
+  `BUMP_SWEEP_S` is independent of `BUMP_BODY_DECAY_S`. Pitch
+  settles within ~90 ms, body envelope rings out for ~700 ms at
+  the settled low frequency. That long sustained low tail is
+  what makes a kick sound "big".
+
+  *Second pass* — headphone listeners reported it sounding
+  weighty, but on the built-in speaker the wump was almost
+  inaudible (came across as a click). Built-in speaker rolls
+  off hard below ~200 Hz, so the 55 Hz fundamental physically
+  doesn't come through. Solution: add the **harmonic series**
+  (2× and 3× the fundamental, phase-locked via integer
+  multiples of `inc_f`) at meaningful amplitudes — the speaker
+  reproduces those (110 / 165 → 380 / 570 Hz over the sweep)
+  and the brain reconstructs the missing fundamental via the
+  missing-fundamental psychoacoustic effect. Same trick phone
+  and laptop speakers use to fake their entire bass response.
+  Headphone listeners still get the fundamental + sub-octave
+  for chest-thump weight; speaker listeners get the apparent
+  bass via the harmonic stack without any energy wasted on
+  inaudible low end. Final per-voice layers: fundamental
+  (0.70), 2nd harmonic (0.40), 3rd harmonic (0.22), sub-octave
+  (0.25, headphone-only), click transient (0.22).
+
+  **(7) Pause stops SFX, not music.** Hitting F4 mid-game now
+  calls `pause_audio_for_pause_menu()`: stops the engine hum
+  voice, stops the scrape voice, and marks all in-flight
+  one-shot voices finished via `audio_mixer_stop_all_voices()`.
+  Music keeps playing through the pause overlay (matches the
+  long-standing design decision that pause is "still in the
+  run"). Resume calls `resume_audio_from_pause_menu()` which
+  restarts the hum if the player has it enabled; scrape and
+  one-shots re-arm naturally via their per-frame collision /
+  event triggers. The `s_scrape_was_on` edge tracker moved
+  from a function-local static inside `APP_STATE_PLAYING` up
+  to file scope so the pause helper can reset it — otherwise a
+  scrape held over the pause boundary would skip its restart
+  edge and stay silent the rest of the contact.
+
 ---
 
 ## Future FPS improvements
