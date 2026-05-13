@@ -24,7 +24,7 @@
 | 7 | Audio + volume keys | ⬜ not started |
 | 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts). Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, proper main menu, seed-input subscreen, stats screen, basic scoring + per-slot stats tracking are the work for this phase. MVP complete after the rest of this phase. |
 | 9 | Pickups & attachments | ⬜ not started |
-| 10 | Regions | ⬜ not started |
+| 10 | Regions | ✅ dissolved into the stage + area system — content variation is added incrementally as stages and area types land (the recent flipping_cube / dynamic_passage / dynamic_gateway additions are concrete examples), rather than as a discrete 7-region table cut-in |
 | 11 | Meta-progression UI | ⬜ not started |
 | 12 | Apocalypse mode | ⬜ not started |
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
@@ -2190,10 +2190,17 @@ the function makes it explicit and lets us animate the sun.
   pool. Same dimensions / colour fields, kind-dispatched
   collision response.
 
-- **Regions** (Phase 10) — 7 regions per run, ~30 s each.
-  The current stage system is an early Phase 10 stand-in;
-  full regions will overlay per-region area-type weights,
-  mutators, and palette shifts on top of the stage machinery.
+- **Regions** (Phase 10) — **dissolved 2026-05-13.** The
+  original plan was a discrete 7-region table cut-in on top
+  of stages, with per-region palette / density / area-weight
+  mutators. In practice the stage + area-picker machinery
+  evolved to cover this: new area types (bridges,
+  dynamic_passage, dynamic_gateway) land with their own
+  palettes, layouts, and stage-range gates, and the picker
+  picks per-stage from whatever's applicable. We'll keep
+  growing the area library and tuning stage gates as the rest
+  of the phases land, rather than carve out a separate region
+  layer.
 
 ### `game.c` — gameplay update
 
@@ -2698,8 +2705,14 @@ Done in this order so each phase produces a runnable build:
    persistence. Verify that custom-seed runs don't award meta-progression.
 9. **Pickups & attachments**: jump, shield, checkpoint pickups +
    the attachment slots and magnet/battery upgrades.
-10. **Regions**: 7-region progression with mutators, perfect-region flag,
-    movement-restriction tracking.
+10. **Regions**: ✅ dissolved 2026-05-13. Content variation now
+    rides on stages + area types rather than a discrete 7-region
+    overlay — new areas (e.g. bridges, dynamic_passage,
+    dynamic_gateway) supply their own palettes / mutators /
+    stage-gate ranges; the picker pulls from whatever's applicable
+    per stage. Per-run challenge flags that this phase would have
+    owned (perfect-region, movement-restriction) move into Phase
+    11's metaprogression tracking instead.
 11. **Meta-progression**: level table, 3-slot challenge system,
     challenge templates, level-up SFX & banner, unlock applications.
 12. **Apocalypse mode** (lv 11): faster speed, denser obstacles,
