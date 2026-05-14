@@ -72,27 +72,32 @@ static char const TAG[] = "sfx_bump";
 #define BUMP_CLICK_ATTACK_S   0.0005f
 #define BUMP_CLICK_DECAY_S    0.008f
 
-// Per-layer nominal amplitudes. The mixer's SFX master gain
-// (AUDIO_SFX_GAIN in magicnumbers.h) scales the whole voice down
-// at mix-down time, so these set relative balance between the
-// tonal body, the harmonic series that carries the bass on the
-// built-in speaker, the sub-octave thickener (headphones only),
-// and the click pop.
+// Per-layer nominal amplitudes. These set the *relative balance*
+// between the tonal body, the harmonic series that carries the
+// bass on the built-in speaker, the sub-octave thickener
+// (headphones only), and the click pop.
 //
 // The 2nd and 3rd harmonics together carry the apparent bass on
 // the speaker via the missing-fundamental effect, so they're
 // proportionally substantial — not so loud that they dominate
 // on headphones (where the fundamental is doing the work) but
 // loud enough to be the speaker's primary cue. Sum of all
-// layers (worst-case in-phase peak) ≈ 1.78; combined with the
-// SFX master gain (0.35) the per-voice effective peak sits
-// around 0.62, leaves usable headroom for music + a couple of
-// concurrent SFX.
+// layers (worst-case in-phase peak) is ~1.79.
+//
+// BUMP_VOICE_GAIN compresses the whole multi-layer voice into a
+// single-voice budget that fits the mixer's 5-concurrent-SFX
+// headroom math (≈ 0.5 nominal per voice → 0.18 effective after
+// the SFX master gain). Without it, dynamic_passage areas —
+// which can fire 4–7 cube-bump voices within ~700 ms (the body
+// decay length) of each other — would push the accumulator past
+// the hard-clip ceiling. Tuned 2026-05-14 after observing actual
+// clipping in dynamic_passage playback.
 #define BUMP_AMP_FUNDAMENTAL  0.70f
 #define BUMP_AMP_HARMONIC_2   0.40f
 #define BUMP_AMP_HARMONIC_3   0.22f
 #define BUMP_AMP_SUB          0.25f
 #define BUMP_AMP_CLICK        0.22f
+#define BUMP_VOICE_GAIN       0.40f
 
 // Lowpass cutoff for the click — keep it midrange-y so it reads
 // as "thud impact pop", not "hi-hat tick".
@@ -178,7 +183,8 @@ static void bump_render(sfx_voice_t* self, int16_t* out, size_t frames) {
         st->h3_phase   += inc_h3;
         st->sub_phase  += inc_sub;
 
-        float const mix = (fund + h2 + h3 + sub) * body_env + click * click_env;
+        float const mix = ((fund + h2 + h3 + sub) * body_env + click * click_env)
+                          * BUMP_VOICE_GAIN;
         int16_t const sample = audio_dsp_to_s16(mix);
         out[2 * i + 0] = sample;
         out[2 * i + 1] = sample;

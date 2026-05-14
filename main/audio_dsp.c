@@ -138,6 +138,15 @@ float audio_env_tick(audio_env_t* e) {
 // Biquad (RBJ cookbook)
 // ---------------------------------------------------------------
 
+// Coefficient update only — preserves the filter's x/y history so a
+// per-chunk retune (e.g. engine-hum LPF cutoff tracking ship speed)
+// stays continuous across chunk boundaries. Resetting the history
+// here causes audible clicks at the rate filters are retuned (every
+// ~11.6 ms at our chunk size) because the filter's output suddenly
+// goes from "filtered sample N" to "filtered sample N with zero past
+// state". Callers that genuinely need a fresh start (initial voice
+// setup of a voice whose backing memory isn't already zeroed) should
+// call `audio_biquad_reset` explicitly after the configure call.
 static void biquad_set(audio_biquad_t* f, float b0, float b1, float b2, float a0, float a1, float a2) {
     float const inv = 1.0f / a0;
     f->b0 = b0 * inv;
@@ -145,7 +154,6 @@ static void biquad_set(audio_biquad_t* f, float b0, float b1, float b2, float a0
     f->b2 = b2 * inv;
     f->a1 = a1 * inv;
     f->a2 = a2 * inv;
-    audio_biquad_reset(f);
 }
 
 void audio_biquad_lpf(audio_biquad_t* f, float fc, float q) {

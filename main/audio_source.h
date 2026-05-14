@@ -62,6 +62,17 @@ struct music_source_s {
 
 typedef struct sfx_voice_s sfx_voice_t;
 
+// Which Audio-settings toggle gates a given voice. One-shot SFX
+// (ding, crash, scrape, cube-bump, plink) share the
+// `audio_settings_sfx_on` flag; the engine hum has its own
+// `audio_settings_hum_on` flag so players who like the SFX cues
+// but find the constant low drone fatiguing can mute just the
+// hum without losing the rest.
+typedef enum {
+    SFX_VOICE_TAG_ONESHOT = 0,   // gated by audio_settings_sfx_on
+    SFX_VOICE_TAG_HUM,           // gated by audio_settings_hum_on
+} sfx_voice_tag_t;
+
 struct sfx_voice_s {
     // Render `frames` stereo frames to `stereo_out`. Output buffer
     // is pre-zeroed; the mixer sums the result at unity gain. Set
@@ -79,6 +90,12 @@ struct sfx_voice_s {
     // itself, or calls `audio_mixer_stop_voice(self)` (which sets
     // the flag for it).
     bool finished;
+
+    // Which Audio-settings toggle gates this voice. Defaults to
+    // SFX_VOICE_TAG_ONESHOT — voices that don't set this
+    // explicitly are treated as ordinary one-shots and follow the
+    // main SFX gate.
+    sfx_voice_tag_t tag;
 
     // Backend-specific state follows in the embedding struct.
 };

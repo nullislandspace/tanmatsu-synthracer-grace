@@ -94,6 +94,9 @@ bool sfx_engine_hum_start(void) {
     s_hum.voice.render   = hum_render;
     s_hum.voice.shutdown = NULL;
     s_hum.voice.finished = false;
+    // Hum has its own Audio-settings toggle independent of the
+    // generic SFX gate — see `sfx_voice_tag_t` in audio_source.h.
+    s_hum.voice.tag      = SFX_VOICE_TAG_HUM;
     s_hum.phase_a        = 0;
     s_hum.phase_b        = 0x40000000u;  // 90° offset for stereo width / detune
     audio_biquad_lpf(&s_hum.lpf, HUM_LPF_MIN_HZ, 0.8f);

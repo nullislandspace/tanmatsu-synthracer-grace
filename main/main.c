@@ -1413,7 +1413,7 @@ void app_main(void) {
         // a stray TAB on a menu doesn't strand the world in an odd
         // state.
         if (input_consume_force_next_area() && app_state == APP_STATE_PLAYING) {
-            world_force_next_area(&world, AREA_TYPE_DYNAMIC_GATEWAY);
+            world_force_next_area(&world, AREA_TYPE_DYNAMIC_PASSAGE);
         }
 
         int64_t const t_after_input = esp_timer_get_time();

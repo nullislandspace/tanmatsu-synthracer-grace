@@ -170,22 +170,30 @@ static void mixer_task_fn(void* arg) {
         }
 
         // ---- SFX voices ----
-        // Apply the SFX master gain at sum-in time (Q15 fixed
+        // Gating is *per voice* based on its tag — engine hum has
+        // its own Audio-settings toggle, the rest share the SFX
+        // toggle. Without this split, "SFX off" would silence the
+        // hum too.
+        //
+        // SFX master gain is applied at sum-in time (Q15 fixed
         // point). Per-voice `*_AMP` constants in each sfx_*.c set
         // relative loudness; this knob sets the overall SFX bus
         // level against the music + clip ceiling. See magicnumbers.h
         // for the 5-concurrent-voice headroom budget.
-        if (sfx_gate) {
-            for (int i = 0; i < MIXER_VOICE_SLOTS; i++) {
-                sfx_voice_t* v = g_voices[i].voice;
-                if (v == NULL || v->finished || v->render == NULL) continue;
-                memset(g_mix_voice, 0, sizeof(g_mix_voice));
-                v->render(v, g_mix_voice, MIXER_CHUNK_FRAMES);
-                for (size_t j = 0; j < MIXER_CHUNK_SAMPLES; j++) {
-                    g_accum[j] += ((int32_t)g_mix_voice[j] * MIXER_SFX_GAIN_Q15) >> 15;
-                }
-                active_sources++;
+        bool const hum_gate = audio_settings_hum_on();
+        for (int i = 0; i < MIXER_VOICE_SLOTS; i++) {
+            sfx_voice_t* v = g_voices[i].voice;
+            if (v == NULL || v->finished || v->render == NULL) continue;
+
+            bool const allowed = (v->tag == SFX_VOICE_TAG_HUM) ? hum_gate : sfx_gate;
+            if (!allowed) continue;
+
+            memset(g_mix_voice, 0, sizeof(g_mix_voice));
+            v->render(v, g_mix_voice, MIXER_CHUNK_FRAMES);
+            for (size_t j = 0; j < MIXER_CHUNK_SAMPLES; j++) {
+                g_accum[j] += ((int32_t)g_mix_voice[j] * MIXER_SFX_GAIN_Q15) >> 15;
             }
+            active_sources++;
         }
 
         // ---- Reap finished SFX voices ----

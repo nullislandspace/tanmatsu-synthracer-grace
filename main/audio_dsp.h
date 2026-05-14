@@ -139,7 +139,16 @@ typedef struct {
 
 // Configure as lowpass / highpass / bandpass with cutoff `fc` in Hz
 // and resonance `q` (~0.707 = no peak, higher = more resonant).
-// All run at AUDIO_SAMPLE_RATE_HZ. Resets history.
+// All run at AUDIO_SAMPLE_RATE_HZ.
+//
+// **Coefficient update only.** The filter's history (x1/x2/y1/y2)
+// is preserved across the call so a per-chunk retune (e.g.
+// engine-hum LPF cutoff sliding with ship speed) stays continuous —
+// resetting history would produce a click at every retune. Callers
+// that need a fresh start (e.g. a freshly stack-allocated filter
+// before its first use) should also call `audio_biquad_reset`
+// explicitly; heap_caps_calloc / static zero-init already give you
+// zero history so an explicit reset is usually unnecessary.
 void audio_biquad_lpf(audio_biquad_t* f, float fc, float q);
 void audio_biquad_hpf(audio_biquad_t* f, float fc, float q);
 void audio_biquad_bpf(audio_biquad_t* f, float fc, float q);
