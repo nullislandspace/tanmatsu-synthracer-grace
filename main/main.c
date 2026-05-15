@@ -261,6 +261,15 @@ static int     s_peak_stage       = 1;
 static int     s_run_was_custom   = 0;
 static int64_t s_run_seed_used    = 0;
 
+// Calendar day for this whole play session, as yyyymmdd, captured
+// once at startup by capture_session_date(). Everything day-
+// dependent — the daily world seed, the day-rollover check, the
+// (future) daily challenges — reads THIS, never the RTC directly,
+// so the "current day" can't shift under the player mid-session
+// (e.g. playing across midnight). 0 means the RTC was unset at
+// boot (year < 2024) — no usable date.
+static int64_t s_session_date = 0;
+
 // End-of-run hold timers + cause. `s_run_was_crash` records whether
 // the run ended on a head-on crash (true) or a stall/sunset (false)
 // so GAME_OVER commits the correct save reason. The two timers
@@ -1410,29 +1419,62 @@ static bool stage_banner_visible(world_state_t const* w) {
         && w->area.length_remaining_z <= STAGE_BANNER_LEAD_Z;
 }
 
-// Build the daily seed from the RTC date — `year*10000 + month*100
-// + day`. Same date → same seed → identical world, regardless of
-// how many times the player restarts the run or the app. The seed
-// only ticks over when the calendar day rolls over. If the RTC is
-// unset (year < 2024) we fall back to a fixed constant so the run
-// is still reproducible within a boot; Phase 8's NVS anti-cheat
-// will replace that fallback with a stored last-known-good date.
-//
-// Phase 8 will also add an opt-in custom-seed menu on the title
-// screen; that path bypasses this function and passes its own seed
-// into start_run().
-static uint32_t derive_daily_seed(void) {
+// Read the RTC once and cache the calendar day into s_session_date
+// as `year*10000 + month*100 + day`. Call exactly once, early in
+// app_main, before anything day-dependent runs. If the RTC is unset
+// (year < 2024) s_session_date is left at 0 and the day-dependent
+// features fall back to their RTC-unset behaviour.
+static void capture_session_date(void) {
     time_t    now = time(NULL);
     struct tm lt  = {0};
     localtime_r(&now, &lt);
     int const year = lt.tm_year + 1900;
     if (year < 2024) {
+        s_session_date = 0;  // RTC unset — no usable date
+        return;
+    }
+    s_session_date = (int64_t)year * 10000
+                   + (int64_t)(lt.tm_mon + 1) * 100
+                   + (int64_t)lt.tm_mday;
+}
+
+// Build the daily world seed from the cached session date (see
+// s_session_date) — `year*10000 + month*100 + day`. Same day →
+// same seed → identical world, every run of the session, and the
+// world can't reshuffle between runs if the player crosses
+// midnight. Falls back to a fixed constant when the RTC was unset
+// at boot, so the run is still reproducible within the session.
+//
+// The custom-seed menu bypasses this function and passes its own
+// seed into start_run().
+static uint32_t derive_daily_seed(void) {
+    if (s_session_date == 0) {
         return 1u;
     }
-    int const month = lt.tm_mon + 1;
-    int const day   = lt.tm_mday;
-    uint32_t  seed  = (uint32_t)year * 10000u + (uint32_t)month * 100u + (uint32_t)day;
+    uint32_t const seed = (uint32_t)s_session_date;
     return seed ? seed : 1u;
+}
+
+// Day-rollover check. The daily challenge-completion flags
+// (save_data.daily.daily_done_*) belong to one specific calendar
+// day; once the day moves past the save's last_seen_date they are
+// stale and must be cleared. Call once on a freshly loaded slot.
+// It compares against the cached s_session_date (NOT the RTC), so
+// the rollover is decided exactly once per session — it can never
+// fire in the middle of a play session if the clock ticks past
+// midnight. The reset is in-memory only — the next run-end commit
+// persists it, and the check is idempotent across boots, so no
+// extra flash write is forced here. A zero session date (RTC unset
+// at boot) is a no-op: with no trustworthy date we can't tell the
+// day has changed, so the flags are left untouched.
+static void save_apply_day_rollover(save_data_t* s) {
+    if (s_session_date == 0) return;                   // RTC unset at boot
+    if (s->meta.last_seen_date == s_session_date) return;
+
+    s->meta.last_seen_date  = s_session_date;
+    s->daily.daily_done_1pt = 0;
+    s->daily.daily_done_2pt = 0;
+    s->daily.daily_done_3pt = 0;
 }
 
 // Reset run state and (re-)seed the world. The seed is supplied by
@@ -1644,6 +1686,12 @@ void app_main(void) {
     // Control settings (gyro flag + remappable keybinds) — input.c
     // reads these, so load before the first frame.
     controls_settings_load();
+    // Capture the calendar day once, now, for the whole session.
+    // Every day-dependent feature (daily seed, day-rollover,
+    // challenges) reads this snapshot — never the RTC live — so the
+    // "current day" can't shift mid-session if the player crosses
+    // midnight.
+    capture_session_date();
     res = audio_mixer_init();
     if (res != ESP_OK) {
         ESP_LOGW(TAG, "audio_mixer_init failed: %d — audio will be silent", res);
@@ -2106,6 +2154,9 @@ void app_main(void) {
                         // Missing or corrupt — start a fresh profile.
                         save_init_defaults(&s_save);
                     }
+                    // New calendar day → clear yesterday's daily
+                    // challenge-completion flags before play begins.
+                    save_apply_day_rollover(&s_save);
                     if (s_save.meta.last_custom_seed > 0) {
                         // The seed is logically a uint32 (max 10
                         // digits), so we clamp into 10 chars + null

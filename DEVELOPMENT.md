@@ -10,7 +10,7 @@
 
 ## Current Status
 
-**Phase: Phases 5 + 6 + 7 complete; persistence + scoring + menus + bridges + dynamic gateways landed; audio (mixer + procedural music + procedural SFX + master volume) landed 2026-05-13; Tris + multiplier (Phase 6: blue-pyramid Tri object + rotating-icosahedron booster + plink SFX + multiplier HUD + per-area spawn rules) landed 2026-05-14. MVP-blocking phase 8 (daily seed + persistence) is partial; Phase 9 (pickups + attachments) is the next gameplay phase.**
+**Phase: Phases 1–8 + 10 complete. Phase 8 (daily seed + custom seed + persistence) closed 2026-05-15 — the game is playable end-to-end with a daily/custom seed and persistent per-slot scores, which is the MVP bar. The meta-progression layer (challenge system, levels, points, unlocks) was re-scoped out of Phase 8 entirely and now lives in Phase 11. Phase 9 (pickups + attachments) is the next gameplay phase; Phase 11 (meta-progression UI) is the next persistence/UI phase.**
 
 | Phase | Description | State |
 |-------|-------------|-------|
@@ -22,10 +22,10 @@
 | 5 | Sun timer + shadow + boost | ✅ done — sun, shadows, stall, full-sunset, boost pickups all landed |
 | 6 | Tris + multiplier | ✅ done 2026-05-14 — distance × multiplier × 0.1 per-frame income (from the original RTS model, scaled so pickup bonuses stay visible) + Tri pickup bonus (5 × mult) + booster pickup bonus (10 × mult) all stacking; monotonic `pickups_tri` counter (HUD reads `% 5`); top-left opaque grey HUD panel with 4-slot Tri progress row + multiplier text (5th Tri ticks the multiplier and resets the row); ascending pentatonic 5-note plink SFX (`sfx_pickup_plink.c`, the 5th note doubles as the multiplier-bump cue); Tri object copied from `objects/booster.c` into `objects/tri.c`, painted blue; booster shape upgraded pyramid → rotating regular icosahedron (12 verts / 20 faces / 30 edges, ~1 Hz spin around Y, faceted-gem rendering with face-normal lighting + edge wireframe in `render_booster_icosahedron`); per-area spawn rules implemented (pixel_field half-count / big_blocks equal-count via rejection sampling against the live pool, gateways + dynamic_gateway fill the non-booster hole, dynamic_passage emits one per flipping cube in the clutter, bridges co-spawn one per bridge along a random-angle line, rest area between stages lays 10 Tris + booster on a quadratic-Bézier S-curve, pre-stage-1 lead-in deliberately excluded); per-run + all-time Tri totals persist automatically via the existing `run_stats_merge_into_all_time`. Crash penalty (-5 to multiplier, floor 1) wired in `game_collide`. New `world_find_free_x` helper for shared rejection sampling. See the 2026-05-13 / 2026-05-14 Phase 6 design-update + implementation decisions-log entries. |
 | 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
-| 8 | Daily + custom seed + persistence | 🟡 partial — RTC-derived daily seed landed (`year*10000 + month*100 + day` captured once at app boot, stable across run restarts). Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, proper main menu, seed-input subscreen, stats screen, basic scoring + per-slot stats tracking are the work for this phase. MVP complete after the rest of this phase. |
+| 8 | Daily + custom seed + persistence | ✅ done 2026-05-15 — RTC-derived daily seed (`year*10000 + month*100 + day`), now sourced from a single `s_session_date` snapshot captured once at boot so "today" is frozen for the whole session. Custom-seed entry dialog + `last_custom_seed` prefill/persist. Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, main menu, seed-input subscreen, stats screen, basic scoring + per-slot `last_run`/`all_time` stats, correct `SAVE_END_*` reason recording, and day-rollover detection (`save_apply_day_rollover`) all landed. **Scope note:** the meta-progression layer originally sketched under this phase — the challenge system that *writes* the `daily_done_*` flags, plus level/points/unlock logic — moved wholesale to Phase 11; the save struct carries all the fields but no gameplay code reads/writes them yet. The game is playable with a daily seed + persistent per-slot scores, which is the MVP bar. |
 | 9 | Pickups & attachments | ⬜ not started |
 | 10 | Regions | ✅ dissolved into the stage + area system — content variation is added incrementally as stages and area types land (the recent flipping_cube / dynamic_passage / dynamic_gateway additions are concrete examples), rather than as a discrete 7-region table cut-in |
-| 11 | Meta-progression UI | ⬜ not started |
+| 11 | Meta-progression UI | ⬜ not started — **scope expanded:** absorbs the meta-progression work originally filed under Phase 8. The `meta.c` module: 25-level unlock ladder, 3-slot daily challenge system + challenge templates, awarding challenge points / level-ups, applying unlocks, level-up SFX & banner. Also owns the daily-challenge half of day-rollover — `save_apply_day_rollover()` already clears the `daily_done_*` flags on a day change (Phase 8), but the flags are inert until this phase's challenge system writes them. New challenge code must read the `s_session_date` snapshot, never the RTC. |
 | 12 | Apocalypse mode | ⬜ not started |
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
 
@@ -2898,6 +2898,54 @@
     - On-device tuning knobs: the `CRASH_SPARK_*` constants in
       `game.c` (count/life/speed/gravity/length) and
       `STALL_HOLD_SECONDS` in `main.c`.
+
+- 2026-05-15 — **Day-rollover detection + single session-date
+  snapshot.** Closes the last pure-Phase-8 gap and fixes a
+  mid-session-correctness hole.
+    - **Rollover.** New `save_apply_day_rollover()` in `main.c`,
+      run once on a freshly loaded slot: if the calendar day has
+      moved past the save's `meta.last_seen_date`, it stores the
+      new date and clears the `daily.daily_done_{1,2,3}pt`
+      challenge-completion booleans. The reset is in-memory only —
+      the next run-end commit persists it and the check is
+      idempotent across boots, so no boot-time flash write is
+      forced (which also avoids a spurious `last_played_unix`
+      bump). NB: the `daily_done_*` flags are still only *written*
+      by the not-yet-built Phase 11 challenge system, so this is
+      correct-but-inert plumbing until challenges land.
+    - **Session-date snapshot.** The RTC's *current* time is now
+      read in exactly one place — `capture_session_date()`, called
+      once in `app_main` — caching the day into a file-static
+      `s_session_date` (`yyyymmdd`, 0 if the RTC was unset at
+      boot). `derive_daily_seed()` (previously read `time()` every
+      `start_run`) and `save_apply_day_rollover()` (previously read
+      `time()` at slot-load) both now read that snapshot. So "today"
+      is frozen for the whole session: the daily world can't
+      reshuffle between runs, and the rollover can't fire mid-run,
+      if the player crosses midnight. Crossing midnight takes
+      effect only at the next launch — correct for a daily game.
+      Future challenge code must also read `s_session_date`, never
+      the RTC. (The lone remaining `localtime_r`, `format_unix` at
+      `main.c`, formats a *stored* `last_played_unix` for display —
+      not a current-day read — and is correctly left alone.)
+
+- 2026-05-15 — **Phase 8 closed; meta-progression re-scoped to
+  Phase 11.** The original plan filed the meta-progression layer
+  (daily challenge system, level/points, unlocks) partly under
+  Phase 8, but the actual code splits along a different line: the
+  daily *seed* and the save-file *persistence* are self-contained
+  and done, while the challenge/level/unlock *logic* is an
+  unstarted module (`meta.c`) that the plan also describes under
+  Phase 11. Phase 8 contained a piece — the `daily_done_*`
+  rollover — that is inert without Phase 11's challenge system.
+  Decision: Phase 8 is marked ✅ done in its true scope (daily +
+  custom seed + persistence — playable end-to-end with persistent
+  per-slot scores, the MVP bar), and *all* meta-progression work
+  moves wholesale to Phase 11, whose status row was expanded to
+  say so. The `save_data_t` already carries every meta field
+  (`level`, `points`, 24× `unlock_*`, `daily_done_*`); Phase 11
+  fills in the code that reads and writes them. No code changed —
+  this is a planning/tracking correction only.
 
 ---
 
