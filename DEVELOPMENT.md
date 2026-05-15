@@ -2717,6 +2717,18 @@
       only for the selected row. So the chevron-vs-space width
       difference of the proportional Hershey font can't shift the
       label.
+    - **Pause-menu access** — the Settings submenu (Controls + Audio)
+      is reachable mid-run via a "Settings" entry on the pause
+      overlay, not only from the main menu. A file-static
+      `s_settings_origin` (`APP_STATE_MENU` vs `APP_STATE_PAUSED`)
+      records where Settings was opened from: Esc walks back there,
+      and `draw_settings_scene()` renders the frozen game behind the
+      panel (matching the pause overlay) when the origin is the pause
+      menu. The run stays logically paused throughout — no audio
+      resume until the real Resume. Audio/keybind toggles are safe to
+      change mid-pause: the mixer reads the audio flags live every
+      chunk and the keybinds are polled live each frame, so nothing
+      latches at run start.
     - **Unified `menu_draw()` renderer** — the per-menu hand-coded
       draw loops were replaced by one generic list renderer driven by
       a `menu_view_t` (title, optional subtitle, rows, cursor, hint,
@@ -2727,6 +2739,24 @@
       game over, key capture) keep bespoke draws but share the same
       colour constants, `draw_left()` / `draw_chevron()` helpers and
       the chevron-gutter convention.
+    - **Credits screen** — a "Credits" main-menu entry opens
+      `APP_STATE_CREDITS`, a manually-scrolled credits roll
+      (`credits_lines[]`). It is taller than the panel and scrolled
+      with UP / DOWN. The Hershey text renderer writes pixels
+      directly and ignores `pax_clip`, so lines outside the viewport
+      are culled whole rather than clipped; the scroll offset is
+      clamped to `credits_max_scroll()`. Section headings (lines
+      ending in ':') render yellow. Adding the 7th main-menu row
+      meant tightening that menu's row pitch from 44 → 38 px.
+    - **"F1 to exit" hint removed.** The icon+text exit hint that
+      `draw_exit_hint()` painted top-left on every screen is gone —
+      it advertised a dev-only fast-exit. F1 *still* exits to the
+      launcher (the input handler is unchanged); it just isn't shown.
+      `draw_exit_hint()` and its 12 call sites were deleted, and the
+      "F4 to pause" gameplay hint (`draw_pause_hint()`, a real player
+      affordance, kept) moved up to `HUD_HINT_Y_BASE` to close the
+      gap the exit hint left. The full F1-exit affordance is itself
+      slated for removal later in development.
 
 ---
 

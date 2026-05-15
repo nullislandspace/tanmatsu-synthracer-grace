@@ -149,6 +149,7 @@ typedef enum {
     APP_STATE_SEED_INPUT,       // numeric entry for the custom seed
     APP_STATE_STATS_VIEW,       // text dump of the active slot's stats
     APP_STATE_UPGRADE_STUB,     // placeholder "coming soon" screen
+    APP_STATE_CREDITS,          // auto-scrolling credits roll
     APP_STATE_SETTINGS,         // settings submenu: Controls / Audio
     APP_STATE_CONTROLS,         // controls list: gyro checkbox + 4 keybinds
     APP_STATE_KEY_CAPTURE,      // "press a key" modal for a keybind remap
@@ -161,6 +162,7 @@ typedef enum {
 // Pause-menu entries (STATE_PAUSED).
 enum {
     PAUSE_ENTRY_RESUME = 0,
+    PAUSE_ENTRY_SETTINGS,
     PAUSE_ENTRY_ABORT,
     PAUSE_ENTRY_COUNT,
 };
@@ -172,6 +174,7 @@ enum {
     MENU_ENTRY_UPGRADE,
     MENU_ENTRY_STATS,
     MENU_ENTRY_SETTINGS,
+    MENU_ENTRY_CREDITS,
     MENU_ENTRY_EXIT,
     MENU_ENTRY_COUNT,
 };
@@ -183,6 +186,13 @@ enum {
     SETTINGS_ENTRY_COUNT,
 };
 static int s_settings_cursor = SETTINGS_ENTRY_CONTROLS;
+
+// Where the settings family (Settings / Controls / Audio / key
+// capture) returns to on Esc, and which scene renders behind it.
+// APP_STATE_MENU when opened from the main menu (synthwave backdrop,
+// scrolling menu floor); APP_STATE_PAUSED when opened from the pause
+// menu (frozen game scene behind, run stays logically paused).
+static app_state_t s_settings_origin = APP_STATE_MENU;
 
 // Controls-menu entries (STATE_CONTROLS). The gyro checkbox first,
 // then the four remappable keybinds in CONTROL_KEY_* order so the
@@ -741,41 +751,15 @@ static void draw_boost_indicator(game_state_t const* g) {
 #define MUL_TRI_DARK_RGB   0xFF333344u
 #define HUD_HINT_Y_BASE    ((float)(MUL_PANEL_Y + MUL_PANEL_H + 12))
 
-static void draw_exit_hint(void) {
-    char const* prompt   = "to exit";
-    float const prompt_h = 18.0f;
-    int         icon_w   = icons_width(ICON_F1);
-    float const x_margin = 12.0f;
-    // Pushed down to clear the Phase 6 multiplier HUD panel
-    // (top-left at y = MUL_PANEL_Y, height = MUL_PANEL_H, so
-    // first available y below the panel is HUD_HINT_Y_BASE).
-    // Applies uniformly across all states — menus look the same
-    // as gameplay, which keeps the input affordances stable.
-    float const y        = HUD_HINT_Y_BASE;
-    if (icon_w > 0) {
-        float const gap    = 8.0f;
-        int         icon_h = icons_height(ICON_F1);
-        float       icon_y = y + prompt_h / 2.0f - (float)icon_h / 2.0f;
-        float       text_x = x_margin + (float)icon_w + gap;
-        icons_blit(fb, ICON_F1, x_margin, icon_y);
-        rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, text_x, y, prompt);
-    } else {
-        char const* fallback = "F1 to exit";
-        rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
-    }
-}
-
-// F4-to-pause hint, drawn below the F1 exit hint during PLAYING.
-// Same icon-then-text layout as draw_exit_hint, slotted at y = 34
-// (= 12 + 18 + 4) so it sits one line below F1.
+// F4-to-pause hint, drawn during PLAYING below the multiplier HUD
+// panel. (The dev-only "F1 to exit" hint that used to sit above it
+// has been removed — F1 still exits, it just isn't advertised.)
 static void draw_pause_hint(void) {
     char const* prompt   = "to pause";
     float const prompt_h = 18.0f;
     int         icon_w   = icons_width(ICON_F4);
     float const x_margin = 12.0f;
-    // One line below the F1 exit hint — same +22 px stack as
-    // before, just rebased on the post-panel HUD_HINT_Y_BASE.
-    float const y        = HUD_HINT_Y_BASE + (prompt_h + 4.0f);
+    float const y        = HUD_HINT_Y_BASE;
     if (icon_w > 0) {
         float const gap    = 8.0f;
         int         icon_h = icons_height(ICON_F4);
@@ -861,6 +845,17 @@ static void menu_draw(menu_view_t const* m) {
         draw_left(text_x, panel_y + panel_h - MENU_FOOTER_PAD, 14.0f,
                   MENU_COL_HINT, m->hint);
     }
+}
+
+// Render the scene behind a settings screen. Opened from the pause
+// menu, the frozen game (obstacles + ship in their last positions)
+// shows through — matching the pause overlay. Opened from the main
+// menu there is no run, so this is a no-op and the synthwave
+// backdrop drawn earlier in the frame stands.
+static void draw_settings_scene(world_state_t const* w, game_state_t const* g) {
+    if (s_settings_origin != APP_STATE_PAUSED) return;
+    render_obstacles(fb, w, g->cam_x);
+    game_draw_ship(fb, g);
 }
 
 static void draw_game_over_overlay(void) {
@@ -956,6 +951,7 @@ static void draw_main_menu(void) {
         [MENU_ENTRY_UPGRADE]  = "Upgrade Ship",
         [MENU_ENTRY_STATS]    = "Stats",
         [MENU_ENTRY_SETTINGS] = "Settings",
+        [MENU_ENTRY_CREDITS]  = "Credits",
         [MENU_ENTRY_EXIT]     = "Exit",
     };
     menu_row_t rows[MENU_ENTRY_COUNT] = {0};
@@ -968,7 +964,7 @@ static void draw_main_menu(void) {
 
     menu_view_t const m = {
         .title = "RACE THE SYNTH", .title_h = 48.0f, .subtitle = subtitle,
-        .rows = rows, .row_count = MENU_ENTRY_COUNT, .row_h = 44.0f,
+        .rows = rows, .row_count = MENU_ENTRY_COUNT, .row_h = 38.0f,
         .cursor = s_menu_cursor, .hint = "up / down to choose, enter to confirm",
         .panel_w = 0.80f, .panel_h = 0.94f, .value_dx = 0.0f,
     };
@@ -1142,8 +1138,9 @@ static void draw_stats_view(void) {
 // Pause overlay shown over the frozen game scene (STATE_PAUSED).
 static void draw_pause_overlay(void) {
     static char const* const labels[PAUSE_ENTRY_COUNT] = {
-        [PAUSE_ENTRY_RESUME] = "Resume",
-        [PAUSE_ENTRY_ABORT]  = "Abort run",
+        [PAUSE_ENTRY_RESUME]   = "Resume",
+        [PAUSE_ENTRY_SETTINGS] = "Settings",
+        [PAUSE_ENTRY_ABORT]    = "Abort run",
     };
     menu_row_t rows[PAUSE_ENTRY_COUNT] = {0};
     for (int i = 0; i < PAUSE_ENTRY_COUNT; i++) {
@@ -1155,7 +1152,7 @@ static void draw_pause_overlay(void) {
         .rows = rows, .row_count = PAUSE_ENTRY_COUNT, .row_h = 44.0f,
         .cursor = s_pause_cursor,
         .hint = "up / down to choose, enter to confirm, F4 to resume",
-        .panel_w = 0.55f, .panel_h = 0.58f, .value_dx = 0.0f,
+        .panel_w = 0.55f, .panel_h = 0.62f, .value_dx = 0.0f,
     };
     menu_draw(&m);
 }
@@ -1167,6 +1164,116 @@ static void draw_upgrade_stub(void) {
     draw_left(lx, fbh * 0.30f, 48.0f, MENU_COL_TITLE, "Upgrade Ship");
     draw_left(lx, fbh * 0.50f, 22.0f, MENU_COL_NORMAL, "Coming soon!");
     draw_left(lx, fbh * 0.92f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
+}
+
+// ---- Credits ------------------------------------------------------
+// The credits text is taller than the panel, so it is scrolled by
+// hand with UP / DOWN. The Hershey text renderer writes pixels
+// directly and ignores pax_clip, so lines that fall outside the
+// viewport are culled whole rather than clipped.
+#define CREDITS_PANEL_W     0.86f
+#define CREDITS_PANEL_H     0.96f
+#define CREDITS_LINE_H      24.0f                  // row pitch
+#define CREDITS_TEXT_H      18.0f                  // glyph height
+#define CREDITS_SCROLL_STEP (CREDITS_LINE_H * 3.0f) // px per UP/DOWN press
+
+static char const* const credits_lines[] = {
+    "Race the Synth was inspired by the steam game \"Race the Sun\"",
+    "",
+    "Project lead:",
+    "    Rene Schickbauer",
+    "",
+    "Ideas for features:",
+    "    Rene Schickbauer",
+    "    Renze Nicolai",
+    "    People in the Tanmatsu Discord",
+    "",
+    "Coding:",
+    "    Rene Schickbauer",
+    "    Claude Code",
+    "",
+    "Music:",
+    "    Claude Code",
+    "    Random number generator 23",
+    "",
+    "Sound effects:",
+    "    Rene Schickbauer",
+    "    Claude Code",
+    "",
+    "Level Design:",
+    "    Rene Schickbauer",
+    "    Claude Code",
+    "    Random number generator 42",
+    "",
+    "Synthwave backdrop:",
+    "    Renze Nicolai",
+    "",
+    "Many thanks to:",
+    "    Renze Nicolai for the awesome Tanmatsu device",
+    "    Team Badge for making the many modules used in this software",
+    "    Espressif for making such a wicked Microcontroller",
+    "    Anthropic for Claude Code",
+    "",
+    "** All music in this game is procedurally generated **",
+    "",
+    "This software is under the MIT license",
+    "https://opensource.org/license/mit",
+    "",
+    "(C) 2026 Rene \"cavac\" Schickbauer",
+};
+#define CREDITS_LINE_COUNT ((int)(sizeof(credits_lines) / sizeof(credits_lines[0])))
+
+static float s_credits_scroll = 0.0f;   // px scrolled past the first line
+
+// Height of the credits scroll viewport. Shared by the renderer and
+// the scroll clamp so they always agree.
+static float credits_scroll_h(void) {
+    float const fbh        = pax_buf_get_heightf(fb);
+    float const panel_y    = (fbh - fbh * CREDITS_PANEL_H) * 0.5f;
+    float const panel_h    = fbh * CREDITS_PANEL_H;
+    float const scroll_top = panel_y + MENU_TOP_PAD + 36.0f + 16.0f;
+    float const scroll_bot = panel_y + panel_h - MENU_FOOTER_PAD - 10.0f;
+    return scroll_bot - scroll_top;
+}
+
+// Largest useful scroll offset — the last line resting at the bottom
+// of the viewport. 0 when the whole roll already fits.
+static float credits_max_scroll(void) {
+    float const content_h = (float)CREDITS_LINE_COUNT * CREDITS_LINE_H;
+    float const max       = content_h - credits_scroll_h();
+    return max > 0.0f ? max : 0.0f;
+}
+
+static void draw_credits(void) {
+    draw_menu_panel_size(CREDITS_PANEL_W, CREDITS_PANEL_H);
+    float const fbw        = pax_buf_get_widthf(fb);
+    float const fbh        = pax_buf_get_heightf(fb);
+    float const panel_x    = (fbw - fbw * CREDITS_PANEL_W) * 0.5f;
+    float const panel_y    = (fbh - fbh * CREDITS_PANEL_H) * 0.5f;
+    float const panel_h    = fbh * CREDITS_PANEL_H;
+    float const text_x     = panel_x + MENU_TEXT_INSET;
+    float const scroll_top = panel_y + MENU_TOP_PAD + 36.0f + 16.0f;
+    float const scroll_bot = panel_y + panel_h - MENU_FOOTER_PAD - 10.0f;
+
+    draw_left(text_x, panel_y + MENU_TOP_PAD, 36.0f, MENU_COL_TITLE, "Credits");
+
+    for (int i = 0; i < CREDITS_LINE_COUNT; i++) {
+        float const ly = scroll_top - s_credits_scroll + (float)i * CREDITS_LINE_H;
+        // Cull whole lines outside the viewport — a partially
+        // visible line can't be clipped and would spill over the
+        // title / footer.
+        if (ly < scroll_top) continue;
+        if (ly + CREDITS_TEXT_H > scroll_bot) continue;
+        char const*  line = credits_lines[i];
+        size_t const len  = strlen(line);
+        // Section headings end with ':' — tint them yellow.
+        pax_col_t const col = (len > 0 && line[len - 1] == ':')
+                                  ? MENU_COL_TITLE : MENU_COL_NORMAL;
+        draw_left(text_x, ly, CREDITS_TEXT_H, col, line);
+    }
+
+    draw_left(text_x, panel_y + panel_h - MENU_FOOTER_PAD, 14.0f, MENU_COL_HINT,
+              "up / down to scroll, enter or esc to return");
 }
 
 // Top-right HUD during PLAYING and GAME_OVER: score + multiplier.
@@ -1190,8 +1297,8 @@ static void draw_score_readout(game_state_t const* g) {
 //      0..4 — the 5th Tri ticks the multiplier and resets the
 //      row, so the 5th slot never visually holds).
 //   2. The current multiplier as `×N`.
-// Layout constants are hoisted up the file (near draw_exit_hint)
-// so the F-key hint y baselines can reference them.
+// Layout constants are hoisted up the file (near draw_pause_hint)
+// so the F4 hint y baseline can reference them.
 static void draw_multiplier_panel(game_state_t const* g) {
     // Opaque background fill — uses pax_simple_rect (not direct_565
     // dim) so the panel is fully readable regardless of scenery.
@@ -1837,11 +1944,22 @@ void app_main(void) {
         // regions without per-pixel blend math — much cheaper than
         // detecting per-pixel "am I in a shadow" while drawing the
         // grid.
+        // The settings family counts as a "menu state" (scrolling
+        // menu floor, no shadows) only when it was opened from the
+        // main menu. Opened from the pause menu it renders like
+        // PAUSED instead — frozen floor, frozen scene behind.
+        bool const in_settings_family = (app_state == APP_STATE_SETTINGS
+                                         || app_state == APP_STATE_CONTROLS
+                                         || app_state == APP_STATE_AUDIO_SETTINGS
+                                         || app_state == APP_STATE_KEY_CAPTURE);
         bool const is_menu_state = (app_state == APP_STATE_SLOT_SELECT
                                     || app_state == APP_STATE_MENU
                                     || app_state == APP_STATE_SEED_INPUT
                                     || app_state == APP_STATE_STATS_VIEW
-                                    || app_state == APP_STATE_UPGRADE_STUB);
+                                    || app_state == APP_STATE_UPGRADE_STUB
+                                    || app_state == APP_STATE_CREDITS
+                                    || (in_settings_family
+                                        && s_settings_origin != APP_STATE_PAUSED));
         // PAUSED freezes the world but keeps the existing scene
         // visible behind the overlay — same render path as
         // GAME_OVER (obstacles + shadows in their last positions,
@@ -1914,7 +2032,6 @@ void app_main(void) {
             case APP_STATE_SLOT_SELECT: {
                 t_after_obs = esp_timer_get_time();
                 draw_slot_select();
-                draw_exit_hint();
                 if (menu_nav != 0) {
                     // UP = -1 (toward index 0), DOWN = +1. menu_nav
                     // here is +1 for UP / -1 for DOWN (mirrors the
@@ -1952,7 +2069,6 @@ void app_main(void) {
             case APP_STATE_MENU: {
                 t_after_obs = esp_timer_get_time();
                 draw_main_menu();
-                draw_exit_hint();
                 if (menu_nav != 0) {
                     s_menu_cursor -= menu_nav;
                     if (s_menu_cursor < 0)                  s_menu_cursor = 0;
@@ -1976,8 +2092,13 @@ void app_main(void) {
                             app_state = APP_STATE_STATS_VIEW;
                             break;
                         case MENU_ENTRY_SETTINGS:
+                            s_settings_origin = APP_STATE_MENU;
                             s_settings_cursor = SETTINGS_ENTRY_CONTROLS;
                             app_state = APP_STATE_SETTINGS;
+                            break;
+                        case MENU_ENTRY_CREDITS:
+                            s_credits_scroll = 0.0f;
+                            app_state = APP_STATE_CREDITS;
                             break;
                         case MENU_ENTRY_EXIT:
                             audio_mixer_shutdown();
@@ -1991,7 +2112,6 @@ void app_main(void) {
             case APP_STATE_SEED_INPUT: {
                 t_after_obs = esp_timer_get_time();
                 draw_seed_input();
-                draw_exit_hint();
                 if (typed_d && s_seed_len < (int)(sizeof(s_seed_buf) - 1)) {
                     s_seed_buf[s_seed_len++] = (char)('0' + typed);
                     s_seed_buf[s_seed_len]   = '\0';
@@ -2014,9 +2134,9 @@ void app_main(void) {
             }
 
             case APP_STATE_SETTINGS: {
+                draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
                 draw_settings_menu();
-                draw_exit_hint();
                 if (menu_nav != 0) {
                     s_settings_cursor -= menu_nav;
                     if (s_settings_cursor < 0)                     s_settings_cursor = 0;
@@ -2035,15 +2155,17 @@ void app_main(void) {
                     }
                 }
                 if (menu_esc) {
-                    app_state = APP_STATE_MENU;
+                    // Back to wherever Settings was opened from — the
+                    // main menu or the pause overlay.
+                    app_state = s_settings_origin;
                 }
                 break;
             }
 
             case APP_STATE_CONTROLS: {
+                draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
                 draw_controls_menu();
-                draw_exit_hint();
                 if (menu_nav != 0) {
                     s_controls_cursor -= menu_nav;
                     if (s_controls_cursor < 0)                     s_controls_cursor = 0;
@@ -2068,9 +2190,11 @@ void app_main(void) {
             }
 
             case APP_STATE_KEY_CAPTURE: {
-                // The synthwave backdrop is already drawn for this
-                // frame; just overlay the modal. No exit hint — F1
-                // is captured as a binding here, not an exit key.
+                // The backdrop (synthwave, or the frozen game when
+                // opened from the pause menu) is already in place;
+                // just overlay the modal. No exit hint — F1 is
+                // captured as a binding here, not an exit key.
+                draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
                 draw_key_capture();
                 uint16_t captured = 0;
@@ -2082,9 +2206,9 @@ void app_main(void) {
             }
 
             case APP_STATE_AUDIO_SETTINGS: {
+                draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
                 draw_audio_settings();
-                draw_exit_hint();
                 if (menu_nav != 0) {
                     s_audio_cursor -= menu_nav;
                     if (s_audio_cursor < 0)                   s_audio_cursor = 0;
@@ -2112,7 +2236,6 @@ void app_main(void) {
             case APP_STATE_STATS_VIEW: {
                 t_after_obs = esp_timer_get_time();
                 draw_stats_view();
-                draw_exit_hint();
                 if (pickup_pressed || menu_esc) {
                     app_state = APP_STATE_MENU;
                 }
@@ -2122,7 +2245,23 @@ void app_main(void) {
             case APP_STATE_UPGRADE_STUB: {
                 t_after_obs = esp_timer_get_time();
                 draw_upgrade_stub();
-                draw_exit_hint();
+                if (pickup_pressed || menu_esc) {
+                    app_state = APP_STATE_MENU;
+                }
+                break;
+            }
+
+            case APP_STATE_CREDITS: {
+                t_after_obs = esp_timer_get_time();
+                if (menu_nav != 0) {
+                    // UP (menu_nav +1) scrolls toward the top of the
+                    // roll, DOWN (-1) toward the bottom.
+                    s_credits_scroll -= (float)menu_nav * CREDITS_SCROLL_STEP;
+                    if (s_credits_scroll < 0.0f) s_credits_scroll = 0.0f;
+                    float const max = credits_max_scroll();
+                    if (s_credits_scroll > max) s_credits_scroll = max;
+                }
+                draw_credits();
                 if (pickup_pressed || menu_esc) {
                     app_state = APP_STATE_MENU;
                 }
@@ -2145,7 +2284,6 @@ void app_main(void) {
                     draw_stage_banner((int)world.stage + 1);
                 }
                 draw_multiplier_panel(&game);
-                draw_exit_hint();
                 draw_pause_hint();
                 draw_score_readout(&game);
                 draw_stage_readout(&world);
@@ -2206,7 +2344,6 @@ void app_main(void) {
                 draw_stage_readout(&world);
                 draw_sun_readout(game.sun_y);
                 draw_pause_overlay();
-                draw_exit_hint();
 
                 if (menu_nav != 0) {
                     s_pause_cursor -= menu_nav;
@@ -2220,22 +2357,33 @@ void app_main(void) {
                     input_set_mode(INPUT_MODE_PLAYING);
                     resume_audio_from_pause_menu();
                 } else if (pickup_pressed) {
-                    if (s_pause_cursor == PAUSE_ENTRY_RESUME) {
-                        app_state = APP_STATE_PLAYING;
-                        input_set_mode(INPUT_MODE_PLAYING);
-                        resume_audio_from_pause_menu();
-                    } else { // PAUSE_ENTRY_ABORT
-                        if (!run_end_committed) {
-                            int    const peak_stage  = (s_peak_stage > (int)world.stage)
-                                                         ? s_peak_stage : (int)world.stage;
-                            double const run_seconds = s_run_play_seconds;
-                            save_commit_run_end(s_active_slot, &s_save, SAVE_END_QUIT,
-                                                &game, peak_stage, run_seconds);
-                            run_end_committed = true;
-                        }
-                        end_run_audio();
-                        app_state = APP_STATE_MENU;
-                        input_set_mode(INPUT_MODE_TITLE);
+                    switch (s_pause_cursor) {
+                        case PAUSE_ENTRY_RESUME:
+                            app_state = APP_STATE_PLAYING;
+                            input_set_mode(INPUT_MODE_PLAYING);
+                            resume_audio_from_pause_menu();
+                            break;
+                        case PAUSE_ENTRY_SETTINGS:
+                            // Open Settings over the frozen run. The
+                            // run stays logically paused — no audio
+                            // resume — and Esc walks back here.
+                            s_settings_origin = APP_STATE_PAUSED;
+                            s_settings_cursor = SETTINGS_ENTRY_CONTROLS;
+                            app_state = APP_STATE_SETTINGS;
+                            break;
+                        case PAUSE_ENTRY_ABORT:
+                            if (!run_end_committed) {
+                                int    const peak_stage  = (s_peak_stage > (int)world.stage)
+                                                             ? s_peak_stage : (int)world.stage;
+                                double const run_seconds = s_run_play_seconds;
+                                save_commit_run_end(s_active_slot, &s_save, SAVE_END_QUIT,
+                                                    &game, peak_stage, run_seconds);
+                                run_end_committed = true;
+                            }
+                            end_run_audio();
+                            app_state = APP_STATE_MENU;
+                            input_set_mode(INPUT_MODE_TITLE);
+                            break;
                     }
                 }
                 break;
@@ -2268,7 +2416,6 @@ void app_main(void) {
                 }
                 draw_game_over_overlay();
                 draw_multiplier_panel(&game);
-                draw_exit_hint();
                 draw_score_readout(&game);
                 draw_stage_readout(&world);
                 draw_sun_readout(game.sun_y);
