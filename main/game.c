@@ -269,11 +269,13 @@ void game_step(game_state_t* g, world_state_t const* w, float dt, float steer) {
 }
 
 void game_jump(game_state_t* g) {
-    // Only from a support surface — no double-jump. `ship_grounded`
-    // covers both the floor and obstacle tops (set by game_step).
-    if (g->ship_grounded) {
+    // Needs a support surface AND a jump charge in hand (Phase
+    // 9.1f) — collect jump boosters to refill. No double-jump:
+    // `ship_grounded` is cleared on lift-off.
+    if (g->ship_grounded && g->jump_charges > 0) {
         g->ship_vy       = GAME_JUMP_SPEED;
         g->ship_grounded = false;
+        g->jump_charges -= 1;
     }
 }
 
@@ -462,6 +464,18 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
                     hit = OBSTACLE_HIT_IGNORE;
                     break;
                 case OBSTACLE_KIND_PICKUP_JUMP:
+                    // Phase 9.1f jump booster. Grant one jump charge
+                    // (capped), count the pickup for run stats, and
+                    // reuse the booster-pickup audio edge flag so it
+                    // plays the same ding as a speed booster.
+                    obstacle_despawn(o);
+                    g->pickups_jump += 1;
+                    if (g->jump_charges < GAME_JUMP_CHARGE_MAX) {
+                        g->jump_charges += 1;
+                    }
+                    g->just_picked_up_booster = true;
+                    hit = OBSTACLE_HIT_IGNORE;
+                    break;
                 case OBSTACLE_KIND_PICKUP_SHIELD:
                 case OBSTACLE_KIND_RAMP:
                     // Not implemented yet — ignore so collision

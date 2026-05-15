@@ -85,6 +85,11 @@ typedef struct game_state_s {
     float ship_vy;
     bool  ship_grounded;
 
+    // Jump-charge inventory (Phase 9.1f). Each jump booster picked
+    // up adds one (capped at GAME_JUMP_CHARGE_MAX); game_jump spends
+    // one per jump. The HUD renders the count as red diamonds.
+    int   jump_charges;
+
     // Phase 6 scoring. `multiplier` defaults to 1 and is bumped by
     // Tri pickups (not yet wired). `multiplier_max` tracks the peak
     // value reached this run for the per-run stat. Score and
@@ -132,9 +137,10 @@ typedef struct game_state_s {
     float         boost_ramp_start_speed;
 
     // Edge-trigger flag for audio: set true inside `game_collide`
-    // on the same frame a booster is consumed; main.c reads + clears
-    // it once per frame to fire `sfx_pickup_ding_play()`. Lives on
-    // game_state so the audio side stays out of game logic.
+    // on the same frame a speed *or* jump booster is consumed;
+    // main.c reads + clears it once per frame to fire
+    // `sfx_pickup_ding_play()`. Lives on game_state so the audio
+    // side stays out of game logic.
     bool  just_picked_up_booster;
 
     // Same pattern for the Tri pickup (Phase 6). `tri_pickup_slot`

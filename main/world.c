@@ -10,6 +10,7 @@
 #include "areas/simple_platform.h"
 #include "magicnumbers.h"
 #include "objects/booster.h"
+#include "objects/jump_booster.h"
 #include "objects/tri.h"
 #include "objects/wall.h"
 
@@ -302,6 +303,10 @@ void world_init(world_state_t* w, uint32_t seed) {
     for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
         booster_spawn(w);
     }
+    // One jump booster in the pre-stage-1 lead-in so the jump can be
+    // tested straight away (Phase 9.1f). In-run, jump boosters spawn
+    // from the stage-3 rest onward (see the rest-area handler).
+    jump_booster_spawn(w);
 }
 
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
@@ -371,6 +376,15 @@ void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
             // S-curve through the rest area. The booster on the
             // curve fulfils GAME_BOOSTERS_PER_REST exactly.
             spawn_rest_tri_curve(w);
+
+            // Jump boosters (Phase 9.1f) become available from
+            // stage 3 onward. `w->stage` here is the stage that just
+            // finished; the rest leads into stage `w->stage + 1`,
+            // so `>= 2` puts one in the rest entering stage 3 and
+            // every rest after.
+            if (w->stage >= 2) {
+                jump_booster_spawn(w);
+            }
 
             // Leftover boosters carried over from the prior stage
             // can't fit the curve cleanly — drop them on the floor

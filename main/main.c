@@ -759,6 +759,30 @@ static void draw_boost_indicator(game_state_t const* g) {
     direct_565_tri(fb_pixels, apex_x, apex_y, bl_x, base_y, br_x, base_y, packed);
 }
 
+// Jump-charge inventory HUD (Phase 9.1f) — one red diamond per
+// stored jump charge, anchored to the bottom-right corner and
+// growing leftward. Nothing is drawn at zero charges.
+#define JUMP_HUD_COLOR   0xFFFF4848u
+static void draw_jump_inventory(game_state_t const* g) {
+    if (g->jump_charges <= 0) return;
+    // Diamonds match the boost indicator's size (its `text_h * 3`,
+    // = 54 px point-to-point), so the two HUD symbols read as a set.
+    float const margin  = 12.0f;
+    float const r       = (18.0f * 3.0f) * 0.5f;   // 27 px half-extent
+    float const spacing = 2.0f * r + 6.0f;
+    float const fb_w    = pax_buf_get_widthf(fb);
+    float const fb_h    = pax_buf_get_heightf(fb);
+    float const cy      = fb_h - margin - r;
+    for (int i = 0; i < g->jump_charges; i++) {
+        // Right-anchored: charge 0 sits in the corner, the rest
+        // extend left. A square rotated 45° — two triangles split
+        // on the vertical diagonal.
+        float const cx = fb_w - margin - r - (float)i * spacing;
+        pax_simple_tri(fb, JUMP_HUD_COLOR, cx, cy - r, cx + r, cy, cx, cy + r);
+        pax_simple_tri(fb, JUMP_HUD_COLOR, cx, cy - r, cx, cy + r, cx - r, cy);
+    }
+}
+
 // Phase 6 multiplier-HUD layout. Constants live up here so the
 // F1 / F4 hint y baselines (which sit *below* the panel across
 // every state) can reference them. The draw helper itself
@@ -2390,6 +2414,7 @@ void app_main(void) {
                 draw_speed_readout(game.ship_speed_z);
                 draw_sun_readout(game.sun_y);
                 draw_boost_indicator(&game);
+                draw_jump_inventory(&game);
 
                 // Track peak stage reached this run.
                 if ((int)world.stage > s_peak_stage) s_peak_stage = (int)world.stage;

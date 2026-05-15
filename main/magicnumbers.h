@@ -69,6 +69,10 @@
 #define GAME_GRAVITY                     3.5f    // world units / s^2, downward
 #define GAME_JUMP_SPEED                  3.3f    // world units / s, upward kick
 
+// Jump-charge inventory cap (Phase 9.1f). Collecting a jump booster
+// adds one charge toward this cap; game_jump spends one per jump.
+#define GAME_JUMP_CHARGE_MAX             3
+
 // Landing tolerance (world units): vertical slop for treating a
 // ship-belly-vs-obstacle-top contact as "resting on / landing on"
 // the surface rather than a lethal collision. Absorbs float error
