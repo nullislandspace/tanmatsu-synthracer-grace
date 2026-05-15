@@ -20,17 +20,6 @@
 #define GATEWAY_COUNT_MIN       1
 #define GATEWAY_COUNT_MAX       5
 
-// Settling distance at the start of a gateway area. The previous
-// area can spawn its last obstacle right up to the area boundary,
-// placing it at camera-relative z = WORLD_Z_FAR_SPAWN. Waiting one
-// full far-plane distance of camera travel guarantees that obstacle
-// has crossed the camera and despawned before the gateway's
-// alignment pad starts ticking — so the whole gateway area, lead-in
-// included, is free of drifting leftovers and the player only has
-// the gate itself to focus on. Reads visually as a deliberate
-// breath before the alignment puzzle.
-#define GATEWAY_SETTLE_Z        WORLD_Z_FAR_SPAWN
-
 // Spawn a gateway: two cube slabs flanking a central gap of width
 // `2 * half_gap`. The gap centre is picked so that both slabs are
 // entirely inside the playfield. If `with_booster` is true, drops
@@ -71,13 +60,19 @@ void area_gateways_init(area_state_t* a, uint16_t stage, uint32_t* prng) {
     a->gates_remaining    = n;
     a->gate_gap_half_w    = gap * 0.5f;
     a->gate_pad_z         = pad;
-    // [settle][pad][gate][pad][gate]...[gate][pad]
-    //  ^         ^                              ^
-    //  prev-area drain   alignment              trailing
-    //                    lead-in                pad
-    // = settle + (n+1) pads + n gate thicknesses.
-    a->length_remaining_z = GATEWAY_SETTLE_Z + (float)(n + 1) * pad + (float)n * thick;
-    a->next_event_z       = GATEWAY_SETTLE_Z + pad;  // first gate after settle + one lead-in pad
+    // [pad][gate][pad][gate]...[gate][pad]
+    //  ^                              ^
+    //  lead-in                        trailing pad
+    // The lead-in and trailing pads are exactly one inter-gate pad
+    // each, so the empty run before the first gate and after the
+    // last matches the gate-to-gate spacing — fast-paced, no long
+    // dead stretch. Gates spawn at the far plane (WORLD_Z_FAR_SPAWN),
+    // the furthest any obstacle ever spawns, so a fresh gate is never
+    // placed behind a leftover obstacle from the previous area; any
+    // such leftover is strictly nearer and drifts past before the
+    // gate reaches the player. = (n+1) pads + n gate thicknesses.
+    a->length_remaining_z = (float)(n + 1) * pad + (float)n * thick;
+    a->next_event_z       = pad;  // first gate after one lead-in pad
 }
 
 bool area_gateways_tick(world_state_t* w, area_state_t* a, float dz) {

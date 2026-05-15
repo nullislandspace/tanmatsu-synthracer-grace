@@ -1378,6 +1378,20 @@ static void draw_stage_banner(int stage) {
     rendertext_draw(fb, GAME_BOOSTER_FRONT_COLOR, NULL, text_h, tx, ty, buf);
 }
 
+// The "Stage: N" banner is shown only during the *tail* of a rest
+// area — the last STAGE_BANNER_LEAD_Z world-z (≈5 s at cruise)
+// before the rest ends and the next stage proper begins. Showing it
+// for the whole rest popped the banner up the instant the rest
+// stretch first appeared on the far horizon, far too early. The
+// short pre-stage-1 intro rest is itself only one screen depth, so
+// this threshold leaves its "Stage: 1" banner visible end-to-end.
+#define STAGE_BANNER_LEAD_Z  100.0f
+
+static bool stage_banner_visible(world_state_t const* w) {
+    return w->area.type == AREA_TYPE_REST
+        && w->area.length_remaining_z <= STAGE_BANNER_LEAD_Z;
+}
+
 // Build the daily seed from the RTC date — `year*10000 + month*100
 // + day`. Same date → same seed → identical world, regardless of
 // how many times the player restarts the run or the app. The seed
@@ -2276,11 +2290,12 @@ void app_main(void) {
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
                 game_draw_sparks(fb, &game);
-                if (world.area.type == AREA_TYPE_REST) {
+                if (stage_banner_visible(&world)) {
                     // Rest areas (pre-stage-1 lead-in + between-stage
-                    // breathers) show the upcoming stage number.
-                    // w->stage is N during the rest that leads into
-                    // stage N+1, and 0 during the pre-run rest.
+                    // breathers) announce the upcoming stage number
+                    // in their final stretch. w->stage is N during
+                    // the rest that leads into stage N+1, and 0
+                    // during the pre-run intro rest.
                     draw_stage_banner((int)world.stage + 1);
                 }
                 draw_multiplier_panel(&game);
@@ -2336,7 +2351,7 @@ void app_main(void) {
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
-                if (world.area.type == AREA_TYPE_REST) {
+                if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
                 }
                 draw_multiplier_panel(&game);
@@ -2411,7 +2426,7 @@ void app_main(void) {
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
                 game_draw_ship(fb, &game);
-                if (world.area.type == AREA_TYPE_REST) {
+                if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
                 }
                 draw_game_over_overlay();

@@ -167,7 +167,7 @@ static void start_next_area(world_state_t* w) {
         case AREA_TYPE_BRIDGES:         area_bridges_init        (&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_DYNAMIC_PASSAGE: area_dynamic_passage_init(&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_DYNAMIC_GATEWAY: area_dynamic_gateway_init(&w->area, w->stage, &w->stage_prng); break;
-        case AREA_TYPE_REST:            area_rest_init           (&w->area);                           break;
+        case AREA_TYPE_REST:            area_rest_init           (&w->area, WORLD_REST_LENGTH_Z);       break;
     }
 }
 
@@ -277,8 +277,10 @@ void world_init(world_state_t* w, uint32_t seed) {
     w->left_wall_far_z  = WALL_SEGMENT_HALF_D;
     wall_top_up(w, &w->right_wall_far_z, WALL_X_RIGHT);
     wall_top_up(w, &w->left_wall_far_z,  WALL_X_LEFT);
-    // Begin with a pre-stage-1 rest area so the "Stage: 1" banner
-    // shows for a brief clear lead-in before any obstacles arrive.
+    // Begin with a short pre-stage-1 rest area — just one screen
+    // depth (WORLD_Z_FAR_SPAWN) — so the run opens with a brief
+    // clear lead-in rather than a long empty crawl, and the
+    // "Stage: 1" banner is visible for its whole duration.
     // w->stage stays at 0 during this rest; when the rest area
     // finishes, the standard area-done handler fires
     // `start_stage(0 + 1)` which sets up stage 1 normally. The rest
@@ -291,7 +293,7 @@ void world_init(world_state_t* w, uint32_t seed) {
     for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
         w->booster_due_at_progress[i] = -1.0f;  // nothing scheduled yet
     }
-    area_rest_init(&w->area);
+    area_rest_init(&w->area, WORLD_Z_FAR_SPAWN);
     for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
         booster_spawn(w);
     }
@@ -357,7 +359,7 @@ void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
             // boosters_owed, but read it explicitly so the intent
             // is local).
             int const leftover_boosters = w->area.boosters_owed;
-            area_rest_init(&w->area);
+            area_rest_init(&w->area, WORLD_REST_LENGTH_Z);
             w->area.boosters_owed = 0;
 
             // Phase 6: spawn the 10-Tri + 1-booster quadratic-Bezier

@@ -20,10 +20,6 @@
 // staggered chain of rolling cubes behind them.
 #define DYN_GATE_PAD_Z       10.0f
 
-// Settling distance — same rationale as gateways: drain the prior
-// area's trailing obstacles before the alignment puzzle begins.
-#define DYN_GATE_SETTLE_Z    WORLD_Z_FAR_SPAWN
-
 // Hole geometry. Half-width = FLIPPING_CUBE_HALF_W (so the cube
 // behind the wall exactly fills the hole until it rolls).
 #define DYN_GATE_HOLE_HALF_W FLIPPING_CUBE_HALF_W
@@ -84,11 +80,15 @@ void area_dynamic_gateway_init(area_state_t* a, uint16_t stage, uint32_t* prng) 
     // walls don't claim the booster slot.
     a->passage_mirror     = 0;
     float const thick = 2.0f * CUBE_GATE_HALF_D;
-    // Layout: [settle][pad][gate][pad][gate]...[gate][pad]
-    a->length_remaining_z = DYN_GATE_SETTLE_Z
-                          + (float)(n + 1) * DYN_GATE_PAD_Z
+    // Layout: [pad][gate][pad][gate]...[gate][pad]
+    // Lead-in and trailing pads are one inter-gate pad each, so the
+    // empty run bracketing the area matches the gate-to-gate spacing
+    // — no long dead stretch. Gates spawn at WORLD_Z_FAR_SPAWN, the
+    // furthest spawn z, so a fresh gate is never placed behind a
+    // leftover obstacle from the previous area.
+    a->length_remaining_z = (float)(n + 1) * DYN_GATE_PAD_Z
                           + (float)n * thick;
-    a->next_event_z       = DYN_GATE_SETTLE_Z + DYN_GATE_PAD_Z;
+    a->next_event_z       = DYN_GATE_PAD_Z;
     // boosters_owed deliberately untouched so a stale booster from
     // an earlier area carries forward into this one.
 }
