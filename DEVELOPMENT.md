@@ -23,7 +23,12 @@
 | 6 | Tris + multiplier | ✅ done 2026-05-14 — distance × multiplier × 0.1 per-frame income (from the original RTS model, scaled so pickup bonuses stay visible) + Tri pickup bonus (5 × mult) + booster pickup bonus (10 × mult) all stacking; monotonic `pickups_tri` counter (HUD reads `% 5`); top-left opaque grey HUD panel with 4-slot Tri progress row + multiplier text (5th Tri ticks the multiplier and resets the row); ascending pentatonic 5-note plink SFX (`sfx_pickup_plink.c`, the 5th note doubles as the multiplier-bump cue); Tri object copied from `objects/booster.c` into `objects/tri.c`, painted blue; booster shape upgraded pyramid → rotating regular icosahedron (12 verts / 20 faces / 30 edges, ~1 Hz spin around Y, faceted-gem rendering with face-normal lighting + edge wireframe in `render_booster_icosahedron`); per-area spawn rules implemented (pixel_field half-count / big_blocks equal-count via rejection sampling against the live pool, gateways + dynamic_gateway fill the non-booster hole, dynamic_passage emits one per flipping cube in the clutter, bridges co-spawn one per bridge along a random-angle line, rest area between stages lays 10 Tris + booster on a quadratic-Bézier S-curve, pre-stage-1 lead-in deliberately excluded); per-run + all-time Tri totals persist automatically via the existing `run_stats_merge_into_all_time`. Crash penalty (-5 to multiplier, floor 1) wired in `game_collide`. New `world_find_free_x` helper for shared rejection sampling. See the 2026-05-13 / 2026-05-14 Phase 6 design-update + implementation decisions-log entries. |
 | 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
 | 8 | Daily + custom seed + persistence | ✅ done 2026-05-15 — RTC-derived daily seed (`year*10000 + month*100 + day`), now sourced from a single `s_session_date` snapshot captured once at boot so "today" is frozen for the whole session. Custom-seed entry dialog + `last_custom_seed` prefill/persist. Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, main menu, seed-input subscreen, stats screen, basic scoring + per-slot `last_run`/`all_time` stats, correct `SAVE_END_*` reason recording, and day-rollover detection (`save_apply_day_rollover`) all landed. **Scope note:** the meta-progression layer originally sketched under this phase — the challenge system that *writes* the `daily_done_*` flags, plus level/points/unlock logic — moved wholesale to Phase 11; the save struct carries all the fields but no gameplay code reads/writes them yet. The game is playable with a daily seed + persistent per-slot scores, which is the MVP bar. |
-| 9 | Pickups & attachments | ⬜ not started |
+| 9 | Pickups & attachments | ⬜ not started — split into sub-phases below; built **ungated** (`unlock_*` gating wired later in Phase 11). |
+| 9.1 | Vertical system + Jump pickup + ramps | ⬜ not started — `ship_y`/`ship_vy`/gravity, shadow ray, Y-aware collision, landing-on-tops, border-wall clamp redesign, jump pickup, ramps. See the 2026-05-15 "Phase 9 sub-phases + 9.1 vertical-system design" decisions-log entry. |
+| 9.2 | Shield pickup | ⬜ not started |
+| 9.3 | Checkpoint pickup | ⬜ not started |
+| 9.4 | Attachment slots + Magnet | ⬜ not started |
+| 9.5 | Battery upgrade | ⬜ not started |
 | 10 | Regions | ✅ dissolved into the stage + area system — content variation is added incrementally as stages and area types land (the recent flipping_cube / dynamic_passage / dynamic_gateway additions are concrete examples), rather than as a discrete 7-region table cut-in |
 | 11 | Meta-progression UI | ⬜ not started — **scope expanded:** absorbs the meta-progression work originally filed under Phase 8. The `meta.c` module: 25-level unlock ladder, 3-slot daily challenge system + challenge templates, awarding challenge points / level-ups, applying unlocks, level-up SFX & banner. Also owns the daily-challenge half of day-rollover — `save_apply_day_rollover()` already clears the `daily_done_*` flags on a day change (Phase 8), but the flags are inert until this phase's challenge system writes them. New challenge code must read the `s_session_date` snapshot, never the RTC. |
 | 12 | Apocalypse mode | ⬜ not started |
@@ -2947,6 +2952,90 @@
   fills in the code that reads and writes them. No code changed —
   this is a planning/tracking correction only.
 
+- 2026-05-15 — **Phase 9 sub-phases + 9.1 vertical-system design.**
+  Phase 9 (pickups & attachments) is split into five runnable
+  sub-phases — 9.1 vertical system + jump + ramps, 9.2 shield,
+  9.3 checkpoint, 9.4 attachment slots + magnet, 9.5 battery — and
+  built **ungated**: pickups always spawn, attachments are always
+  equippable, the `unlock_*` flags are wired later in Phase 11.
+  This entry is the full design for **9.1**, which adds the ship's
+  vertical dimension. Everything below is a *design decision*, not
+  yet implemented.
+    - **Vertical model.** The ship gains `ship_y` + `ship_vy`;
+      `game_step` integrates a gravity-driven arc. The jump pickup
+      injects `vy` explicitly on the use-button press; ramps do
+      not inject anything (see below). Camera stays Y-fixed for
+      now — the ship visibly rises in frame. Revisiting that later
+      is a mechanical change: add a `cam_y` parallel to `cam_x`
+      and thread it through `render_project`.
+    - **Shadow becomes a ray test.** Today `g->in_shadow` is *not*
+      geometry — `main.c` samples the floor pixel under the ship
+      and checks if it's shadow-coloured, which only works because
+      the ship is glued to the floor. That sampler is replaced by
+      a shadow ray: from the ship centre toward the sun, first
+      obstacle hit ⇒ shadowed. The sun direction is **back-tracked
+      from the existing shadow-length math**, not the painted sun
+      (which is just a UI indicator): rendered shadows are
+      `caster_height × factor` long, so the light direction toward
+      the sun is `(0, 1, factor)` — zero lateral, `+y`, `+z`, with
+      `factor` the same `GAME_SHADOW_LEN_FACTOR_*`/`sun_y` value
+      the renderer uses. Gameplay shadow and visible shadows
+      therefore agree by construction. Ray-vs-AABB (obstacles are
+      axis-aligned boxes — exact and cheap; no triangle
+      decomposition); ramps use their AABB. The test folds into
+      `game_collide`'s existing obstacle loop — no extra pool
+      traversal. Post-sunset stays a synchronous `in_shadow =
+      true`. The rendered floor-shadow quads stay, now purely
+      cosmetic and decoupled from gameplay. This also handles
+      airborne-under-an-overhang (ray hits the bridge span ⇒
+      shadowed) and platform-riding uniformly — one test, every
+      case.
+    - **Collision becomes Y-aware.** `game_collide`'s x-z AABB
+      gains a third interval test against each obstacle's
+      `[y_base, y_base + height]`; no Y-overlap ⇒ `continue`.
+      Fly-over, fly-under and floating mid-air obstacles fall out
+      for free. This **retires the bridge-span `span_collide`
+      `IGNORE` hack** — it exists only because "default collision
+      is x-z only"; once collision sees Y, the elevated span
+      simply doesn't overlap a grounded ship (and becomes
+      landable, see below). Swept collision is z-only today
+      (anti-tunnel); a fast vertical jump may need swept-Y to not
+      tunnel thin platforms.
+    - **Landing on / riding tops.** A "came-from-above" test
+      mirrors the existing "came_from_ahead" z-classifier: ship
+      belly above an obstacle's top face last frame, descending
+      (`vy < 0`), now x-z over it ⇒ **land** (snap `ship_y` to the
+      top, `vy = 0`). An at-altitude contact with a front/side
+      face is still a crash. Ground state becomes a small enum —
+      `GROUND_FLOOR` / `GROUND_OBJECT(id)` / `AIRBORNE`; riding off
+      the platform's back edge (it scrolls past) or its side
+      (steering) drops back to `AIRBORNE`. All solid obstacle tops
+      are landable uniformly — cubes, blocks, gate walls, bridge
+      spans.
+    - **Ramps — emergent launch.** Ramps are visible wedge
+      obstacles (the first non-cuboid render) of varying width and
+      steepness. Launch is emergent, not injected: a ramp is a
+      sloped platform, the ship rides its slope and is already
+      climbing at `vy = ship_speed_z × slope`; when the top lip
+      ends, the ship simply keeps that `vy` and gravity takes
+      over. Steeper ramp and faster ship both yield more air, for
+      free. Ramps therefore depend on the riding/landing code,
+      which is why jump and ramps are one sub-phase.
+    - **Border walls — collision → clamp.** `OBSTACLE_KIND_WALL`
+      (the track-edge side walls) leaves the collision pass
+      entirely — `game_collide` skips it. The walls stay in the
+      pool only for rendering. The lateral clamp already in
+      `game_step` (`SHIP_X_MIN/MAX_WORLD`) becomes the boundary:
+      when the clamp truncates outward motion this frame, set
+      `scrape_left/right` (same scrape SFX + wingtip sparks).
+      That fires only while the player pushes into the edge and is
+      X-only, so it works identically at any altitude — the border
+      is effectively an infinite-height wall the ship can never
+      leave or jump over. **To verify before implementing:**
+      `OBSTACLE_KIND_WALL` is used *only* for border walls — gate
+      slabs / in-track blocks must be `OBSTACLE_KIND_CUBE`, or
+      skipping `WALL` would make them pass-through.
+
 ---
 
 ## Future FPS improvements
@@ -3921,8 +4010,34 @@ Done in this order so each phase produces a runnable build:
    Add the title-screen "Custom Seed…" entry dialog + `last_custom_seed` /
    `cs_best` persistence. Custom-seed runs award meta-progression
    identically to daily runs.
-9. **Pickups & attachments**: jump, shield, checkpoint pickups +
-   the attachment slots and magnet/battery upgrades.
+9. **Pickups & attachments.** Built **ungated** — pickups always
+   spawn and attachments are always equippable; the `unlock_*`
+   gating is wired later in Phase 11, and storage caps
+   (double/triple jump, etc.) are plain constants for now. Split
+   into five sub-phases, each a runnable build:
+   - **9.1 — Vertical system + Jump pickup + ramps.** Adds the
+     ship's vertical dimension and everything that depends on it —
+     see the 2026-05-15 "Phase 9 sub-phases + 9.1 vertical-system
+     design" decisions-log entry for the full spec. In short:
+     `ship_y` + `ship_vy` + gravity in `game_step`; a shadow ray
+     replacing the floor-pixel `in_shadow` sampler; Y-aware
+     (x-y-z) collision; landing on / riding obstacle tops; the
+     border-wall collision→clamp redesign; the jump pickup
+     (explicit `vy` injection); and ramps (visible wedges,
+     emergent launch from slope × speed). Jump and ramps ship
+     together — a ramp is a sloped platform and needs the whole
+     system.
+   - **9.2 — Shield pickup.** Single-use; absorbs one head-on hit
+     instead of dying — brief invuln + forward/up teleport.
+   - **9.3 — Checkpoint pickup.** Stores a respawn point; on
+     death, resume there instead of GAME_OVER. Needs a design
+     pass on exactly what run state is snapshotted/restored.
+   - **9.4 — Attachment slots + Magnet.** The equip framework
+     (`attach1`/`attach2`, fills the `APP_STATE_UPGRADE_STUB`
+     screen) plus the Magnet attachment — pulls nearby pickups
+     toward the ship within a radius.
+   - **9.5 — Battery upgrade.** Needs a short design pass; likely
+     extends the sun/power budget.
 10. **Regions**: ✅ dissolved 2026-05-13. Content variation now
     rides on stages + area types rather than a discrete 7-region
     overlay — new areas (e.g. bridges, dynamic_passage,
