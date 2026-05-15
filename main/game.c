@@ -280,6 +280,26 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     // the head-on / scrape classifier.
     float const dz_frame = (dt > 0.0f) ? (g->ship_speed_z * dt) : 0.0f;
 
+    // Shadow ray (Phase 9.1d). `in_shadow` is the gameplay shadow
+    // flag — true when an obstacle sits between the ship and the
+    // sun. The sun direction is back-tracked from the renderer's
+    // shadow-length math: a caster of height h drops a shadow
+    // h*factor long toward the camera, so the direction *to* the sun
+    // is (0, 1, factor) — zero lateral, +y, +z. Each KIND_CUBE
+    // obstacle is ray-tested in the loop below (folded in, so no
+    // second pool traversal); the first hit sets `shadowed`. The
+    // post-sunset override lives in game_after_collide.
+    bool        shadowed = false;
+    float const factor   = GAME_SHADOW_LEN_FACTOR_MIN
+                         + (GAME_SHADOW_LEN_FACTOR_MAX - GAME_SHADOW_LEN_FACTOR_MIN)
+                           * (g->sun_y / GAME_SUN_SINK_RANGE_PX);
+    // Ray origin: the ship's collision-box centre. Captured once —
+    // the loop's lateral push-outs are sub-frame nudges irrelevant
+    // to the shadow test.
+    float const ray_x0 = g->ship_x_world;
+    float const ray_y0 = ship_yB + SHIP_COLLISION_HEIGHT * 0.5f;
+    float const ray_z0 = SHIP_COLLISION_Z_C;
+
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
         obstacle_t* o = &w->obstacles[i];
         if (!o->active) continue;
@@ -306,6 +326,24 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
 
         float const obs_yB = o->y_base;
         float const obs_yT = o->y_base + o->height;
+
+        // Shadow ray vs this obstacle (Phase 9.1d). Only solid cubes
+        // cast a gameplay shadow — the same set the renderer shadows.
+        // The ray has zero lateral component, so first gate on the
+        // ship's x being inside the obstacle's x-span, then a y/z
+        // slab test: dy/dt = 1, dz/dt = factor (> 0). A hit reaching
+        // t >= 0 means the obstacle is between the ship and the sun.
+        if (!shadowed && o->kind == OBSTACLE_KIND_CUBE
+            && ray_x0 >= obs_xL && ray_x0 <= obs_xR) {
+            float const t_lo = fmaxf(obs_yB - ray_y0,
+                                     (obs_zN_curr - ray_z0) / factor);
+            float const t_hi = fminf(obs_yT - ray_y0,
+                                     (obs_zF_curr - ray_z0) / factor);
+            if (t_hi >= 0.0f && t_lo <= t_hi) {
+                shadowed = true;
+            }
+        }
+
         float const x_pen = fminf(ship_xR, obs_xR) - fmaxf(ship_xL, obs_xL);
         float const y_pen = fminf(ship_yT, obs_yT) - fmaxf(ship_yB, obs_yB);
         float const z_pen = fminf(ship_zF, swept_zF) - fmaxf(ship_zN, swept_zN);
@@ -448,6 +486,10 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
         }
     }
 
+    // Publish the shadow-ray result (Phase 9.1d). game_after_collide
+    // forces this true once the sun has fully set.
+    g->in_shadow = shadowed;
+
     // Camera follows the resolved position.
     g->cam_x = g->ship_x_world;
     return head_on;
@@ -473,18 +515,11 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
     }
 
     // --- Shadow detection ------------------------------------------------
-    // Post-sunset is the only synchronous case — `in_shadow = true`
-    // regardless of what last frame's pixel sample said. Below the
-    // sunset threshold, `g->in_shadow` is set by main.c's
-    // floor-pixel sampler in the render pass (after render_shadows
-    // and before lane lines paint over the floor). That sample
-    // reads the actual painted shadow, so every object's
-    // shadow — including custom shadow callbacks like the bridge
-    // span — automatically counts toward the gameplay shadow test
-    // with no per-object math here. We leave the bit alone in this
-    // branch so the previous-frame value carries forward; one frame
-    // of lag at the shadow's edge is well below the perceptual
-    // threshold (~0.33 u of travel at cruise).
+    // The geometric shadow flag is computed by game_collide's shadow
+    // ray (a ray from the ship toward the sun — first obstacle hit).
+    // All that is left here is the post-sunset case: once the sun is
+    // fully down the whole world is in shadow regardless of geometry,
+    // so force the flag true.
     if (g->sun_y >= GAME_SUN_SINK_RANGE_PX) {
         g->in_shadow = true;
     }
