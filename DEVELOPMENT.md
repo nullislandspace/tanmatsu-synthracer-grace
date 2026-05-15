@@ -24,7 +24,7 @@
 | 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
 | 8 | Daily + custom seed + persistence | ✅ done 2026-05-15 — RTC-derived daily seed (`year*10000 + month*100 + day`), now sourced from a single `s_session_date` snapshot captured once at boot so "today" is frozen for the whole session. Custom-seed entry dialog + `last_custom_seed` prefill/persist. Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, main menu, seed-input subscreen, stats screen, basic scoring + per-slot `last_run`/`all_time` stats, correct `SAVE_END_*` reason recording, and day-rollover detection (`save_apply_day_rollover`) all landed. **Scope note:** the meta-progression layer originally sketched under this phase — the challenge system that *writes* the `daily_done_*` flags, plus level/points/unlock logic — moved wholesale to Phase 11; the save struct carries all the fields but no gameplay code reads/writes them yet. The game is playable with a daily seed + persistent per-slot scores, which is the MVP bar. |
 | 9 | Pickups & attachments | ⬜ not started — split into sub-phases below; built **ungated** (`unlock_*` gating wired later in Phase 11). |
-| 9.1 | Vertical system + Jump pickup + ramps | ⬜ not started — `ship_y`/`ship_vy`/gravity, shadow ray, Y-aware collision, landing-on-tops, border-wall clamp redesign, jump pickup, ramps. See the 2026-05-15 "Phase 9 sub-phases + 9.1 vertical-system design" decisions-log entry. |
+| 9.1 | Vertical system + Jump pickup + ramps | 🟡 in progress — milestones **a** (`ship_y`/`ship_vy`/gravity + jump trigger), **a.5** (moving camera + dedicated `render_camera` global), **b** (Y-aware collision) landed 2026-05-15. Pending: **c** landing-on-tops, **d** shadow ray, **e** border-wall clamp, **f** jump booster + inventory + HUD, **g** ramp object, **h** simple_platform area. See the 2026-05-15 "Phase 9 sub-phases + 9.1 vertical-system design" and "Phase 9.1 implementation" decisions-log entries. |
 | 9.2 | Shield pickup | ⬜ not started |
 | 9.3 | Checkpoint pickup | ⬜ not started |
 | 9.4 | Attachment slots + Magnet | ⬜ not started |
@@ -3035,6 +3035,60 @@
       `OBSTACLE_KIND_WALL` is used *only* for border walls — gate
       slabs / in-track blocks must be `OBSTACLE_KIND_CUBE`, or
       skipping `WALL` would make them pass-through.
+
+- 2026-05-15 — **Phase 9.1 implementation: milestones a / a.5 / b
+  landed.** The vertical system is built as build-verifiable
+  sub-milestones (see the design entry above for the full spec).
+  Done so far:
+    - **9.1a — vertical state + gravity + jump trigger.**
+      `game_state_t` gained `ship_y` (altitude above the rest
+      height) + `ship_vy`. `game_step` integrates a gravity arc;
+      `game_jump()` injects `GAME_JUMP_SPEED` when grounded (no
+      double-jump). The use-item button (Space) triggers it during
+      PLAYING — ungated until the 9.1f inventory gate. Ship mesh
+      and crash-spark burst render at the live altitude. After an
+      on-device test the arc was retuned much floatier —
+      `GAME_GRAVITY` 11→3.5, `GAME_JUMP_SPEED` 6→3.3 (~1.9 s
+      airborne, ~1.6 u peak) so the rise/fall is easy to read.
+    - **9.1a.5 — moving camera + dedicated camera global.** A new
+      sub-milestone — the design had filed a Y-fixed camera, but
+      on-device the fixed camera made jumps hard to judge and would
+      hide raised platforms, so the user opted to do camera Y now.
+      New `render_camera_t` global in render.c (`render_set_camera()`
+      / `render_camera()`); `render_project` reads it and lost its
+      `cam_x` parameter (~37 call sites updated). `cam_y` lives
+      ONLY in the global — never threaded. The floor grid
+      (`synthwave_step_lines`) gained a `cam_y` arg and projects
+      with `horizon + FLOOR_F·cam_y/z` — the exact render_project
+      ground-plane formula — so the grid tracks the camera height.
+      The cached sky/sun/mountains backdrop is untouched (the
+      horizon is translation-invariant). main.c publishes the
+      camera each frame: `cam_y = RENDER_CAM_Y + GAME_CAM_Y_FOLLOW
+      · ship_y`. After an on-device test `GAME_CAM_Y_FOLLOW` was
+      set to 1.0 — the camera holds a constant height above the
+      ship, ship at a stable screen position. (cam_x stays a
+      threaded parameter where it is used for face-visibility;
+      only cam_y was unified into the global. The now-unused cam_x
+      in `span_draw` / `span_shadow` is `(void)`-cast.)
+    - **9.1b — Y-aware collision.** `game_collide` gained a third
+      interval test: the ship box `[SHIP_BASE_Y+ship_y, +SHIP_`
+      `COLLISION_HEIGHT]` (0.30, from the ship mesh's local-y
+      extent) against each obstacle's `[y_base, y_base+height]`.
+      No Y-overlap ⇒ continue — fly-over, fly-under and floating
+      obstacles all work. Jumping over a Tri / booster now misses
+      it (no Y-overlap = no pickup) — correct for a jump game; the
+      magnet (9.4) is what reaches flown-over pickups. The bridge
+      `span_collide` IGNORE hack was retired. **Bug found + fixed
+      on-device:** retiring `span_collide` exposed that the span's
+      `o->y_base` was 0 — its elevation lived only in the custom
+      `span_draw` renderer (a constant), which the IGNORE hack had
+      masked. With Y-aware collision the span became a full-width
+      *ground-level* phantom box and crashed the ship flying under
+      bridges. Fixed by setting `span->y_base = BRIDGE_SPAN_Y_BASE`
+      so the obstacle AABB matches the rendered geometry.
+  Still pending in 9.1: c (landing on tops), d (shadow ray),
+  e (border-wall clamp), f (jump booster + inventory + HUD),
+  g (ramp object), h (simple_platform area).
 
 ---
 

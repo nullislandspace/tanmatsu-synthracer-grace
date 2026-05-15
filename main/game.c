@@ -225,6 +225,12 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
 
     float const ship_zN = SHIP_COLLISION_Z_C - SHIP_COLLISION_HALF_D;
     float const ship_zF = SHIP_COLLISION_Z_C + SHIP_COLLISION_HALF_D;
+    // Ship vertical extent (Phase 9.1b). The collision box rises
+    // with the jump: belly at SHIP_BASE_Y + ship_y, SHIP_COLLISION_HEIGHT
+    // tall. ship_y is constant across this pass (the loop only nudges
+    // ship_x_world), so the Y range is computed once here.
+    float const ship_yB = SHIP_BASE_Y + g->ship_y;
+    float const ship_yT = ship_yB + SHIP_COLLISION_HEIGHT;
 
     // Per-frame z motion. Obstacles will move by this much in
     // world_advance later this frame; they moved by approximately
@@ -258,9 +264,15 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
         float const swept_zN    = obs_zN_curr;  // smallest z reached this frame (current near)
         float const swept_zF    = obs_zF_prev;  // largest  z reached this frame (previous far)
 
+        float const obs_yB = o->y_base;
+        float const obs_yT = o->y_base + o->height;
         float const x_pen = fminf(ship_xR, obs_xR) - fmaxf(ship_xL, obs_xL);
+        float const y_pen = fminf(ship_yT, obs_yT) - fmaxf(ship_yB, obs_yB);
         float const z_pen = fminf(ship_zF, swept_zF) - fmaxf(ship_zN, swept_zN);
-        if (x_pen <= 0.0f || z_pen <= 0.0f) continue;
+        // Y-aware (Phase 9.1b): no vertical overlap ⇒ the ship is
+        // clearing the obstacle — flying over it, or under a raised
+        // one — so there is no collision at all.
+        if (x_pen <= 0.0f || y_pen <= 0.0f || z_pen <= 0.0f) continue;
 
         // Head-on iff the obstacle's near face was still ahead of
         // the ship's front face at the start of this frame — it

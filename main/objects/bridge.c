@@ -130,16 +130,11 @@ static void span_shadow(pax_buf_t* fb, obstacle_t const* o, float cam_x, float s
     direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_FR, sy_FR, sx_FL, sy_FL, sh_packed);
 }
 
-// --- Span collide callback -----------------------------------------
-// The ship's collision AABB lives near y=0 (ship altitude ~0.22 u);
-// the span sits at y ≥ 3 u, so it physically never touches the ship.
-// But the default obstacle collision is x-z only — without this
-// override the ship would die on every x-z overlap. IGNORE makes
-// the span explicitly non-colliding.
-static obstacle_hit_result_t span_collide(obstacle_t* o, struct game_state_s* g, bool came_from_ahead) {
-    (void)o; (void)g; (void)came_from_ahead;
-    return OBSTACLE_HIT_IGNORE;
-}
+// (Phase 9.1b retired the span_collide IGNORE hack. Collision is
+// now Y-aware, so the elevated span — sitting at y ≥ 3 u — simply
+// never Y-overlaps the ground-level ship and the default cube
+// collision dispatch handles it correctly. The span is now also a
+// landable surface like any other obstacle top.)
 
 void bridge_spawn(world_state_t* w, float z) {
     // Pillars sit on top of the side walls, not embedded in them.
@@ -166,17 +161,24 @@ void bridge_spawn(world_state_t* w, float z) {
         CONCRETE_TOP_COLOR,   CONCRETE_OUTLINE_COLOR);
     if (right_pillar) right_pillar->y_base = WALL_HEIGHT;
 
-    // Span: full-width slab with custom draw / shadow / collide so
-    // its elevation is rendered correctly and the ship can fly
-    // under it.
+    // Span: full-width slab with custom draw + shadow callbacks so
+    // its elevation renders correctly. Collision is the default
+    // Y-aware cube dispatch — the span sits well above the ship, so
+    // the ship flies under it (and, post-9.1c, can land on it).
     obstacle_t* const span = obstacle_spawn(w, OBSTACLE_KIND_CUBE,
                                             0.0f, z,
                                             SPAN_HALF_W, BRIDGE_HALF_D, BRIDGE_SPAN_HEIGHT,
                                             CONCRETE_FRONT_COLOR, CONCRETE_SIDE_COLOR,
                                             CONCRETE_TOP_COLOR,   CONCRETE_OUTLINE_COLOR);
     if (span) {
-        span->draw    = span_draw;
-        span->shadow  = span_shadow;
-        span->collide = span_collide;
+        // The collision AABB must sit where the span is *rendered*.
+        // span_draw lifts the span to BRIDGE_SPAN_Y_BASE, but the
+        // obstacle's y_base defaults to 0 — pre-9.1b the span_collide
+        // IGNORE hack masked that. With Y-aware collision the AABB
+        // has to carry the real elevation, or the ship crashes into
+        // the span's ground-level phantom box while flying under it.
+        span->y_base = BRIDGE_SPAN_Y_BASE;
+        span->draw   = span_draw;
+        span->shadow = span_shadow;
     }
 }

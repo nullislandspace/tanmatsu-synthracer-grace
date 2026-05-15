@@ -23,6 +23,10 @@
 #define SHIP_COLLISION_HALF_W 0.28f
 #define SHIP_COLLISION_HALF_D 0.34f
 #define SHIP_COLLISION_Z_C    1.98f
+// Vertical collision extent (Phase 9.1b). The mesh's local y runs
+// 0.0 (wings / tail) up to 0.30 (nose apex), so the collision box
+// is that tall, its base at SHIP_BASE_Y + ship_y.
+#define SHIP_COLLISION_HEIGHT 0.30f
 
 // Playfield lateral bounds. Ship can't move past these; obstacles
 // placed entirely outside this range are "boundary" obstacles
