@@ -2082,6 +2082,16 @@ void app_main(void) {
                                    : world_is_live  ? game.ship_speed_z * dt
                                                     : 0.0f;
         float const floor_cam_x      = is_menu_state ? 0.0f : game.cam_x;
+        // Camera Y follows a fraction of the ship's jump altitude
+        // (GAME_CAM_Y_FOLLOW) so the ship stays in frame without the
+        // world lurching; menu states sit at the resting height.
+        // Publish the camera to the render module now — *before*
+        // anything projects (render_shadows, the floor, obstacles
+        // and the ship all read render_project's camera global).
+        float const cam_y = is_menu_state
+                              ? RENDER_CAM_Y
+                              : RENDER_CAM_Y + GAME_CAM_Y_FOLLOW * game.ship_y;
+        render_set_camera(floor_cam_x, cam_y);
         bool  const fully_shadowed   = !is_menu_state
                                        && (game.sun_y >= GAME_SUN_SINK_RANGE_PX);
         synthwave_step_base(fb, fully_shadowed);
@@ -2105,7 +2115,7 @@ void app_main(void) {
         if (app_state == APP_STATE_PLAYING) {
             float sx, sy;
             render_project(game.ship_x_world, 0.0f, SHIP_COLLISION_Z_C,
-                           game.cam_x, &sx, &sy);
+                           &sx, &sy);
             int lx = (int)sx;
             int ly = (int)sy;
             // Ship's foot at z=SHIP_COLLISION_Z_C (~1.98) projects to
@@ -2122,7 +2132,7 @@ void app_main(void) {
                 game.in_shadow = (px == shadow_packed);
             }
         }
-        synthwave_step_lines(fb, floor_scroll, floor_cam_x);
+        synthwave_step_lines(fb, floor_scroll, floor_cam_x, cam_y);
         int64_t const t_after_bgflr = esp_timer_get_time();
         // Wait for the BLEND op to finish — obstacles and HUD text
         // can both write into the sky region, so the backdrop must

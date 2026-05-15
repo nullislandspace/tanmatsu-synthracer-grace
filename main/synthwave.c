@@ -350,7 +350,7 @@ void synthwave_step_base(pax_buf_t* fb, bool fully_shadowed) {
     pax_simple_rect(fb, floor_base_col, 0, rect_top_y, DISPLAY_LOG_W, rect_height);
 }
 
-void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x) {
+void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x, float cam_y) {
     // Camera's absolute world-z position. Mirrors how `world_advance`
     // tracks each obstacle's z_world: every frame the camera moves
     // forward by dz_world, so a stripe at fixed world-z W appears at
@@ -395,7 +395,10 @@ void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x) {
     // obstacles drift off the lane lines. Anchoring the top at the
     // true vanishing point and the bottom at FLOOR_Z_NEAR for both
     // axes restores the alignment.
-    float const sy_bot = horizon_y + FLOOR_F / FLOOR_Z_NEAR;
+    // sy = horizon + F*cam_y/z — identical to render_project for a
+    // ground-plane (y_w = 0) point, so the floor tracks the camera's
+    // height exactly the way obstacle bases do.
+    float const sy_bot = horizon_y + FLOOR_F * cam_y / FLOOR_Z_NEAR;
 
     // World-X range we draw: only inside the playfield walls. The
     // walls live at world-x = ±FLOOR_PLAYFIELD_HALF_W; lane lines
@@ -450,7 +453,7 @@ void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x) {
         int const r = ((k % FLOOR_HSTRIPE_DRAW_EVERY) + FLOOR_HSTRIPE_DRAW_EVERY) % FLOOR_HSTRIPE_DRAW_EVERY;
         if (r != 0) continue;
         float const z  = (float)k * FLOOR_LANE_L - cam_z;
-        float const sy = horizon_y + FLOOR_F / z;
+        float const sy = horizon_y + FLOOR_F * cam_y / z;
         if (sy <= horizon_y + 1.0f || sy > GRID_BOTTOM_Y) continue;
         int const sy_int = (int)sy;
         if (sy_int == last_sy_int) continue;

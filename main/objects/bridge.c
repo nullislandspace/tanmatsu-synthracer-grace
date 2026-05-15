@@ -30,6 +30,7 @@
 // span spans the full playfield laterally — cam_x is always inside
 // the span's x range. The back face never faces the camera.
 static void span_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
+    (void)cam_x;  // span is full-width; render_project reads the camera global
     float const xL = o->x_world - o->half_w;
     float const xR = o->x_world + o->half_w;
     float const zF_raw = o->z_world - o->half_d;
@@ -44,14 +45,14 @@ static void span_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
     // 8 corners: L/R × B(ottom)/T(op) × F(ront)/B(ack).
     float sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_LTF, sy_LTF, sx_RTF, sy_RTF;
     float sx_LBB, sy_LBB, sx_RBB, sy_RBB, sx_LTB, sy_LTB, sx_RTB, sy_RTB;
-    render_project(xL, yB, zF, cam_x, &sx_LBF, &sy_LBF);
-    render_project(xR, yB, zF, cam_x, &sx_RBF, &sy_RBF);
-    render_project(xL, yT, zF, cam_x, &sx_LTF, &sy_LTF);
-    render_project(xR, yT, zF, cam_x, &sx_RTF, &sy_RTF);
-    render_project(xL, yB, zB, cam_x, &sx_LBB, &sy_LBB);
-    render_project(xR, yB, zB, cam_x, &sx_RBB, &sy_RBB);
-    render_project(xL, yT, zB, cam_x, &sx_LTB, &sy_LTB);
-    render_project(xR, yT, zB, cam_x, &sx_RTB, &sy_RTB);
+    render_project(xL, yB, zF, &sx_LBF, &sy_LBF);
+    render_project(xR, yB, zF, &sx_RBF, &sy_RBF);
+    render_project(xL, yT, zF, &sx_LTF, &sy_LTF);
+    render_project(xR, yT, zF, &sx_RTF, &sy_RTF);
+    render_project(xL, yB, zB, &sx_LBB, &sy_LBB);
+    render_project(xR, yB, zB, &sx_RBB, &sy_RBB);
+    render_project(xL, yT, zB, &sx_LTB, &sy_LTB);
+    render_project(xR, yT, zB, &sx_RTB, &sy_RTB);
 
     uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
     bool      const rev_endian = fb->reverse_endianness;
@@ -101,6 +102,7 @@ static void span_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
 // shape is a rectangle on the ground spanning the same x range as
 // the span, extending toward the camera from the span's near face.
 static void span_shadow(pax_buf_t* fb, obstacle_t const* o, float cam_x, float sun_y) {
+    (void)cam_x;  // render_project reads the camera global
     if (sun_y >= GAME_SUN_SINK_RANGE_PX) return;
 
     float const sun_norm  = sun_y / GAME_SUN_SINK_RANGE_PX;
@@ -117,10 +119,10 @@ static void span_shadow(pax_buf_t* fb, obstacle_t const* o, float cam_x, float s
     float const z_near = (z_near_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : z_near_raw;
 
     float sx_NL, sy_NL, sx_NR, sy_NR, sx_FL, sy_FL, sx_FR, sy_FR;
-    render_project(xL, 0.0f, z_near, cam_x, &sx_NL, &sy_NL);
-    render_project(xR, 0.0f, z_near, cam_x, &sx_NR, &sy_NR);
-    render_project(xL, 0.0f, z_far,  cam_x, &sx_FL, &sy_FL);
-    render_project(xR, 0.0f, z_far,  cam_x, &sx_FR, &sy_FR);
+    render_project(xL, 0.0f, z_near, &sx_NL, &sy_NL);
+    render_project(xR, 0.0f, z_near, &sx_NR, &sy_NR);
+    render_project(xL, 0.0f, z_far,  &sx_FL, &sy_FL);
+    render_project(xR, 0.0f, z_far,  &sx_FR, &sy_FR);
 
     uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
     uint16_t  const sh_packed = direct_565_pack(GAME_SHADOW_FLOOR_COLOR, fb->reverse_endianness);

@@ -36,11 +36,24 @@ static inline pax_col_t dim_argb_render(pax_col_t col, float scale) {
 // (Constant lives in render.h so custom-draw object modules clip
 // their own geometry consistently.)
 
-void render_project(float x_w, float y_w, float z_w, float cam_x, float* out_sx, float* out_sy) {
+// The camera global. x defaults to track centre, y to the resting
+// (grounded) eye height; main.c overwrites both every frame.
+static render_camera_t s_camera = { 0.0f, RENDER_CAM_Y };
+
+void render_set_camera(float x, float y) {
+    s_camera.x = x;
+    s_camera.y = y;
+}
+
+render_camera_t render_camera(void) {
+    return s_camera;
+}
+
+void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy) {
     if (z_w < 0.01f) z_w = 0.01f;  // guard against /0 if a near-clip slips through
     float const inv_z = 1.0f / z_w;
-    *out_sx = RENDER_HALF_W + RENDER_FOCAL_LEN * (x_w - cam_x) * inv_z;
-    *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y_w - RENDER_CAM_Y) * inv_z;
+    *out_sx = RENDER_HALF_W + RENDER_FOCAL_LEN * (x_w - s_camera.x) * inv_z;
+    *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y_w - s_camera.y) * inv_z;
 }
 
 void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float sun_y) {
@@ -87,10 +100,10 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
         // (narrow at the obstacle base, wider toward the camera).
         float sx_NL, sy_NL, sx_NR, sy_NR;
         float sx_FL, sy_FL, sx_FR, sy_FR;
-        render_project(xL, 0.0f, z_near, cam_x, &sx_NL, &sy_NL);
-        render_project(xR, 0.0f, z_near, cam_x, &sx_NR, &sy_NR);
-        render_project(xL, 0.0f, z_far,  cam_x, &sx_FL, &sy_FL);
-        render_project(xR, 0.0f, z_far,  cam_x, &sx_FR, &sy_FR);
+        render_project(xL, 0.0f, z_near, &sx_NL, &sy_NL);
+        render_project(xR, 0.0f, z_near, &sx_NR, &sy_NR);
+        render_project(xL, 0.0f, z_far,  &sx_FL, &sy_FL);
+        render_project(xR, 0.0f, z_far,  &sx_FR, &sy_FR);
 
         direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_NR, sy_NR, sx_FR, sy_FR, sh_packed);
         direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_FR, sy_FR, sx_FL, sy_FL, sh_packed);
@@ -126,11 +139,11 @@ static void render_pickup_pyramid(uint16_t* fb_pixels, obstacle_t const* o, floa
     float sx_A,  sy_A;
     float sx_FL, sy_FL, sx_FR, sy_FR;
     float sx_BL, sy_BL, sx_BR, sy_BR;
-    render_project(o->x_world, o->height, o->z_world, cam_x, &sx_A,  &sy_A);
-    render_project(xL,         0.0f,      zN,          cam_x, &sx_FL, &sy_FL);
-    render_project(xR,         0.0f,      zN,          cam_x, &sx_FR, &sy_FR);
-    render_project(xL,         0.0f,      zB,          cam_x, &sx_BL, &sy_BL);
-    render_project(xR,         0.0f,      zB,          cam_x, &sx_BR, &sy_BR);
+    render_project(o->x_world, o->height, o->z_world, &sx_A,  &sy_A);
+    render_project(xL,         0.0f,      zN,          &sx_FL, &sy_FL);
+    render_project(xR,         0.0f,      zN,          &sx_FR, &sy_FR);
+    render_project(xL,         0.0f,      zB,          &sx_BL, &sy_BL);
+    render_project(xR,         0.0f,      zB,          &sx_BR, &sy_BR);
 
     bool const show_left  = cam_x < o->x_world;
     bool const show_right = cam_x > o->x_world;
@@ -261,7 +274,7 @@ static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o,
         float const wx = o->x_world + xr;
         float const wy = y_centre   + yr;
         float const wz = o->z_world + zr;
-        render_project(wx, wy, wz, cam_x, &sx[i], &sy[i]);
+        render_project(wx, wy, wz, &sx[i], &sy[i]);
     }
 
     // Lighting direction (front-top-left, fixed in world space).
@@ -289,13 +302,13 @@ static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o,
         float const cz_l = (lvz[a] + lvz[b] + lvz[c]) * (1.0f / 3.0f);
 
         // World-space centroid + view direction (face → camera).
-        // Camera sits at (cam_x, RENDER_CAM_Y, 0).
+        // Camera sits at (cam_x, render_camera().y, 0).
         float const cx_w = o->x_world + cx_l;
         float const cy_w = y_centre   + cy_l;
         float const cz_w = o->z_world + cz_l;
-        float const dvx = cam_x         - cx_w;
-        float const dvy = RENDER_CAM_Y  - cy_w;
-        float const dvz = 0.0f          - cz_w;
+        float const dvx = cam_x              - cx_w;
+        float const dvy = render_camera().y  - cy_w;
+        float const dvz = 0.0f               - cz_w;
 
         // Back-face cull. Outward normal (cx_l, cy_l, cz_l) needs a
         // positive dot product with the view direction to be facing
@@ -430,20 +443,20 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         // out of scope here).
         float sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_LTF, sy_LTF, sx_RTF, sy_RTF;
         float sx_LTB, sy_LTB, sx_RTB, sy_RTB, sx_LBB, sy_LBB, sx_RBB, sy_RBB;
-        render_project(xL, yB, zF, cam_x, &sx_LBF, &sy_LBF);
-        render_project(xR, yB, zF, cam_x, &sx_RBF, &sy_RBF);
-        render_project(xL, yT, zF, cam_x, &sx_LTF, &sy_LTF);
-        render_project(xR, yT, zF, cam_x, &sx_RTF, &sy_RTF);
-        render_project(xL, yT, zB, cam_x, &sx_LTB, &sy_LTB);
-        render_project(xR, yT, zB, cam_x, &sx_RTB, &sy_RTB);
-        render_project(xL, yB, zB, cam_x, &sx_LBB, &sy_LBB);
-        render_project(xR, yB, zB, cam_x, &sx_RBB, &sy_RBB);
+        render_project(xL, yB, zF, &sx_LBF, &sy_LBF);
+        render_project(xR, yB, zF, &sx_RBF, &sy_RBF);
+        render_project(xL, yT, zF, &sx_LTF, &sy_LTF);
+        render_project(xR, yT, zF, &sx_RTF, &sy_RTF);
+        render_project(xL, yT, zB, &sx_LTB, &sy_LTB);
+        render_project(xR, yT, zB, &sx_RTB, &sy_RTB);
+        render_project(xL, yB, zB, &sx_LBB, &sy_LBB);
+        render_project(xR, yB, zB, &sx_RBB, &sy_RBB);
 
         // Visible-face selection. A face is visible when the camera
         // is on the side its outward normal points to.
         bool const show_left  = cam_x < xL;             // camera left of the cube → left face visible
         bool const show_right = cam_x > xR;             // camera right of the cube → right face visible
-        bool const show_top   = RENDER_CAM_Y > yT;      // camera above the cube → top face visible
+        bool const show_top   = render_camera().y > yT; // camera above the cube → top face visible
 
         // Painter's order within the cube: side and top are at least
         // partially deeper than the front, so draw them first. The

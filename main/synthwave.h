@@ -64,4 +64,9 @@ void synthwave_step_base(pax_buf_t* fb, bool fully_shadowed);
 // `cam_x` is the camera's lateral world-x position. Vertical lane
 // lines are drawn in world space (anchored to the world, not the
 // screen) so they pan correctly as the ship moves laterally.
-void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x);
+//
+// `cam_y` is the camera's height. The floor projection scales with
+// it exactly as render_project does (sy = horizon + F*cam_y/z), so
+// the grid rises and sinks in lockstep with the obstacles sitting
+// on it when the camera follows a jump.
+void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x, float cam_y);

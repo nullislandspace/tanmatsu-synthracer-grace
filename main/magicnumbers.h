@@ -69,6 +69,13 @@
 #define GAME_GRAVITY                     3.5f    // world units / s^2, downward
 #define GAME_JUMP_SPEED                  3.3f    // world units / s, upward kick
 
+// Camera Y-follow fraction: the camera rises this fraction of the
+// ship's jump altitude. 1.0 locks the camera a constant height
+// above the ship — it stays slightly above the ship at all times
+// and the ship holds a stable screen position. Lower values let the
+// ship visibly rise in frame instead. Tunable.
+#define GAME_CAM_Y_FOLLOW                1.0f
+
 // Sun vertical travel from baseline (high) to fully set behind
 // the mountains, in logical pixels of the framebuffer. The PPA
 // pipeline shifts the sun cache's destination Y by this much

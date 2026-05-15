@@ -145,8 +145,8 @@ static void flipping_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
     // 8 projected corners: cross-section × (front z, back z).
     float sxF[4], syF[4], sxB[4], syB[4];
     for (int i = 0; i < 4; i++) {
-        render_project(cx[i], cy[i], zF, cam_x, &sxF[i], &syF[i]);
-        render_project(cx[i], cy[i], zB, cam_x, &sxB[i], &syB[i]);
+        render_project(cx[i], cy[i], zF, &sxF[i], &syF[i]);
+        render_project(cx[i], cy[i], zB, &sxB[i], &syB[i]);
     }
 
     uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
@@ -179,7 +179,7 @@ static void flipping_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
         float const ny  = -ex;
         float const mx  = 0.5f * (cx[i] + cx[j]);
         float const my  = 0.5f * (cy[i] + cy[j]);
-        show[i] = (nx * (cam_x - mx) + ny * (RENDER_CAM_Y - my)) > 0.0f;
+        show[i] = (nx * (cam_x - mx) + ny * (render_camera().y - my)) > 0.0f;
     }
 
     // Painter's order: side faces first (they're partially behind

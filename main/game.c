@@ -138,7 +138,7 @@ static void draw_wingtip_burst(pax_buf_t* fb, game_state_t const* g, int side) {
     float const wz = SHIP_Z_PLANE + SPARK_EMIT_DZ;
 
     float sx, sy;
-    render_project(wx, wy, wz, g->cam_x, &sx, &sy);
+    render_project(wx, wy, wz, &sx, &sy);
 
     for (int i = 0; i < SPARK_LINES; i++) {
         float const angle = spark_rand() * 6.28318531f;
@@ -556,7 +556,7 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
         float const wx = lx + g->ship_x_world;
         float const wy = ly + SHIP_BASE_Y + g->ship_y;
         float const wz = v->z + SHIP_Z_PLANE;
-        render_project(wx, wy, wz, g->cam_x, &screen[i].x, &screen[i].y);
+        render_project(wx, wy, wz, &screen[i].x, &screen[i].y);
     }
 
     // Pre-dim every ship colour once if the ship is in shadow —
@@ -623,7 +623,7 @@ void game_crash_burst(game_state_t* g) {
     // the ship is no longer drawn — the sparks stand in for it.
     float ox, oy;
     render_project(g->ship_x_world, SHIP_BASE_Y + g->ship_y, SHIP_Z_PLANE,
-                   g->cam_x, &ox, &oy);
+                   &ox, &oy);
 
     for (int i = 0; i < CRASH_SPARK_COUNT; i++) {
         crash_spark_t* p   = &g->crash_sparks[i];
