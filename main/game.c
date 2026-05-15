@@ -191,6 +191,29 @@ void game_step(game_state_t* g, float dt, float steer) {
         g->ship_x_world = SHIP_X_MIN_WORLD;
     }
     g->cam_x = g->ship_x_world;
+
+    // --- Vertical motion --------------------------------------------------
+    // `ship_y` is altitude above the rest height (0 = grounded). A
+    // jump injects positive `ship_vy` (see game_jump); gravity pulls
+    // it back. Landing on the floor clamps to 0 and zeroes the
+    // velocity. Phase 9.1c will add landing onto obstacle tops at a
+    // non-zero support height; for now the floor is the only ground.
+    if (g->ship_y > 0.0f || g->ship_vy != 0.0f) {
+        g->ship_vy -= GAME_GRAVITY * dt;
+        g->ship_y  += g->ship_vy * dt;
+        if (g->ship_y <= 0.0f) {
+            g->ship_y  = 0.0f;
+            g->ship_vy = 0.0f;
+        }
+    }
+}
+
+void game_jump(game_state_t* g) {
+    // Only from the ground — no double-jump. `ship_y` never goes
+    // negative (game_step clamps), so `<= 0` is exactly "grounded".
+    if (g->ship_y <= 0.0f) {
+        g->ship_vy = GAME_JUMP_SPEED;
+    }
 }
 
 bool game_collide(game_state_t* g, world_state_t* w, float dt) {
@@ -531,7 +554,7 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
         float const lx = v->x * c + v->y * s;
         float const ly = -v->x * s + v->y * c;
         float const wx = lx + g->ship_x_world;
-        float const wy = ly + SHIP_BASE_Y;
+        float const wy = ly + SHIP_BASE_Y + g->ship_y;
         float const wz = v->z + SHIP_Z_PLANE;
         render_project(wx, wy, wz, g->cam_x, &screen[i].x, &screen[i].y);
     }
@@ -599,7 +622,7 @@ void game_crash_burst(game_state_t* g) {
     // Origin: the ship's centre projected to the screen. After this
     // the ship is no longer drawn — the sparks stand in for it.
     float ox, oy;
-    render_project(g->ship_x_world, SHIP_BASE_Y, SHIP_Z_PLANE,
+    render_project(g->ship_x_world, SHIP_BASE_Y + g->ship_y, SHIP_Z_PLANE,
                    g->cam_x, &ox, &oy);
 
     for (int i = 0; i < CRASH_SPARK_COUNT; i++) {

@@ -70,6 +70,14 @@ typedef struct game_state_s {
     float bank;               // -1..+1 signed banking factor
     float cam_x;              // camera follows ship laterally
 
+    // Vertical motion (Phase 9.1). `ship_y` is altitude above the
+    // ship's rest height (SHIP_BASE_Y); 0 = grounded on the floor.
+    // `ship_vy` is vertical velocity — a jump injects it, game_step
+    // integrates gravity. The camera does not follow Y, so the ship
+    // visibly rises in frame.
+    float ship_y;
+    float ship_vy;
+
     // Phase 6 scoring. `multiplier` defaults to 1 and is bumped by
     // Tri pickups (not yet wired). `multiplier_max` tracks the peak
     // value reached this run for the per-run stat. Score and
@@ -145,6 +153,12 @@ void game_init(game_state_t* g);
 // signed deflection in [-1.0, +1.0] (keys give ±1, gyro tilt is
 // proportional).
 void game_step(game_state_t* g, float dt, float steer);
+
+// Trigger a jump: inject GAME_JUMP_SPEED into `ship_vy` if the ship
+// is grounded. A no-op while airborne (no double-jump). game_step's
+// vertical integration carries the resulting arc. Phase 9.1f will
+// gate this on the jump-pickup inventory; until then it is free.
+void game_jump(game_state_t* g);
 
 // Swept AABB collision pass against every active entry in the
 // obstacle pool. The z range tested is the obstacle's *swept*

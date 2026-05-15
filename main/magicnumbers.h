@@ -59,6 +59,16 @@
 // distance proportionally so the in-seconds pacing stays the same.
 #define GAMEPLAY_CRUISE_SPEED            20.0f
 
+// Vertical motion (Phase 9.1). The ship gains an altitude above its
+// rest height; a jump injects GAME_JUMP_SPEED of upward velocity and
+// GAME_GRAVITY pulls it back down. Deliberately floaty so the arc is
+// easy to read and time: a jump lasts ~1.9 s airborne and peaks
+// ~1.6 world units up, with a gentle ~3.3 u/s peak vertical speed.
+// Lower both for an even slower arc; raise GAME_JUMP_SPEED alone for
+// a higher one. Tune to taste.
+#define GAME_GRAVITY                     3.5f    // world units / s^2, downward
+#define GAME_JUMP_SPEED                  3.3f    // world units / s, upward kick
+
 // Sun vertical travel from baseline (high) to fully set behind
 // the mountains, in logical pixels of the framebuffer. The PPA
 // pipeline shifts the sun cache's destination Y by this much

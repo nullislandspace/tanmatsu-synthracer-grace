@@ -1922,11 +1922,18 @@ void app_main(void) {
         // Physics pass — only meaningful in PLAYING; the other states
         // record zero physics time so the breakdown stays honest.
         if (app_state == APP_STATE_PLAYING) {
+            // 0. Use-item button triggers a jump (Phase 9.1 — still
+            //    ungated; the jump-pickup inventory gate lands in
+            //    9.1f). game_jump only fires if the ship is grounded;
+            //    game_step then integrates the arc.
             // 1. Apply bank + lateral motion using this frame's steer.
             // 2. Collide: push the ship out of side-contact obstacles
             //    and set scrape flags (or return head-on).
             // 3. After-collide work that reads the flags: ramp speed,
             //    emit + advance sparks.
+            if (pickup_pressed) {
+                game_jump(&game);
+            }
             game_step(&game, dt, steer);
             crashed = game_collide(&game, &world, dt);
             // game_after_collide runs sun integration, shadow
