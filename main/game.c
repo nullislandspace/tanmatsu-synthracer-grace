@@ -26,6 +26,16 @@
 // Lateral world-units travelled per second at full bank.
 #define SHIP_TURN_RATE        3.5f
 
+// Ship lateral half-width at the current bank. The mesh wing tips
+// sit at local x = ±SHIP_COLLISION_HALF_W; banking rolls them out
+// of the horizontal plane, so the projected half-width shrinks by
+// cos(bank angle). Used to clamp the ship's *edge* — not its
+// centre — against the border walls, so a banked ship can tuck its
+// dipped wing nearer the wall while an upright one keeps clear.
+static inline float ship_lateral_half_w(float bank) {
+    return SHIP_COLLISION_HALF_W * cosf(bank * MAX_BANK_RAD);
+}
+
 // --- Speed dynamics -----------------------------------------------------------
 
 // Scrape behaviour: while either scrape flag is set, ship_speed_z
@@ -185,10 +195,21 @@ void game_step(game_state_t* g, world_state_t const* w, float dt, float steer) {
     // that isn't moving forward — and adds tension to shadow stalls.
     float const turn_rate = SHIP_TURN_RATE * (g->ship_speed_z / GAMEPLAY_CRUISE_SPEED);
     g->ship_x_world += g->bank * turn_rate * dt;
-    if (g->ship_x_world > SHIP_X_MAX_WORLD) {
-        g->ship_x_world = SHIP_X_MAX_WORLD;
-    } else if (g->ship_x_world < SHIP_X_MIN_WORLD) {
-        g->ship_x_world = SHIP_X_MIN_WORLD;
+    // The lateral clamp IS the border wall (Phase 9.1e — the side
+    // walls are no longer collision obstacles). It is infinite-
+    // height by construction, so the ship can never leave or jump
+    // over the track edge; game_collide turns a ship pinned here
+    // while still banking outward into a wall-scrape. The clamp
+    // bounds the ship's *edge*, not its centre: the centre stops a
+    // bank-adjusted half-width short of the wall (a full half-width
+    // when level), so the hull never overlaps the wall.
+    float const half_w  = ship_lateral_half_w(g->bank);
+    float const x_max_c = SHIP_X_MAX_WORLD - half_w;
+    float const x_min_c = SHIP_X_MIN_WORLD + half_w;
+    if (g->ship_x_world > x_max_c) {
+        g->ship_x_world = x_max_c;
+    } else if (g->ship_x_world < x_min_c) {
+        g->ship_x_world = x_min_c;
     }
     g->cam_x = g->ship_x_world;
 
@@ -272,6 +293,14 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     float const ship_yB = SHIP_BASE_Y + g->ship_y;
     float const ship_yT = ship_yB + SHIP_COLLISION_HEIGHT;
 
+    // Edge-aware border-wall bounds (Phase 9.1e). The ship's centre
+    // comes no closer to a wall than its bank-adjusted half-width
+    // (a full half-width when level); bank is constant across this
+    // pass, so compute the bounds once.
+    float const ship_half_w  = ship_lateral_half_w(g->bank);
+    float const ship_x_max_c = SHIP_X_MAX_WORLD - ship_half_w;
+    float const ship_x_min_c = SHIP_X_MIN_WORLD + ship_half_w;
+
     // Per-frame z motion. Obstacles will move by this much in
     // world_advance later this frame; they moved by approximately
     // the same amount last frame too. We use it for both swept-z
@@ -303,6 +332,12 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
         obstacle_t* o = &w->obstacles[i];
         if (!o->active) continue;
+        // Border walls (Phase 9.1e) are not collision obstacles —
+        // the lateral clamp in game_step is the wall, and the
+        // wall-scrape is derived from it at the tail of this
+        // function. Skip KIND_WALL entirely: collision, the shadow
+        // ray and the support scan all ignore it.
+        if (o->kind == OBSTACLE_KIND_WALL) continue;
 
         // Ship x bounds are recomputed each iteration because a
         // previous push-out may have shifted ship_x_world.
@@ -380,13 +415,8 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
             hit = o->collide(o, g, came_from_ahead);
         } else {
             switch (o->kind) {
-                case OBSTACLE_KIND_WALL:
-                    // Walls are scrape-only by definition. Side walls
-                    // sit just beyond the ship's lateral clamp; any
-                    // future "ridable" wall (e.g. an in-track barrier)
-                    // gets tagged WALL too and gets the same response.
-                    hit = OBSTACLE_HIT_SCRAPE;
-                    break;
+                // OBSTACLE_KIND_WALL is filtered out at the top of
+                // the loop (9.1e) and never reaches this dispatch.
                 case OBSTACLE_KIND_CUBE:
                     // Hit from ahead → head-on (fatal). Already-passing
                     // → trailing scrape (push out and slow).
@@ -461,10 +491,10 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
                 g->scrape_left = true;
                 g->ship_x_world += x_pen;
             }
-            // Re-clamp inside the lateral bounds, in case the
-            // push-out shoved us past one of them.
-            if (g->ship_x_world > SHIP_X_MAX_WORLD) g->ship_x_world = SHIP_X_MAX_WORLD;
-            if (g->ship_x_world < SHIP_X_MIN_WORLD) g->ship_x_world = SHIP_X_MIN_WORLD;
+            // Re-clamp inside the edge-aware lateral bounds, in
+            // case the push-out shoved us past one of them.
+            if (g->ship_x_world > ship_x_max_c) g->ship_x_world = ship_x_max_c;
+            if (g->ship_x_world < ship_x_min_c) g->ship_x_world = ship_x_min_c;
         } else /* OBSTACLE_HIT_HEAD_ON */ {
             head_on = true;
         }
@@ -489,6 +519,19 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
     // Publish the shadow-ray result (Phase 9.1d). game_after_collide
     // forces this true once the sun has fully set.
     g->in_shadow = shadowed;
+
+    // Border-wall scrape (Phase 9.1e). The side walls are not
+    // collision obstacles — the lateral clamp in game_step is the
+    // boundary. A ship pinned at a boundary while still banking
+    // into it is grinding the wall: raise the scrape flag (same SFX
+    // + wingtip sparks as an obstacle scrape). Banking away — or
+    // coasting — leaves it clear, so the scrape ends the moment the
+    // player stops pushing outward. Works at any altitude (X-only).
+    if (g->ship_x_world >= ship_x_max_c && g->bank > 0.0f) {
+        g->scrape_right = true;
+    } else if (g->ship_x_world <= ship_x_min_c && g->bank < 0.0f) {
+        g->scrape_left = true;
+    }
 
     // Camera follows the resolved position.
     g->cam_x = g->ship_x_world;

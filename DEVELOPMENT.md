@@ -24,7 +24,7 @@
 | 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
 | 8 | Daily + custom seed + persistence | ✅ done 2026-05-15 — RTC-derived daily seed (`year*10000 + month*100 + day`), now sourced from a single `s_session_date` snapshot captured once at boot so "today" is frozen for the whole session. Custom-seed entry dialog + `last_custom_seed` prefill/persist. Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, main menu, seed-input subscreen, stats screen, basic scoring + per-slot `last_run`/`all_time` stats, correct `SAVE_END_*` reason recording, and day-rollover detection (`save_apply_day_rollover`) all landed. **Scope note:** the meta-progression layer originally sketched under this phase — the challenge system that *writes* the `daily_done_*` flags, plus level/points/unlock logic — moved wholesale to Phase 11; the save struct carries all the fields but no gameplay code reads/writes them yet. The game is playable with a daily seed + persistent per-slot scores, which is the MVP bar. |
 | 9 | Pickups & attachments | ⬜ not started — split into sub-phases below; built **ungated** (`unlock_*` gating wired later in Phase 11). |
-| 9.1 | Vertical system + Jump pickup + ramps | 🟡 in progress — milestones **a** (`ship_y`/`ship_vy`/gravity + jump trigger), **a.5** (moving camera + dedicated `render_camera` global), **b** (Y-aware collision) landed 2026-05-15. Pending: **c** landing-on-tops, **d** shadow ray, **e** border-wall clamp, **f** jump booster + inventory + HUD, **g** ramp object, **h** simple_platform area. See the 2026-05-15 "Phase 9 sub-phases + 9.1 vertical-system design" and "Phase 9.1 implementation" decisions-log entries. |
+| 9.1 | Vertical system + Jump pickup + ramps | 🟡 in progress — milestones **a** (`ship_y`/`ship_vy`/gravity + jump), **a.5** (moving camera + `render_camera` global), **b** (Y-aware collision), **c** (landing/riding obstacle tops), **d** (shadow ray), **e** (border-wall clamp, edge-aware), **h** (simple_platform area) landed 2026-05-15/16. Pending: **f** jump booster + inventory + HUD, **g** ramp object. See the 2026-05-15/16 "Phase 9 sub-phases + 9.1 vertical-system design" and "Phase 9.1 implementation" decisions-log entries. |
 | 9.2 | Shield pickup | ⬜ not started |
 | 9.3 | Checkpoint pickup | ⬜ not started |
 | 9.4 | Attachment slots + Magnet | ⬜ not started |
@@ -3089,6 +3089,64 @@
   Still pending in 9.1: c (landing on tops), d (shadow ray),
   e (border-wall clamp), f (jump booster + inventory + HUD),
   g (ramp object), h (simple_platform area).
+
+- 2026-05-16 — **Phase 9.1 implementation: milestones c / d / e / h
+  landed.** Continues the vertical-system build.
+    - **9.1c — landing on / riding obstacle tops.** `game_step`
+      recomputes a *support surface* every frame — the highest
+      landable `KIND_CUBE` top under the ship's x-z footprint, or
+      the floor. A descending ship snaps onto the support (that
+      snap is the landing); `ship_grounded` is set and `game_jump`
+      reads it (jump from a platform top — still no double-jump).
+      Recompute-every-frame means riding off an edge (the platform
+      scrolls past, or steer off the side) just drops the support
+      and the ship falls — the design's stored `GROUND_OBJECT(id)`
+      enum proved unnecessary. `game_collide` gained a top-contact
+      rule: ship belly at/above an obstacle top (within
+      `GAME_LAND_EPS`) ⇒ a ride/land, not a crash. `game_step` now
+      takes the world for the support scan.
+    - **9.1d — shadow ray.** The gameplay `in_shadow` flag is now
+      geometry: a ray from the ship centre toward the sun,
+      direction `(0, 1, factor)` back-tracked from the renderer's
+      shadow-length math. Ray-vs-AABB against each `KIND_CUBE`,
+      folded into `game_collide`'s existing obstacle loop (no
+      second traversal); first hit ⇒ shadowed. The old floor-pixel
+      sampler in `main.c` is deleted — the ray works at any
+      altitude (airborne under an overhang ⇒ shadowed) with no
+      render dependency or one-frame lag. `game_after_collide`
+      keeps only the post-sunset override. The rendered
+      floor-shadow quads are now purely cosmetic.
+    - **9.1e — border walls become a clamp.** Verified
+      `OBSTACLE_KIND_WALL` is spawned only by `wall.c` (the border
+      side walls). `game_collide` skips `KIND_WALL` entirely
+      (collision, shadow ray, support scan); the dead `WALL`
+      dispatch case was removed. Walls stay in the pool only for
+      rendering. The lateral clamp in `game_step` IS the wall —
+      infinite-height by construction. A wall-scrape is derived at
+      `game_collide`'s tail: ship pinned at a boundary AND banking
+      into it ⇒ scrape flag (same SFX + sparks); banking away
+      clears it. **Edge-aware clamp (on-device fix):** the clamp
+      first pinned the ship's *centre* to ±5.0, so half the
+      0.28-wide hull sat inside the wall. It now clamps the ship's
+      *edge* — new `ship_lateral_half_w()` =
+      `SHIP_COLLISION_HALF_W · cos(bank · MAX_BANK_RAD)`: a full
+      0.28 when level, shrinking with bank as the wing tips roll
+      out of the horizontal plane. Applied to all three
+      lateral-bound sites (the `game_step` clamp, the
+      obstacle-scrape re-clamp, the wall-scrape detection).
+    - **9.1h — simple_platform area.** New
+      `AREA_TYPE_SIMPLE_PLATFORM` (`areas/simple_platform.{c,h}`):
+      a 50 u lead-in gap (reserved for the ramp — 9.1g), then
+      10-16 contiguous wall-segment-long blocks forming one
+      elevated platform (`y_base` 0.75, top 1.25 — the ship passes
+      under at ground level, lands on top after a jump), then a
+      30 u trailing gap. Each block carries a Tri on its top face;
+      one becomes a booster if the stage scheduler owes one.
+      `render_pickup_pyramid` / `render_booster_icosahedron` were
+      made `y_base`-aware so elevated pickups render on the
+      platform. Stage 2+; the Tab debug key now forces this area.
+  Pending in 9.1: f (jump booster + inventory + HUD), g (ramp
+  object + emergent launch).
 
 ---
 
