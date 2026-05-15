@@ -139,11 +139,15 @@ static void render_pickup_pyramid(uint16_t* fb_pixels, obstacle_t const* o, floa
     float sx_A,  sy_A;
     float sx_FL, sy_FL, sx_FR, sy_FR;
     float sx_BL, sy_BL, sx_BR, sy_BR;
-    render_project(o->x_world, o->height, o->z_world, &sx_A,  &sy_A);
-    render_project(xL,         0.0f,      zN,          &sx_FL, &sy_FL);
-    render_project(xR,         0.0f,      zN,          &sx_FR, &sy_FR);
-    render_project(xL,         0.0f,      zB,          &sx_BL, &sy_BL);
-    render_project(xR,         0.0f,      zB,          &sx_BR, &sy_BR);
+    // Base sits on o->y_base, apex o->height above it — so a pickup
+    // resting on a platform top (y_base > 0) renders elevated.
+    float const yB = o->y_base;
+    float const yA = o->y_base + o->height;
+    render_project(o->x_world, yA, o->z_world, &sx_A,  &sy_A);
+    render_project(xL,         yB, zN,          &sx_FL, &sy_FL);
+    render_project(xR,         yB, zN,          &sx_FR, &sy_FR);
+    render_project(xL,         yB, zB,          &sx_BL, &sy_BL);
+    render_project(xR,         yB, zB,          &sx_BR, &sy_BR);
 
     bool const show_left  = cam_x < o->x_world;
     bool const show_right = cam_x > o->x_world;
@@ -249,10 +253,11 @@ static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o,
     float const cosa = cosf(angle);
     float const sina = sinf(angle);
 
-    // Y-centre of the icosahedron in world space — collision AABB
-    // sits on the ground (y_base = 0, height = HEIGHT), so the
-    // icosahedron centres at half-height.
-    float const y_centre = GAME_BOOSTER_HEIGHT * 0.5f;
+    // Y-centre of the icosahedron in world space — the collision
+    // AABB is [y_base, y_base + HEIGHT], so the icosahedron centres
+    // at y_base + half-height (y_base is non-zero for a booster
+    // resting on a platform top).
+    float const y_centre = o->y_base + GAME_BOOSTER_HEIGHT * 0.5f;
 
     // Rotated local vertex positions + their projected screen
     // coordinates. Keep both so face centroid math (back-face cull

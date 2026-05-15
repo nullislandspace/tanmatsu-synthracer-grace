@@ -32,6 +32,7 @@ set(APP_SOURCES
     main/areas/bridges.c
     main/areas/dynamic_passage.c
     main/areas/dynamic_gateway.c
+    main/areas/simple_platform.c
     main/areas/rest.c
     main/nbt.c
     main/save.c

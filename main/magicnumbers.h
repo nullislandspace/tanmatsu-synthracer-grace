@@ -69,6 +69,13 @@
 #define GAME_GRAVITY                     3.5f    // world units / s^2, downward
 #define GAME_JUMP_SPEED                  3.3f    // world units / s, upward kick
 
+// Landing tolerance (world units): vertical slop for treating a
+// ship-belly-vs-obstacle-top contact as "resting on / landing on"
+// the surface rather than a lethal collision. Absorbs float error
+// in the landing snap so a ship riding a platform is never seen as
+// penetrating it.
+#define GAME_LAND_EPS                    0.02f
+
 // Camera Y-follow fraction: the camera rises this fraction of the
 // ship's jump altitude. 1.0 locks the camera a constant height
 // above the ship — it stays slightly above the ship at all times

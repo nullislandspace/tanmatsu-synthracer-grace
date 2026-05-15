@@ -1903,13 +1903,13 @@ void app_main(void) {
         float const steer          = input_steering();
 
         // Debug: TAB cuts the current area short and forces the
-        // next one to a specific type. Currently hard-wired to
-        // dynamic gateway; change the area_type_t argument here to
-        // test a different generator. Only acts during PLAYING so
+        // next one to a specific type. Currently hard-wired to the
+        // simple_platform area; change the area_type_t argument here
+        // to test a different generator. Only acts during PLAYING so
         // a stray TAB on a menu doesn't strand the world in an odd
         // state.
         if (input_consume_force_next_area() && app_state == APP_STATE_PLAYING) {
-            world_force_next_area(&world, AREA_TYPE_DYNAMIC_PASSAGE);
+            world_force_next_area(&world, AREA_TYPE_SIMPLE_PLATFORM);
         }
 
         int64_t const t_after_input = esp_timer_get_time();
@@ -1934,7 +1934,7 @@ void app_main(void) {
             if (pickup_pressed) {
                 game_jump(&game);
             }
-            game_step(&game, dt, steer);
+            game_step(&game, &world, dt, steer);
             crashed = game_collide(&game, &world, dt);
             // game_after_collide runs sun integration, shadow
             // detection, and speed dynamics. Returns true when the

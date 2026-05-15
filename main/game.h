@@ -75,12 +75,15 @@ typedef struct game_state_s {
     float cam_x;              // camera follows ship laterally
 
     // Vertical motion (Phase 9.1). `ship_y` is altitude above the
-    // ship's rest height (SHIP_BASE_Y); 0 = grounded on the floor.
-    // `ship_vy` is vertical velocity — a jump injects it, game_step
-    // integrates gravity. The camera does not follow Y, so the ship
-    // visibly rises in frame.
+    // ship's rest height (SHIP_BASE_Y); 0 = grounded on the floor,
+    // positive = airborne or standing on an obstacle top. `ship_vy`
+    // is vertical velocity — a jump injects it, game_step integrates
+    // gravity and resolves landings. `ship_grounded` is true while
+    // the ship rests on a support surface (floor or obstacle top);
+    // game_jump consults it so there is no double-jump.
     float ship_y;
     float ship_vy;
+    bool  ship_grounded;
 
     // Phase 6 scoring. `multiplier` defaults to 1 and is bumped by
     // Tri pickups (not yet wired). `multiplier_max` tracks the peak
@@ -151,12 +154,13 @@ typedef struct game_state_s {
 // Reset the run (zeroes the spark pool too).
 void game_init(game_state_t* g);
 
-// Apply bank dynamics and lateral motion for this frame. Call this
-// *before* game_collide so the position passed to collision is the
-// position the player is trying to be in this frame. `steer` is a
-// signed deflection in [-1.0, +1.0] (keys give ±1, gyro tilt is
-// proportional).
-void game_step(game_state_t* g, float dt, float steer);
+// Advance the ship for this frame: bank dynamics, lateral motion,
+// and vertical motion + landing (gravity, plus resting on / landing
+// on the floor or an obstacle top — `w` supplies the obstacle pool
+// the support scan needs). Call *before* game_collide so the
+// position passed to collision is where the player is trying to be.
+// `steer` is a signed deflection in [-1.0, +1.0].
+void game_step(game_state_t* g, world_state_t const* w, float dt, float steer);
 
 // Trigger a jump: inject GAME_JUMP_SPEED into `ship_vy` if the ship
 // is grounded. A no-op while airborne (no double-jump). game_step's

@@ -61,6 +61,7 @@ typedef enum {
     AREA_TYPE_BRIDGES,             // concrete archways spanning the track — visual + shadow only
     AREA_TYPE_DYNAMIC_PASSAGE,     // flipping cubes along one wall + heavy pixel-field clutter
     AREA_TYPE_DYNAMIC_GATEWAY,     // gateway walls with a per-area fixed hole, each blocked by a flipping cube
+    AREA_TYPE_SIMPLE_PLATFORM,     // elevated multi-block platform with Tris on top; fly under or jump onto it
     AREA_TYPE_REST,                // empty stretch between stages
 } area_type_t;
 
@@ -97,10 +98,10 @@ typedef struct area_state_s {
     // area uses for the flipping-cube cadence) so the two streams
     // overlap deterministically without sharing a timer.
     float       clutter_event_z;
-    // DYNAMIC_GATEWAY only: per-area fixed x of the hole through
-    // each wall (consistent across every wall in this area run; a
-    // fresh value is drawn next time the area is picked). Unused
-    // for other area types.
+    // Per-area fixed x. DYNAMIC_GATEWAY: x of the hole through every
+    // wall in the run. SIMPLE_PLATFORM: x of the platform strip,
+    // shared by every block + pickup. A fresh value is drawn each
+    // time the area is picked; unused for other area types.
     float       gate_hole_x;
 
     // Phase 6 — Tri pickup spawn state. Used by area types whose

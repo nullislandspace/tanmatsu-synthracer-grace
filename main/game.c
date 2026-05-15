@@ -159,7 +159,7 @@ void game_init(game_state_t* g) {
     g->multiplier_max    = 1;
 }
 
-void game_step(game_state_t* g, float dt, float steer) {
+void game_step(game_state_t* g, world_state_t const* w, float dt, float steer) {
     if (dt <= 0.0f) return;
 
     // --- Bank dynamics ----------------------------------------------------
@@ -192,27 +192,67 @@ void game_step(game_state_t* g, float dt, float steer) {
     }
     g->cam_x = g->ship_x_world;
 
-    // --- Vertical motion --------------------------------------------------
-    // `ship_y` is altitude above the rest height (0 = grounded). A
-    // jump injects positive `ship_vy` (see game_jump); gravity pulls
-    // it back. Landing on the floor clamps to 0 and zeroes the
-    // velocity. Phase 9.1c will add landing onto obstacle tops at a
-    // non-zero support height; for now the floor is the only ground.
-    if (g->ship_y > 0.0f || g->ship_vy != 0.0f) {
-        g->ship_vy -= GAME_GRAVITY * dt;
-        g->ship_y  += g->ship_vy * dt;
-        if (g->ship_y <= 0.0f) {
-            g->ship_y  = 0.0f;
-            g->ship_vy = 0.0f;
+    // --- Vertical motion + landing ---------------------------------------
+    // The ship's support surface is the highest landable obstacle
+    // top its x-z footprint sits over, or the floor (support_y = 0,
+    // in ship_y units). It is recomputed every frame, so riding off
+    // a platform — the platform scrolls past, or the player steers
+    // off its side — simply drops the support and the ship falls,
+    // with no per-obstacle bookkeeping.
+    float support_y = 0.0f;
+    {
+        float const ship_xL = g->ship_x_world - SHIP_COLLISION_HALF_W;
+        float const ship_xR = g->ship_x_world + SHIP_COLLISION_HALF_W;
+        float const ship_zN = SHIP_COLLISION_Z_C - SHIP_COLLISION_HALF_D;
+        float const ship_zF = SHIP_COLLISION_Z_C + SHIP_COLLISION_HALF_D;
+        for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+            obstacle_t const* o = &w->obstacles[i];
+            if (!o->active) continue;
+            // Only solid bodies are landable; pickups are not, and
+            // ramps get their own sloped-surface handling in 9.1g.
+            // Border walls aren't KIND_CUBE and sit outside the
+            // track, so the x test below would exclude them anyway.
+            if (o->kind != OBSTACLE_KIND_CUBE) continue;
+            if (o->x_world - o->half_w >= ship_xR) continue;
+            if (o->x_world + o->half_w <= ship_xL) continue;
+            if (o->z_world - o->half_d >= ship_zF) continue;
+            if (o->z_world + o->half_d <= ship_zN) continue;
+            // Top face in ship_y units. Only a support if it is at
+            // or below the ship's belly — a top above the belly is
+            // an obstacle the ship will *collide* with, not stand on.
+            float const top = (o->y_base + o->height) - SHIP_BASE_Y;
+            if (top <= g->ship_y + GAME_LAND_EPS && top > support_y) {
+                support_y = top;
+            }
+        }
+    }
+
+    // Rest on the support, or fall toward it. A jump (ship_vy > 0)
+    // always leaves the surface; gravity pulls a descending ship
+    // back down, and the descent snaps onto the support the frame
+    // it crosses it — that snap is the landing.
+    if (g->ship_y <= support_y && g->ship_vy <= 0.0f) {
+        g->ship_y        = support_y;
+        g->ship_vy       = 0.0f;
+        g->ship_grounded = true;
+    } else {
+        g->ship_grounded = false;
+        g->ship_vy      -= GAME_GRAVITY * dt;
+        g->ship_y       += g->ship_vy * dt;
+        if (g->ship_y <= support_y && g->ship_vy <= 0.0f) {
+            g->ship_y        = support_y;
+            g->ship_vy       = 0.0f;
+            g->ship_grounded = true;
         }
     }
 }
 
 void game_jump(game_state_t* g) {
-    // Only from the ground — no double-jump. `ship_y` never goes
-    // negative (game_step clamps), so `<= 0` is exactly "grounded".
-    if (g->ship_y <= 0.0f) {
-        g->ship_vy = GAME_JUMP_SPEED;
+    // Only from a support surface — no double-jump. `ship_grounded`
+    // covers both the floor and obstacle tops (set by game_step).
+    if (g->ship_grounded) {
+        g->ship_vy       = GAME_JUMP_SPEED;
+        g->ship_grounded = false;
     }
 }
 
@@ -273,6 +313,13 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
         // clearing the obstacle — flying over it, or under a raised
         // one — so there is no collision at all.
         if (x_pen <= 0.0f || y_pen <= 0.0f || z_pen <= 0.0f) continue;
+
+        // Top contact (Phase 9.1c): the ship's belly is at or above
+        // this obstacle's top face — it is resting on / landing on
+        // the top, not ramming the body. game_step does the vertical
+        // resolution; here it is simply a ridable surface, neither
+        // lethal nor a scrape.
+        if (ship_yB >= obs_yT - GAME_LAND_EPS) continue;
 
         // Head-on iff the obstacle's near face was still ahead of
         // the ship's front face at the start of this frame — it
