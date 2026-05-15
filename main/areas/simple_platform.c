@@ -3,6 +3,7 @@
 #include <math.h>
 
 #include "objects/booster.h"
+#include "objects/ramp.h"
 #include "objects/tri.h"
 #include "objects/wall.h"   // WALL_SEGMENT_LEN / WALL_SEGMENT_HALF_D
 #include "world.h"
@@ -22,12 +23,18 @@
 #define SP_BLOCK_Y_BASE       0.75f
 #define SP_BLOCK_HEIGHT       0.5f
 
-// Lead-in: empty run before the first block. The launch ramp (9.1g)
-// will occupy the front of this; until then it is just clear space
-// — "enough room in front" for the ramp to be slotted in later.
+// Lead-in: clear run before the first block. The launch ramp sits
+// at the head of it; the rest is the gap the ship arcs across after
+// the ramp launches it onto the platform.
 #define SP_LEAD_Z             50.0f
 // Trailing clear run after the last block.
 #define SP_TRAIL_Z            30.0f
+
+// The launch ramp at the head of the lead-in (Phase 9.1g). Its
+// width matches the platform so a ship lined up for one is lined up
+// for the other; rise + depth set the launch arc onto the platform.
+#define SP_RAMP_HALF_D        5.0f    // depth = 10 u
+#define SP_RAMP_RISE          1.2f
 
 // Platform palette — slate blue, distinct from the magenta walls,
 // amber gates, grey bridges and green rest posts. Cyan wireframe
@@ -60,6 +67,7 @@ void area_simple_platform_init(area_state_t* a, uint16_t stage, uint32_t* prng) 
 
     a->type               = AREA_TYPE_SIMPLE_PLATFORM;
     a->gates_remaining    = n;     // reused as the block counter
+    a->passage_mirror     = 0;     // reused: 0 = launch ramp not yet placed
     // Layout: [lead-in][block][block]...[block][trailing]. Blocks
     // are contiguous — one wall segment apart — so they read as a
     // single continuous platform.
@@ -72,6 +80,15 @@ void area_simple_platform_init(area_state_t* a, uint16_t stage, uint32_t* prng) 
 bool area_simple_platform_tick(world_state_t* w, area_state_t* a, float dz) {
     a->length_remaining_z -= dz;
     a->next_event_z       -= dz;
+
+    // The launch ramp — spawned once at the head of the area, on the
+    // platform's lateral line. The ship rides it up and arcs onto
+    // the platform. `passage_mirror` is the "ramp placed" flag.
+    if (a->passage_mirror == 0) {
+        ramp_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN,
+                      SP_BLOCK_HALF_W, SP_RAMP_HALF_D, SP_RAMP_RISE);
+        a->passage_mirror = 1;
+    }
 
     float const spawn_z   = snap_to_wall_segment(WORLD_Z_FAR_SPAWN);
     float const x         = a->gate_hole_x;

@@ -214,13 +214,18 @@ void game_step(game_state_t* g, world_state_t const* w, float dt, float steer) {
     g->cam_x = g->ship_x_world;
 
     // --- Vertical motion + landing ---------------------------------------
-    // The ship's support surface is the highest landable obstacle
-    // top its x-z footprint sits over, or the floor (support_y = 0,
-    // in ship_y units). It is recomputed every frame, so riding off
-    // a platform — the platform scrolls past, or the player steers
-    // off its side — simply drops the support and the ship falls,
-    // with no per-obstacle bookkeeping.
-    float support_y = 0.0f;
+    // Recompute the support surface under the ship every frame: the
+    // highest of the floor (support_y = 0, in ship_y units) and any
+    // landable obstacle the ship's x-z footprint sits over. Two
+    // kinds of landable surface:
+    //   * KIND_CUBE — a flat top; `support_slope` 0.
+    //   * KIND_RAMP — a sloped top; `support_slope` is rise/run, so
+    //     the ride converts forward speed into climb (see below).
+    // Recomputing every frame means riding off an edge (a platform
+    // scrolls past, or the player steers off the side) just drops
+    // the support and the ship falls — no per-obstacle bookkeeping.
+    float support_y     = 0.0f;
+    float support_slope = 0.0f;
     {
         float const ship_xL = g->ship_x_world - SHIP_COLLISION_HALF_W;
         float const ship_xR = g->ship_x_world + SHIP_COLLISION_HALF_W;
@@ -229,42 +234,62 @@ void game_step(game_state_t* g, world_state_t const* w, float dt, float steer) {
         for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
             obstacle_t const* o = &w->obstacles[i];
             if (!o->active) continue;
-            // Only solid bodies are landable; pickups are not, and
-            // ramps get their own sloped-surface handling in 9.1g.
-            // Border walls aren't KIND_CUBE and sit outside the
-            // track, so the x test below would exclude them anyway.
-            if (o->kind != OBSTACLE_KIND_CUBE) continue;
+            if (o->kind != OBSTACLE_KIND_CUBE && o->kind != OBSTACLE_KIND_RAMP) {
+                continue;  // pickups / border walls are not landable
+            }
             if (o->x_world - o->half_w >= ship_xR) continue;
             if (o->x_world + o->half_w <= ship_xL) continue;
             if (o->z_world - o->half_d >= ship_zF) continue;
             if (o->z_world + o->half_d <= ship_zN) continue;
-            // Top face in ship_y units. Only a support if it is at
-            // or below the ship's belly — a top above the belly is
-            // an obstacle the ship will *collide* with, not stand on.
-            float const top = (o->y_base + o->height) - SHIP_BASE_Y;
-            if (top <= g->ship_y + GAME_LAND_EPS && top > support_y) {
-                support_y = top;
+
+            if (o->kind == OBSTACLE_KIND_CUBE) {
+                // Flat top, in ship_y units. A candidate only if at
+                // or below the belly — a top above it is an obstacle
+                // the ship *collides* with, not one it stands on.
+                float const top = (o->y_base + o->height) - SHIP_BASE_Y;
+                if (top <= g->ship_y + GAME_LAND_EPS && top >= support_y) {
+                    support_y     = top;
+                    support_slope = 0.0f;
+                }
+            } else {
+                // Ramp: the wedge rises from world-y 0 at its near
+                // face to world-y `height` at its far face. The
+                // support under the ship is that slope sampled at
+                // the ship's z, in ship_y units. The reachable band
+                // (GAME_RAMP_STEP_UP) covers the per-frame climb
+                // while riding without yanking the ship onto a high
+                // ramp it never drove up.
+                float const run = 2.0f * o->half_d;
+                float       t   = (SHIP_COLLISION_Z_C - (o->z_world - o->half_d)) / run;
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                float const surf = o->height * t - SHIP_BASE_Y;
+                if (surf <= g->ship_y + GAME_RAMP_STEP_UP && surf >= support_y) {
+                    support_y     = surf;
+                    support_slope = o->height / run;
+                }
             }
         }
     }
 
-    // Rest on the support, or fall toward it. A jump (ship_vy > 0)
-    // always leaves the surface; gravity pulls a descending ship
-    // back down, and the descent snaps onto the support the frame
-    // it crosses it — that snap is the landing.
-    if (g->ship_y <= support_y && g->ship_vy <= 0.0f) {
+    // Canonical vertical resolve: gravity always, integrate, then
+    // resolve against the support. `ship_y <= support_y` ⇒ the ship
+    // is on it — resting on a flat top (vy → 0) or riding a ramp,
+    // where the support lifts and `vy` becomes the climb rate
+    // `ship_speed_z * slope`. That climb rate is exactly the
+    // velocity the ship keeps the frame the ramp ends and the
+    // support drops away — the emergent launch. A jump (game_jump
+    // set ship_vy > 0 and cleared ship_grounded) is integrated this
+    // same frame, lifting ship_y above the support, so it correctly
+    // reads as airborne.
+    g->ship_vy -= GAME_GRAVITY * dt;
+    g->ship_y  += g->ship_vy * dt;
+    if (g->ship_y <= support_y) {
         g->ship_y        = support_y;
-        g->ship_vy       = 0.0f;
+        g->ship_vy       = g->ship_speed_z * support_slope;
         g->ship_grounded = true;
     } else {
         g->ship_grounded = false;
-        g->ship_vy      -= GAME_GRAVITY * dt;
-        g->ship_y       += g->ship_vy * dt;
-        if (g->ship_y <= support_y && g->ship_vy <= 0.0f) {
-            g->ship_y        = support_y;
-            g->ship_vy       = 0.0f;
-            g->ship_grounded = true;
-        }
     }
 }
 

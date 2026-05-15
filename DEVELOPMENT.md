@@ -10,7 +10,7 @@
 
 ## Current Status
 
-**Phase: Phases 1–8 + 10 complete. Phase 8 (daily seed + custom seed + persistence) closed 2026-05-15 — the game is playable end-to-end with a daily/custom seed and persistent per-slot scores, which is the MVP bar. The meta-progression layer (challenge system, levels, points, unlocks) was re-scoped out of Phase 8 entirely and now lives in Phase 11. Phase 9 (pickups + attachments) is the next gameplay phase; Phase 11 (meta-progression UI) is the next persistence/UI phase.**
+**Phase: Phases 1–8 + 10 complete; Phase 9 in progress. Phase 8 (daily seed + custom seed + persistence) closed 2026-05-15 — the game is playable end-to-end with a daily/custom seed and persistent per-slot scores, which is the MVP bar. The meta-progression layer (challenge system, levels, points, unlocks) was re-scoped out of Phase 8 entirely and now lives in Phase 11. Phase 9 (pickups + attachments) is split into sub-phases: 9.1 (the vertical system — ship altitude, gravity, jumps, Y-aware collision, landing/riding, shadow ray, moving camera, jump booster, ramps, simple_platform area) is ✅ complete as of 2026-05-16. Remaining in Phase 9: 9.2 shield, 9.3 checkpoint, 9.4 attachment slots + magnet, 9.5 battery. Phase 11 (meta-progression UI) is the next persistence/UI phase.**
 
 | Phase | Description | State |
 |-------|-------------|-------|
@@ -24,7 +24,7 @@
 | 7 | Audio + volume keys | ✅ done 2026-05-13 — software mixer (22050 Hz s16 stereo, swappable music-source interface), procedural synthwave music generator seeded from a separate `music_prng`, five procedurally-generated SFX (engine hum, pickup ding, crash, scrape, cube bump), audio settings (music/SFX/hum toggles in `synthracer` NVS), master gain staging in `magicnumbers.h`, master volume + audio-jack hot-swap via the upstream `nvs_settings_*` module, pause-stops-SFX-music-keeps-going wiring. F2/F3 live brightness step keys deliberately deferred (boot-time loading covers the "honour the launcher" half). See the 2026-05-13 audio decisions-log entries. |
 | 8 | Daily + custom seed + persistence | ✅ done 2026-05-15 — RTC-derived daily seed (`year*10000 + month*100 + day`), now sourced from a single `s_session_date` snapshot captured once at boot so "today" is frozen for the whole session. Custom-seed entry dialog + `last_custom_seed` prefill/persist. Persistence redesigned 2026-05-12: 3 explicit save slots as NBT files in `/int/synthracer/save{0,1,2}.bin` (NVS dropped), explicit-boolean unlock + daily-done flags. Slot selection on boot, main menu, seed-input subscreen, stats screen, basic scoring + per-slot `last_run`/`all_time` stats, correct `SAVE_END_*` reason recording, and day-rollover detection (`save_apply_day_rollover`) all landed. **Scope note:** the meta-progression layer originally sketched under this phase — the challenge system that *writes* the `daily_done_*` flags, plus level/points/unlock logic — moved wholesale to Phase 11; the save struct carries all the fields but no gameplay code reads/writes them yet. The game is playable with a daily seed + persistent per-slot scores, which is the MVP bar. |
 | 9 | Pickups & attachments | ⬜ not started — split into sub-phases below; built **ungated** (`unlock_*` gating wired later in Phase 11). |
-| 9.1 | Vertical system + Jump pickup + ramps | 🟡 in progress — milestones **a** (`ship_y`/`ship_vy`/gravity + jump), **a.5** (moving camera + `render_camera` global), **b** (Y-aware collision), **c** (landing/riding obstacle tops), **d** (shadow ray), **e** (border-wall clamp, edge-aware), **h** (simple_platform area) landed 2026-05-15/16. Pending: **f** jump booster + inventory + HUD, **g** ramp object. See the 2026-05-15/16 "Phase 9 sub-phases + 9.1 vertical-system design" and "Phase 9.1 implementation" decisions-log entries. |
+| 9.1 | Vertical system + Jump pickup + ramps | ✅ done 2026-05-16 — all nine sub-milestones landed: **a** (`ship_y`/`ship_vy`/gravity + jump), **a.5** (moving camera + `render_camera` global), **b** (Y-aware collision), **c** (landing/riding obstacle tops), **d** (geometric shadow ray), **e** (border-wall clamp, edge-aware), **f** (jump booster + inventory + HUD), **g** (ramp object + emergent launch), **h** (simple_platform test area). One parked tuning item: the ramp→platform arc alignment. See the 2026-05-15/16 "Phase 9 sub-phases + 9.1 vertical-system design" and the two "Phase 9.1 implementation" / "Phase 9.1 complete" decisions-log entries. |
 | 9.2 | Shield pickup | ⬜ not started |
 | 9.3 | Checkpoint pickup | ⬜ not started |
 | 9.4 | Attachment slots + Magnet | ⬜ not started |
@@ -3145,8 +3145,46 @@
       `render_pickup_pyramid` / `render_booster_icosahedron` were
       made `y_base`-aware so elevated pickups render on the
       platform. Stage 2+; the Tab debug key now forces this area.
-  Pending in 9.1: f (jump booster + inventory + HUD), g (ramp
-  object + emergent launch).
+
+- 2026-05-16 — **Phase 9.1 complete: milestones f / g landed.**
+  The final two sub-milestones close out the vertical system.
+    - **9.1f — jump booster + inventory + HUD.** New
+      `objects/jump_booster.{c,h}` — a red rotating octahedron
+      (6 verts / 8 faces) drawn via a `draw` callback, with
+      per-face lighting + a true sign-parity checkerboard two-tone
+      (a flat `f & 1` clumped the shading — fixed). `game_state_t`
+      gained `jump_charges`; collecting a jump booster
+      (`OBSTACLE_KIND_PICKUP_JUMP`) grants +1 (capped at
+      `GAME_JUMP_CHARGE_MAX` = 3), counts `pickups_jump`, and reuses
+      the `just_picked_up_booster` audio flag so it plays the same
+      ding as a speed booster. `game_jump()` now requires and
+      spends a charge — jumping is a consumable, no longer free.
+      HUD `draw_jump_inventory()` shows one red diamond per charge,
+      bottom-right, sized to match the boost indicator. One jump
+      booster spawns in the start-area lead-in; in-run they spawn
+      in the between-stage rest areas from stage 3 onward.
+    - **9.1g — ramp object + emergent launch.** New
+      `objects/ramp.{c,h}` — a dull-yellow wedge (triangular
+      prism) with a bright-yellow wireframe, custom `draw` callback
+      (sloped top + the camera-side face; an edge-based
+      side-visibility test, after a centre-based one wrongly drew a
+      face while the ship rode the ramp). `game_step`'s vertical
+      model was reworked to the canonical platformer form (gravity
+      always → integrate → resolve); the support scan now also
+      handles `KIND_RAMP`, sampling the wedge's sloped surface and
+      a `support_slope`. Riding a ramp sets `ship_vy =
+      ship_speed_z · slope`, so the instant the ramp ends the ship
+      keeps that climb velocity and arcs into the air — the launch
+      is emergent, no injected impulse. `GAME_RAMP_STEP_UP` tuning
+      constant added. The ramp is spawned at the head of the
+      `simple_platform` lead-in (the gap 9.1h reserved). **Open
+      tuning item, deliberately parked:** the ramp→platform arc
+      alignment (`SP_RAMP_HALF_D` / `SP_RAMP_RISE` / `SP_LEAD_Z` in
+      `simple_platform.c`) — left at first-pass values for now.
+  **Phase 9.1 (the vertical system) is complete** — ship altitude,
+  gravity, jumps, Y-aware collision, landing/riding obstacle tops,
+  the geometric shadow ray, the moving camera, border-wall clamp,
+  the jump booster, ramps, and the simple_platform test area.
 
 ---
 

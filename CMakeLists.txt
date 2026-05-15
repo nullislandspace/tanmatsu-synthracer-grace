@@ -25,6 +25,7 @@ set(APP_SOURCES
     main/objects/bridge.c
     main/objects/flipping_cube.c
     main/objects/jump_booster.c
+    main/objects/ramp.c
     main/objects/rest_pillar.c
     main/objects/tri.c
     main/areas/pixel_field.c

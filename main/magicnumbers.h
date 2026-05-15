@@ -73,6 +73,13 @@
 // adds one charge toward this cap; game_jump spends one per jump.
 #define GAME_JUMP_CHARGE_MAX             3
 
+// Ramp reachable band (Phase 9.1g): how far above the ship's belly
+// a ramp surface may sit and still count as support. Wide enough to
+// cover the per-frame climb while riding (ship_speed × slope × dt),
+// narrow enough that the ship is never yanked onto a high ramp it
+// did not drive up.
+#define GAME_RAMP_STEP_UP                1.0f
+
 // Landing tolerance (world units): vertical slop for treating a
 // ship-belly-vs-obstacle-top contact as "resting on / landing on"
 // the surface rather than a lethal collision. Absorbs float error
