@@ -15,13 +15,14 @@ static char const TAG[] = "music_proc";
 // Musical constants
 // ---------------------------------------------------------------
 
-// 110 BPM is the canonical synthwave tempo (Kavinsky, Mitch Murder,
-// "Drive" soundtrack territory). At 22050 Hz that's 22050 * 60 /
-// 110 / 4 = 3006.82 samples per 16th note. We use a float
-// accumulator so drift over a long run is sub-sample.
-#define MUSIC_BPM 110.0f
-static float const SAMPLES_PER_16TH =
-    (float)AUDIO_SAMPLE_RATE_HZ * 60.0f / (MUSIC_BPM * 4.0f);
+// Synthwave sits around 110 BPM (Kavinsky, Mitch Murder, "Drive"
+// soundtrack territory). Rather than lock every run to the same
+// metronome, each run picks an integer BPM in [100, 118]; the
+// per-16th-note sample count is derived once per run into
+// music_proc_t::samples_per_16th. A double accumulator keeps drift
+// over a long run sub-sample.
+#define MUSIC_BPM_MIN   100u
+#define MUSIC_BPM_SPAN   19u   // → 100..118 BPM inclusive
 
 // 16 sixteenths per bar (4/4 time), 2 bars per chord, 8 chords per
 // progression ⇒ 16 bars per section.
@@ -84,13 +85,32 @@ static progression_t const g_progressions[] = {
 };
 #define NUM_PROGRESSIONS (sizeof(g_progressions) / sizeof(g_progressions[0]))
 
-// Arp pattern over the chord triad: index into {root=0, third=1,
-// fifth=2, octave=3}. 16 sixteenths per bar — the chord repeats
-// for two bars so the same pattern plays twice per chord.
-static int8_t const g_arp_pattern[TICKS_PER_BAR] = {
-    0, 2, 1, 2, 3, 2, 1, 2,
-    0, 2, 1, 2, 3, 2, 1, 2,
+// Arp pattern bank. Each pattern is one bar of 16 sixteenths; the
+// chord holds for two bars so a pattern plays twice per chord. Step
+// values index the chord triad lifted into octaves:
+//   0 root    1 third    2 fifth
+//   3 root+8  4 third+8  5 fifth+8
+// and -1 means "rest" (no note this 16th) for rhythmic variety. A
+// fresh pattern is chosen per 16-bar section.
+typedef struct {
+    int8_t step[TICKS_PER_BAR];
+} arp_pattern_t;
+
+static arp_pattern_t const g_arp_patterns[] = {
+    // 0: the classic up-down noodle
+    { { 0, 2, 1, 2, 3, 2, 1, 2,  0, 2, 1, 2, 3, 2, 1, 2 } },
+    // 1: sparse ascending run, rests on every off-16th
+    { { 0,-1, 1,-1, 2,-1, 3,-1,  4,-1, 3,-1, 2,-1, 1,-1 } },
+    // 2: octave bounce — a tone then its octave, climbing
+    { { 0, 3, 0, 3, 1, 4, 1, 4,  2, 5, 2, 5, 1, 4, 1, 4 } },
+    // 3: syncopated and sparse — leaves big gaps for the pad
+    { { 0,-1,-1, 2, 1,-1, 3,-1,  0,-1, 2,-1,-1, 3, 1,-1 } },
+    // 4: straight 1-3-5-8 climb and fall
+    { { 0, 1, 2, 3, 4, 3, 2, 1,  0, 1, 2, 3, 4, 5, 4, 3 } },
+    // 5: pulsing root with melodic accents on the off-beats
+    { { 0, 0, 2, 0, 1, 0, 3, 0,  0, 0, 2, 0, 1, 0, 4, 0 } },
 };
+#define NUM_ARP_PATTERNS (sizeof(g_arp_patterns) / sizeof(g_arp_patterns[0]))
 
 // Drum pattern bank — each is 16 booleans (one per 16th in a bar).
 typedef struct {
@@ -119,8 +139,38 @@ static drum_pattern_t const g_drum_patterns[] = {
         .snare = 0x0100u,                    // on beat 3
         .hat   = 0x5555u,
     },
+    // 3: driving — quarter-note kick under busy 16th hats
+    {
+        .kick  = 0x1111u,                    // 16ths 0,4,8,12
+        .snare = 0x1010u,                    // 16ths 4,12
+        .hat   = 0xFFFFu,                    // every 16th
+    },
+    // 4: broken kick with a syncopated push before beat 3
+    {
+        .kick  = 0x0411u,                    // 16ths 0,4,10
+        .snare = 0x1010u,
+        .hat   = 0x5555u,
+    },
+    // 5: sparse and airy — half-time kick, offbeat hats only
+    {
+        .kick  = 0x0101u,                    // 16ths 0,8
+        .snare = 0x0100u,                    // beat 3 only
+        .hat   = 0xAAAAu,                    // every off-8th
+    },
 };
 #define NUM_DRUM_PATTERNS (sizeof(g_drum_patterns) / sizeof(g_drum_patterns[0]))
+
+// Bass rhythm bank — 16-bit masks, one bit per 16th (LSB = 16th 0).
+// On each set bit the bass pulses the chord root an octave down. A
+// pattern is chosen per section so the low-end drive shifts with
+// the music.
+static uint16_t const g_bass_patterns[] = {
+    0x5555u,   // 0: steady eighth-note pulse
+    0xFFFFu,   // 1: driving sixteenths — the "outrun chase" feel
+    0x1111u,   // 2: laid-back quarter notes, lets the pad breathe
+    0x9999u,   // 3: galloping — beat plus the 16th before the next
+};
+#define NUM_BASS_PATTERNS (sizeof(g_bass_patterns) / sizeof(g_bass_patterns[0]))
 
 // ---------------------------------------------------------------
 // PRNG (xorshift32) and a couple of helpers
@@ -167,15 +217,20 @@ typedef struct {
     int     root_midi;
 
     // Timing.
+    double  samples_per_16th;  // per-run, derived from the chosen BPM
     double  sample_pos;        // double for sub-sample drift accuracy
     double  next_tick_at;
     uint16_t tick_in_bar;      // 0..15
     uint16_t bar_in_section;   // 0..15
     uint32_t section_index;
 
-    // Current section's progression + selected drum pattern.
+    // Current section's progression + selected pattern set.
     progression_t  prog;
     drum_pattern_t drums;
+    arp_pattern_t  arp;            // this section's arp pattern
+    uint8_t        arp_index;      // its index in g_arp_patterns (no-repeat)
+    int            arp_octave;     // 0 or +12 — per-section arp transpose
+    uint16_t       bass_mask;      // this section's bass rhythm
     bool           layer_bass;
     bool           layer_arp;
     bool           layer_pad;
@@ -234,6 +289,22 @@ static void start_new_section(music_proc_t* m) {
         m->drums = g_drum_patterns[prng_range(&m->prng, NUM_DRUM_PATTERNS)];
     }
 
+    // Arp: a fresh pattern every section, with one re-roll to dodge
+    // an immediate repeat. Roughly a third of sections also lift the
+    // whole arp an octave for a brighter, sparklier passage.
+    {
+        uint8_t idx = (uint8_t)prng_range(&m->prng, NUM_ARP_PATTERNS);
+        if (idx == m->arp_index) {
+            idx = (uint8_t)prng_range(&m->prng, NUM_ARP_PATTERNS);
+        }
+        m->arp_index = idx;
+        m->arp       = g_arp_patterns[idx];
+    }
+    m->arp_octave = ((prng_next(&m->prng) % 3u) == 0u) ? 12 : 0;
+
+    // Bass: pick a rhythm for the section's low end.
+    m->bass_mask = g_bass_patterns[prng_range(&m->prng, NUM_BASS_PATTERNS)];
+
     // Layer mutation — every section may drop or restore one of
     // the harmonic layers. Drums and bass stay through the whole
     // run by default; arp/pad come and go for dynamics.
@@ -263,31 +334,39 @@ static void on_tick(music_proc_t* m) {
     int tones[3];
     chord_tones(c, m->root_midi, tones);
 
-    // Bass: pulse on the chord root, on every 8th (i.e. even 16ths)
-    // with a small chance of a passing root-octave note on the
-    // off-8th for movement.
-    if (m->layer_bass && (m->tick_in_bar % 2 == 0)) {
-        int const bass_midi = tones[0] - 12;   // an octave down
-        m->bass_freq = midi_to_hz(bass_midi);
-        audio_env_trigger(&m->bass_env);
-    } else if (m->layer_bass && (m->tick_in_bar % 8 == 7) && ((prng_next(&m->prng) & 7u) == 0u)) {
-        int const bass_midi = tones[0];        // unison root, rare
-        m->bass_freq = midi_to_hz(bass_midi);
-        audio_env_trigger(&m->bass_env);
+    // Bass: pulse the chord root an octave down on every 16th the
+    // section's bass pattern marks. The last 16th of a bar has a
+    // chance to walk up to the fifth instead — a small lead-in to
+    // the next chord.
+    if (m->layer_bass) {
+        uint16_t const bit = (uint16_t)(1u << m->tick_in_bar);
+        if (m->bass_mask & bit) {
+            bool const walk = (m->tick_in_bar == TICKS_PER_BAR - 1)
+                           && ((prng_next(&m->prng) & 3u) == 0u);
+            int const bass_midi = (walk ? tones[2] : tones[0]) - 12;
+            m->bass_freq = midi_to_hz(bass_midi);
+            audio_env_trigger(&m->bass_env);
+        }
     }
 
-    // Arp: cycles through chord tones every 16th.
+    // Arp: walk the section's arp pattern. A negative step is a
+    // rest (no trigger); the rest are chord tones lifted into
+    // octaves, optionally transposed up an octave for the section.
     if (m->layer_arp) {
-        int const step = g_arp_pattern[m->tick_in_bar];
-        int       midi;
-        switch (step) {
-            case 0: midi = tones[0]; break;
-            case 1: midi = tones[1]; break;
-            case 2: midi = tones[2]; break;
-            default: midi = tones[0] + 12; break;
+        int const step = m->arp.step[m->tick_in_bar];
+        if (step >= 0) {
+            int midi;
+            switch (step) {
+                case 0:  midi = tones[0];      break;
+                case 1:  midi = tones[1];      break;
+                case 2:  midi = tones[2];      break;
+                case 3:  midi = tones[0] + 12; break;
+                case 4:  midi = tones[1] + 12; break;
+                default: midi = tones[2] + 12; break;
+            }
+            m->arp_freq = midi_to_hz(midi + m->arp_octave);
+            audio_env_trigger(&m->arp_env);
         }
-        m->arp_freq = midi_to_hz(midi);
-        audio_env_trigger(&m->arp_env);
     }
 
     // Pad: retrigger on chord changes only.
@@ -417,7 +496,7 @@ static void music_render(music_source_t* self, int16_t* out, size_t frames) {
         // Tick scheduler.
         if (m->sample_pos >= m->next_tick_at) {
             on_tick(m);
-            m->next_tick_at += (double)SAMPLES_PER_16TH;
+            m->next_tick_at += m->samples_per_16th;
         }
 
         float const s = render_sample(m);
@@ -457,9 +536,20 @@ static void music_reseed(music_proc_t* m, uint32_t seed) {
     static int const tonic_choices[] = { 45, 47, 48, 50, 52, 53, 55 };  // A2..G3
     m->root_midi = tonic_choices[prng_range(&m->prng, (uint32_t)(sizeof(tonic_choices) / sizeof(tonic_choices[0])))];
 
-    // Force a fresh section setup (sets prog, drums, layers).
+    // Per-run tempo — an integer BPM in [100, 118] so no two seeds
+    // feel metronome-identical.
+    {
+        uint32_t const bpm = MUSIC_BPM_MIN + prng_range(&m->prng, MUSIC_BPM_SPAN);
+        m->samples_per_16th =
+            (double)AUDIO_SAMPLE_RATE_HZ * 60.0 / ((double)bpm * 4.0);
+    }
+
+    // Force a fresh section setup (sets prog, drums, arp, bass,
+    // layers). arp_index starts at an impossible value so the
+    // first section's no-repeat check can't false-match.
     memset(&m->prog, 0, sizeof(m->prog));
     m->drums       = g_drum_patterns[0];
+    m->arp_index   = 0xFFu;
     m->layer_bass  = true;
     m->layer_arp   = true;
     m->layer_pad   = true;

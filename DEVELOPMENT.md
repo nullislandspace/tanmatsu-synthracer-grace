@@ -492,6 +492,8 @@
   settle had a soft guarantee: pad alone, with the previous
   area's last obstacle potentially visible during the
   approach. User asked for the hard guarantee.)
+  *(Superseded 2026-05-15 — the settle was removed; see the
+  "Gateway dead-air trimmed" entry below.)*
 - 2026-05-11 — **Daily seed source landed** (partial Phase 8).
   `derive_daily_seed()` in main.c builds the world seed from
   the RTC date — `year*10000 + month*100 + day` — captured
@@ -2757,6 +2759,70 @@
       affordance, kept) moved up to `HUD_HINT_Y_BASE` to close the
       gap the exit hint left. The full F1-exit affordance is itself
       slated for removal later in development.
+
+- 2026-05-15 — **Gateway dead-air trimmed.** Both gateway-type
+  areas (`gateways`, `dynamic_gateway`) carried a `*_SETTLE_Z`
+  equal to a full far-plane distance (`WORLD_Z_FAR_SPAWN`, 100 u =
+  5 s at cruise) prepended to the lead-in pad, to let the previous
+  area's last obstacle drain off-screen before the gate puzzle. At
+  150 u (7.5 s) before the first `gateways` gate this read as a
+  long empty crawl. The settle was removed entirely: the empty
+  run before the first gate and after the last is now exactly one
+  inter-gate pad (`GATEWAY_PAD_Z` 50 u / `DYN_GATE_PAD_Z` 10 u),
+  matching the gate-to-gate spacing. Safe because gates always
+  spawn at `WORLD_Z_FAR_SPAWN`, the furthest spawn depth — a fresh
+  gate is never placed behind a leftover foreign obstacle; any
+  leftover is strictly nearer and drifts past before the gate
+  reaches the player. *(Supersedes the 2026-05-11 "Gateway
+  settling pad" entry.)*
+
+- 2026-05-15 — **Rest-area: banner timing, short intro, green
+  pillars.** Three changes to make rest areas read better:
+    - **Stage banner timing.** The "Stage: N" banner was shown for
+      the *whole* rest area, so it popped up the instant the rest
+      stretch first appeared on the far horizon — far too early.
+      It now shows only during the final `STAGE_BANNER_LEAD_Z`
+      (100 u, ≈5 s at cruise) of the rest stretch, i.e. as the
+      player crosses from the previous zone's bonus tail into the
+      next zone. A shared `stage_banner_visible()` helper gates all
+      three render paths (playing / paused / game-over).
+    - **Short intro lead-in.** The pre-stage-1 rest is now one
+      screen depth (`WORLD_Z_FAR_SPAWN`, 100 u) instead of a full
+      `WORLD_REST_LENGTH_Z` (200 u) rest, so the run opens briskly.
+      Since that equals the banner threshold, the "Stage: 1"
+      banner stays visible for the whole intro. `area_rest_init()`
+      gained a `length_z` parameter — between-stage rests still
+      pass `WORLD_REST_LENGTH_Z` (the 10-Tri Bézier curve is
+      unaffected); the intro passes `WORLD_Z_FAR_SPAWN`.
+    - **Green border-wall posts.** New `objects/rest_pillar.{c,h}`
+      — green marker posts modelled on the bridges-area pillars but
+      half height (`REST_PILLAR_HEIGHT` 1.5 u) and with no
+      connecting span slab. `area_rest_tick()` (previously a pure
+      countdown) now spawns a left+right post pair every 9 u
+      (3 wall segments, matching the bridges pillar cadence,
+      wall-grid-snapped) for the whole rest stretch, via the
+      formerly-unused `next_event_z` field. The posts sit on the
+      wall tops outside the ship's reachable x, so they need no
+      collide override — same as the bridge pillars.
+
+- 2026-05-15 — **Procedural music variety.** The synthwave
+  generator (`music/music_procedural.c`) had a single fixed arp
+  pattern, a hard-coded eighth-note bass, three drum patterns and
+  a fixed 110 BPM. Added, all chosen fresh per 16-bar section and
+  still fully seed-deterministic:
+    - **Arp pattern bank** — 6 patterns (`g_arp_patterns[]`),
+      picked with a no-repeat re-roll. Steps gained a rest value
+      (`-1`) for rhythmic gaps and extended to `fifth+octave`
+      (was capped at `root+octave`). ~1/3 of sections lift the arp
+      an octave (`arp_octave`).
+    - **Bass rhythm bank** — 4 16-bit masks (`g_bass_patterns[]`:
+      eighths, driving sixteenths, quarters, gallop) replacing the
+      hard-coded pulse, plus a chance to walk to the fifth on a
+      bar's last 16th.
+    - **Drum bank** — grew 3 → 6 patterns.
+    - **Per-run tempo** — each run picks an integer BPM in
+      [100, 118]; `samples_per_16th` is now a per-run
+      `music_proc_t` field, not a compile-time constant.
 
 ---
 
