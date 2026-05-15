@@ -38,6 +38,7 @@ set(APP_SOURCES
     main/audio_dsp.c
     main/audio_mixer.c
     main/audio_settings.c
+    main/controls_settings.c
     main/hw_settings.c
     main/music/music_procedural.c
     main/sfx/sfx_engine_hum.c

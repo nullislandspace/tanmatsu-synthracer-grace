@@ -2674,6 +2674,60 @@
        and `world_init()` takes just the seed. `last_custom_seed`
        remains, only to prefill the seed-input screen.
 
+- 2026-05-15 — **Menu redesign: Settings submenu + Controls + key
+  remapping.** The main menu's "Audio" entry became "Settings", a
+  submenu with two children: "Controls" and "Audio" (the Audio child
+  is the unchanged three-checkbox panel). New app states
+  `APP_STATE_SETTINGS`, `APP_STATE_CONTROLS`, `APP_STATE_KEY_CAPTURE`.
+    - **Controls screen** — five rows: a "Gyroscope" enable checkbox
+      (default off; stored but not wired to gameplay — reserved for a
+      future gyro-steering implementation) followed by four
+      remappable keybinds: Left (ESC), Right (Backspace), Use item
+      (Space — stored/displayed only, not wired yet) and Pause (F4).
+      Each keybind row shows its current key: a PNG icon for Esc and
+      F1..F6 (loaded by `icons.c`), otherwise a text label — a word
+      for non-printable keys (Tab, Ctrl, Fn, F7..F12, …) or a single
+      glyph for printable keys. If a mapped icon fails to load the
+      row falls back to the text label.
+    - **Remapping** — selecting a keybind row opens a modal
+      "Press a key" dialog; `input.c` enters a capture mode where the
+      next plain key press is latched and all other input is
+      swallowed. Captured from scancode events, plus F-key navigation
+      events translated to scancodes as a safety net (function keys
+      can surface on either channel depending on the BSP build).
+    - **Persistence** — new `controls_settings.{c,h}` module, modelled
+      on `audio_settings`: device-global NVS keys in the `synthracer`
+      namespace (`ctl_gyro` u8, `ctl_k_left/right/item/pause` u16).
+      Global, not per-save-slot — a player's key layout shouldn't
+      reset when they switch slots. Keybinds are stored as raw BSP
+      scancodes: a scancode identifies any physical key and works
+      with both the polled (`bsp_input_read_scancode`, smooth
+      steering) and event-matched (pause edge) input paths. The old
+      hard-coded ESC/Backspace steering and the navigation-event F4
+      pause were replaced by reads of these binds.
+    - **Left-alignment** — every menu and dialog (slot select, main
+      menu, settings, controls, audio, seed input, stats, upgrade
+      stub, pause overlay, game-over overlay, key-capture modal) was
+      converted from centred text to left-aligned.
+    - **Selection highlight** — a selected row turns yellow
+      (`0xFFFFFF6B` vs white) *and* shows a `>` chevron, but its
+      label never moves and never changes size. Every row's label
+      starts at a fixed `text_x`; a fixed-width gutter to its left
+      holds the chevron, which is painted as a **separate draw step**
+      only for the selected row. So the chevron-vs-space width
+      difference of the proportional Hershey font can't shift the
+      label.
+    - **Unified `menu_draw()` renderer** — the per-menu hand-coded
+      draw loops were replaced by one generic list renderer driven by
+      a `menu_view_t` (title, optional subtitle, rows, cursor, hint,
+      panel size). A `menu_row_t` row is a plain label, a checkbox,
+      or a keybind value. Main menu, Settings, Controls, Audio and
+      the pause overlay are now just data + one `menu_draw()` call.
+      Slot select (two-line rows) and the dialogs (seed input, stats,
+      game over, key capture) keep bespoke draws but share the same
+      colour constants, `draw_left()` / `draw_chevron()` helpers and
+      the chevron-gutter convention.
+
 ---
 
 ## Future FPS improvements

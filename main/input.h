@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // Game state codes that gate the modal steering keys (ESC and Backspace
 // are steering only during STATE_PLAYING; everywhere else they have
@@ -78,3 +79,15 @@ bool input_consume_pause_toggle(void);
 // forcing the world generator to a specific next area type.
 // Self-clears.
 bool input_consume_force_next_area(void);
+
+// Begin key-capture for the Controls remap dialog. While capture is
+// active, the next plain key press is latched and every other event
+// (steering, menu nav, F1 exit, volume, …) is swallowed so the
+// pressed key is bound rather than acted on. Capture ends when
+// input_consume_captured_key() returns true.
+void input_begin_key_capture(void);
+
+// If a key was captured since input_begin_key_capture(), returns true,
+// writes the BSP scancode into *out_scancode, and ends capture mode.
+// Returns false while still waiting for a key press.
+bool input_consume_captured_key(uint16_t* out_scancode);

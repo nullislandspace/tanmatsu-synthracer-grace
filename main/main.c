@@ -10,6 +10,7 @@
 
 #include "bsp/device.h"
 #include "bsp/display.h"
+#include "bsp/input.h"
 #include "direct_565.h"
 #include "driver/ppa.h"
 #include "esp_cache.h"
@@ -22,6 +23,7 @@
 #include "freertos/task.h"
 #include "audio_mixer.h"
 #include "audio_settings.h"
+#include "controls_settings.h"
 #include "game.h"
 #include "hal/lcd_types.h"
 #include "hw_settings.h"
@@ -143,13 +145,16 @@ static size_t                       mountain_size        = 0;
 
 typedef enum {
     APP_STATE_SLOT_SELECT = 0,  // first state on boot: pick save slot 0..2
-    APP_STATE_MENU,             // main menu: Daily/Seeded/Upgrade/Stats/Audio/Exit
+    APP_STATE_MENU,             // main menu: Daily/Seeded/Upgrade/Stats/Settings/Exit
     APP_STATE_SEED_INPUT,       // numeric entry for the custom seed
     APP_STATE_STATS_VIEW,       // text dump of the active slot's stats
     APP_STATE_UPGRADE_STUB,     // placeholder "coming soon" screen
-    APP_STATE_AUDIO_SETTINGS,   // two-checkbox panel: music / SFX on-off
+    APP_STATE_SETTINGS,         // settings submenu: Controls / Audio
+    APP_STATE_CONTROLS,         // controls list: gyro checkbox + 4 keybinds
+    APP_STATE_KEY_CAPTURE,      // "press a key" modal for a keybind remap
+    APP_STATE_AUDIO_SETTINGS,   // three-checkbox panel: music / SFX / hum
     APP_STATE_PLAYING,
-    APP_STATE_PAUSED,           // F4 pause overlay: Resume / Abort run
+    APP_STATE_PAUSED,           // pause overlay: Resume / Abort run
     APP_STATE_GAME_OVER,
 } app_state_t;
 
@@ -166,10 +171,35 @@ enum {
     MENU_ENTRY_SEEDED,
     MENU_ENTRY_UPGRADE,
     MENU_ENTRY_STATS,
-    MENU_ENTRY_AUDIO,
+    MENU_ENTRY_SETTINGS,
     MENU_ENTRY_EXIT,
     MENU_ENTRY_COUNT,
 };
+
+// Settings submenu entries (STATE_SETTINGS).
+enum {
+    SETTINGS_ENTRY_CONTROLS = 0,
+    SETTINGS_ENTRY_AUDIO,
+    SETTINGS_ENTRY_COUNT,
+};
+static int s_settings_cursor = SETTINGS_ENTRY_CONTROLS;
+
+// Controls-menu entries (STATE_CONTROLS). The gyro checkbox first,
+// then the four remappable keybinds in CONTROL_KEY_* order so the
+// row index past the checkbox maps straight to a controls_key_t.
+enum {
+    CONTROLS_ENTRY_GYRO = 0,
+    CONTROLS_ENTRY_LEFT,
+    CONTROLS_ENTRY_RIGHT,
+    CONTROLS_ENTRY_ITEM,
+    CONTROLS_ENTRY_PAUSE,
+    CONTROLS_ENTRY_COUNT,
+};
+static int s_controls_cursor = CONTROLS_ENTRY_GYRO;
+
+// Which keybind the open "press a key" modal is rebinding. Set when
+// entering STATE_KEY_CAPTURE from a keybind row.
+static controls_key_t s_capture_target = CONTROL_KEY_LEFT;
 
 // Audio-settings cursor entries (STATE_AUDIO_SETTINGS).
 enum {
@@ -444,11 +474,210 @@ static void ppa_wait_one(void) {
 }
 
 
-static void draw_centered(float cy, float h, pax_col_t color, char const* text) {
-    pax_vec2f sz = rendertext_size(NULL, h, text);
-    float const x = (pax_buf_get_widthf(fb) - sz.x) * 0.5f;
-    rendertext_draw(fb, color, NULL, h, x, cy, text);
+// ---- Menu / dialog rendering --------------------------------------
+//
+// All menus and dialogs are left-aligned. The selection highlight is
+// colour only (yellow): a selected row never changes font size and
+// never shifts position, so nothing jumps as the cursor moves.
+#define MENU_COL_TITLE  0xFFFFFF6Bu   // yellow — screen titles
+#define MENU_COL_HILITE 0xFFFFFF6Bu   // yellow — selected row
+#define MENU_COL_NORMAL 0xFFFFFFFFu   // white  — unselected rows / body
+#define MENU_COL_HINT   0xFFA0A0A8u   // grey   — footer hints
+#define MENU_COL_SUB    0xFF808088u   // dim    — secondary text
+
+// Left content x for a panel centred at width fraction `w_frac`: the
+// panel's left edge plus a fixed text inset.
+static float menu_left_x(float w_frac) {
+    float const fbw = pax_buf_get_widthf(fb);
+    return (fbw - fbw * w_frac) * 0.5f + 28.0f;
 }
+
+// Left-aligned text draw — thin wrapper kept for symmetry with the
+// rest of the menu code (every menu draws its rows through this).
+static void draw_left(float x, float y, float h, pax_col_t color, char const* text) {
+    rendertext_draw(fb, color, NULL, h, x, y, text);
+}
+
+// Map a scancode to a key icon, or -1 if none exists. icons.c loads
+// PNGs for Esc and F1..F6 (see icon_filenames[] in icons.c); those
+// keys render as their icon. Every other key falls back to text via
+// scancode_name / scancode_glyph. draw_keybind_value also falls back
+// to text if the mapped icon failed to load.
+static int scancode_icon(uint16_t sc) {
+    switch (sc) {
+        case BSP_INPUT_SCANCODE_ESC: return ICON_ESC;
+        case BSP_INPUT_SCANCODE_F1:  return ICON_F1;
+        case BSP_INPUT_SCANCODE_F2:  return ICON_F2;
+        case BSP_INPUT_SCANCODE_F3:  return ICON_F3;
+        case BSP_INPUT_SCANCODE_F4:  return ICON_F4;
+        case BSP_INPUT_SCANCODE_F5:  return ICON_F5;
+        case BSP_INPUT_SCANCODE_F6:  return ICON_F6;
+        default: return -1;
+    }
+}
+
+// Word name for a non-printable key (and for the function keys, used
+// as the text fallback when an icon is missing). NULL for printable
+// keys — caller falls back to the single glyph.
+static char const* scancode_name(uint16_t sc) {
+    switch (sc) {
+        case BSP_INPUT_SCANCODE_ESC:        return "Esc";
+        case BSP_INPUT_SCANCODE_SPACE:      return "Space";
+        case BSP_INPUT_SCANCODE_ENTER:      return "Enter";
+        case BSP_INPUT_SCANCODE_BACKSPACE:  return "Backspace";
+        case BSP_INPUT_SCANCODE_TAB:        return "Tab";
+        case BSP_INPUT_SCANCODE_CAPSLOCK:   return "CapsLk";
+        case BSP_INPUT_SCANCODE_LEFTSHIFT:  return "L-Shift";
+        case BSP_INPUT_SCANCODE_RIGHTSHIFT: return "R-Shift";
+        case BSP_INPUT_SCANCODE_LEFTCTRL:   return "Ctrl";
+        case BSP_INPUT_SCANCODE_LEFTALT:    return "Alt";
+        case BSP_INPUT_SCANCODE_FN:         return "Fn";
+        case BSP_INPUT_SCANCODE_F1:  return "F1";
+        case BSP_INPUT_SCANCODE_F2:  return "F2";
+        case BSP_INPUT_SCANCODE_F3:  return "F3";
+        case BSP_INPUT_SCANCODE_F4:  return "F4";
+        case BSP_INPUT_SCANCODE_F5:  return "F5";
+        case BSP_INPUT_SCANCODE_F6:  return "F6";
+        case BSP_INPUT_SCANCODE_F7:  return "F7";
+        case BSP_INPUT_SCANCODE_F8:  return "F8";
+        case BSP_INPUT_SCANCODE_F9:  return "F9";
+        case BSP_INPUT_SCANCODE_F10: return "F10";
+        case BSP_INPUT_SCANCODE_F11: return "F11";
+        case BSP_INPUT_SCANCODE_F12: return "F12";
+        default: return NULL;
+    }
+}
+
+// Single printable glyph for a scancode, or 0 if the key is not a
+// plain printable (caller then uses scancode_name / a hex fallback).
+static char scancode_glyph(uint16_t sc) {
+    switch (sc) {
+        case BSP_INPUT_SCANCODE_1: return '1';
+        case BSP_INPUT_SCANCODE_2: return '2';
+        case BSP_INPUT_SCANCODE_3: return '3';
+        case BSP_INPUT_SCANCODE_4: return '4';
+        case BSP_INPUT_SCANCODE_5: return '5';
+        case BSP_INPUT_SCANCODE_6: return '6';
+        case BSP_INPUT_SCANCODE_7: return '7';
+        case BSP_INPUT_SCANCODE_8: return '8';
+        case BSP_INPUT_SCANCODE_9: return '9';
+        case BSP_INPUT_SCANCODE_0: return '0';
+        case BSP_INPUT_SCANCODE_A: return 'A';
+        case BSP_INPUT_SCANCODE_B: return 'B';
+        case BSP_INPUT_SCANCODE_C: return 'C';
+        case BSP_INPUT_SCANCODE_D: return 'D';
+        case BSP_INPUT_SCANCODE_E: return 'E';
+        case BSP_INPUT_SCANCODE_F: return 'F';
+        case BSP_INPUT_SCANCODE_G: return 'G';
+        case BSP_INPUT_SCANCODE_H: return 'H';
+        case BSP_INPUT_SCANCODE_I: return 'I';
+        case BSP_INPUT_SCANCODE_J: return 'J';
+        case BSP_INPUT_SCANCODE_K: return 'K';
+        case BSP_INPUT_SCANCODE_L: return 'L';
+        case BSP_INPUT_SCANCODE_M: return 'M';
+        case BSP_INPUT_SCANCODE_N: return 'N';
+        case BSP_INPUT_SCANCODE_O: return 'O';
+        case BSP_INPUT_SCANCODE_P: return 'P';
+        case BSP_INPUT_SCANCODE_Q: return 'Q';
+        case BSP_INPUT_SCANCODE_R: return 'R';
+        case BSP_INPUT_SCANCODE_S: return 'S';
+        case BSP_INPUT_SCANCODE_T: return 'T';
+        case BSP_INPUT_SCANCODE_U: return 'U';
+        case BSP_INPUT_SCANCODE_V: return 'V';
+        case BSP_INPUT_SCANCODE_W: return 'W';
+        case BSP_INPUT_SCANCODE_X: return 'X';
+        case BSP_INPUT_SCANCODE_Y: return 'Y';
+        case BSP_INPUT_SCANCODE_Z: return 'Z';
+        case BSP_INPUT_SCANCODE_MINUS:      return '-';
+        case BSP_INPUT_SCANCODE_EQUAL:      return '=';
+        case BSP_INPUT_SCANCODE_LEFTBRACE:  return '[';
+        case BSP_INPUT_SCANCODE_RIGHTBRACE: return ']';
+        case BSP_INPUT_SCANCODE_SEMICOLON:  return ';';
+        case BSP_INPUT_SCANCODE_APOSTROPHE: return '\'';
+        case BSP_INPUT_SCANCODE_GRAVE:      return '`';
+        case BSP_INPUT_SCANCODE_BACKSLASH:  return '\\';
+        case BSP_INPUT_SCANCODE_COMMA:      return ',';
+        case BSP_INPUT_SCANCODE_DOT:        return '.';
+        case BSP_INPUT_SCANCODE_SLASH:      return '/';
+        default: return 0;
+    }
+}
+
+// Fill `buf` with the text label for a scancode (used when there is
+// no icon for it).
+static void keybind_text(uint16_t sc, char* buf, size_t n) {
+    char const* name = scancode_name(sc);
+    if (name) { snprintf(buf, n, "%s", name); return; }
+    char const g = scancode_glyph(sc);
+    if (g)    { snprintf(buf, n, "%c", g); return; }
+    snprintf(buf, n, "Key 0x%02X", (unsigned)sc);
+}
+
+// Draw the value side of a keybind row at (x, y): the function-key
+// icon when one exists and loaded, otherwise the text label.
+static void draw_keybind_value(float x, float y, float text_h, pax_col_t col, uint16_t sc) {
+    int const icon = scancode_icon(sc);
+    if (icon >= 0 && icons_width((icon_key_t)icon) > 0) {
+        int   const iw = icons_width((icon_key_t)icon);
+        int   const ih = icons_height((icon_key_t)icon);
+        float const iy = y + text_h * 0.5f - (float)ih * 0.5f;
+        // The key-hint PNGs are black glyphs on a transparent
+        // background — invisible on the dim menu panel. Lay down a
+        // white tile first so the icon reads like a physical keycap.
+        pax_simple_rect(fb, 0xFFFFFFFFu, x, iy, (float)iw, (float)ih);
+        icons_blit(fb, (icon_key_t)icon, x, iy);
+        return;
+    }
+    char buf[24];
+    keybind_text(sc, buf, sizeof(buf));
+    draw_left(x, y, text_h, col, buf);
+}
+
+// ---- Generic list-menu renderer -----------------------------------
+//
+// Most menus (main, settings, controls, audio, pause) are the same
+// shape: a dim panel, a title, an optional subtitle, a column of
+// rows, and a footer hint. `menu_draw()` renders all of them from a
+// `menu_view_t` description so each menu is just data, not a bespoke
+// draw loop.
+//
+// The selection chevron is painted as a *separate step* from the row
+// text: every row's label starts at the same `text_x` whether or not
+// it is selected, and the ">" marker is drawn into a fixed-width
+// gutter to its left only for the selected row. Selecting a row thus
+// changes its colour and shows the chevron, but never moves the text.
+#define MENU_TEXT_INSET     28.0f   // panel edge → chevron gutter
+#define MENU_CHEVRON_GUTTER 22.0f   // gutter width reserved for ">"
+#define MENU_TOP_PAD        40.0f   // panel top → title baseline
+#define MENU_FOOTER_PAD     32.0f   // footer baseline → panel bottom
+#define MENU_ROW_TEXT_H     28.0f   // row label / value font height
+
+typedef enum {
+    MENU_VAL_NONE = 0,   // plain label row
+    MENU_VAL_CHECK,      // label + [X] / [ ]
+    MENU_VAL_KEYBIND,    // label + function-key icon / key name
+} menu_val_kind_t;
+
+typedef struct {
+    char const*     label;
+    menu_val_kind_t kind;
+    bool            checked;   // MENU_VAL_CHECK
+    uint16_t        scancode;  // MENU_VAL_KEYBIND
+} menu_row_t;
+
+typedef struct {
+    char const*       title;
+    float             title_h;
+    char const*       subtitle;   // NULL → no subtitle line
+    menu_row_t const* rows;
+    int               row_count;
+    float             row_h;
+    int               cursor;     // selected row index
+    char const*       hint;       // footer hint, NULL → none
+    float             panel_w;    // panel width  fraction
+    float             panel_h;    // panel height fraction
+    float             value_dx;   // x offset of the value column
+} menu_view_t;
 
 // Top-right readout stack. Slot 0 = score, slot 1 = stage, slot 2 = v,
 // slot 3 = sun. Each line is `text_h + 4` px below the previous.
@@ -576,19 +805,62 @@ static void draw_menu_panel_size(float w_frac, float h_frac) {
     direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
 }
 
-// Smaller dim panel for the pause overlay — sized to fit "PAUSED" +
-// two entries + footer hint. Keeps the gameplay scene mostly visible
-// so the player can see roughly where they were when they paused.
-// Custom centring (sits a little higher than dead-centre).
-static void draw_pause_panel(void) {
-    float const fbw = pax_buf_get_widthf(fb);
-    float const fbh = pax_buf_get_heightf(fb);
-    int   const pw  = (int)(fbw * 0.55f);
-    int   const ph  = (int)(fbh * 0.58f);
-    int   const px  = (int)((fbw - (float)pw) * 0.5f);
-    int   const py  = (int)(fbh * 0.22f);
-    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
+// Selection chevron, painted into the row's left gutter as a step
+// separate from the label so the label never moves (see menu_view_t).
+static void draw_chevron(float x, float y, float text_h) {
+    draw_left(x, y, text_h, MENU_COL_HILITE, ">");
+}
+
+// Render a whole list menu from its description. See menu_view_t.
+static void menu_draw(menu_view_t const* m) {
+    draw_menu_panel_size(m->panel_w, m->panel_h);
+    float const fbw     = pax_buf_get_widthf(fb);
+    float const fbh     = pax_buf_get_heightf(fb);
+    float const panel_x = (fbw - fbw * m->panel_w) * 0.5f;
+    float const panel_y = (fbh - fbh * m->panel_h) * 0.5f;
+    float const panel_h = fbh * m->panel_h;
+
+    float const chevron_x = panel_x + MENU_TEXT_INSET;
+    float const text_x    = chevron_x + MENU_CHEVRON_GUTTER;
+    float const value_x   = text_x + m->value_dx;
+
+    float y = panel_y + MENU_TOP_PAD;
+    draw_left(text_x, y, m->title_h, MENU_COL_TITLE, m->title);
+    y += m->title_h + 14.0f;
+    if (m->subtitle) {
+        draw_left(text_x, y, 18.0f, MENU_COL_NORMAL, m->subtitle);
+        y += 18.0f + 16.0f;
+    } else {
+        y += 14.0f;
+    }
+
+    for (int i = 0; i < m->row_count; i++) {
+        menu_row_t const* r   = &m->rows[i];
+        bool const        sel = (i == m->cursor);
+        pax_col_t  const  col = sel ? MENU_COL_HILITE : MENU_COL_NORMAL;
+        float const       ry  = y + (float)i * m->row_h;
+        if (sel) {
+            draw_chevron(chevron_x, ry, MENU_ROW_TEXT_H);
+        }
+        draw_left(text_x, ry, MENU_ROW_TEXT_H, col, r->label);
+        switch (r->kind) {
+            case MENU_VAL_CHECK:
+                draw_left(value_x, ry, MENU_ROW_TEXT_H, col,
+                          r->checked ? "[X]" : "[ ]");
+                break;
+            case MENU_VAL_KEYBIND:
+                draw_keybind_value(value_x, ry, MENU_ROW_TEXT_H, col, r->scancode);
+                break;
+            case MENU_VAL_NONE:
+            default:
+                break;
+        }
+    }
+
+    if (m->hint) {
+        draw_left(text_x, panel_y + panel_h - MENU_FOOTER_PAD, 14.0f,
+                  MENU_COL_HINT, m->hint);
+    }
 }
 
 static void draw_game_over_overlay(void) {
@@ -605,9 +877,10 @@ static void draw_game_over_overlay(void) {
     uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
     direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
 
-    draw_centered(fbh * 0.30f, 64.0f, 0xFFF71FF1u, "GAME OVER");
-    draw_centered(fbh * 0.46f, 22.0f, 0xFF31FBFBu, gameover_flavours[s_gameover_flavour_idx]);
-    draw_centered(fbh * 0.58f, 22.0f, 0xFFFFFFFFu, "press space to retry");
+    float const lx = menu_left_x(0.66f);
+    draw_left(lx, fbh * 0.30f, 64.0f, 0xFFF71FF1u, "GAME OVER");
+    draw_left(lx, fbh * 0.46f, 22.0f, 0xFF31FBFBu, gameover_flavours[s_gameover_flavour_idx]);
+    draw_left(lx, fbh * 0.58f, 22.0f, MENU_COL_NORMAL, "press space to retry");
 }
 
 // Format an int64 Unix time as "YYYY-MM-DD HH:MM" into out. Empty
@@ -628,12 +901,16 @@ static void format_unix(int64_t t, char* out, size_t out_size) {
 // Slot-select screen — three rows with summary stats (or [new] when
 // the slot has no save file).
 static void draw_slot_select(void) {
-    // Title at 12%, rows from 34%, footer hint at 92% + 14 px → ~96%.
+    // Two-line rows (slot title + summary) don't fit the generic
+    // list renderer, but the chevron gutter convention is shared:
+    // labels always start at text_x, the ">" is painted separately
+    // into the gutter, so selecting a slot never shifts its text.
     draw_menu_panel_size(0.80f, 0.94f);
-    float const fbh = pax_buf_get_heightf(fb);
-    float const fbw = pax_buf_get_widthf(fb);
-    draw_centered(fbh * 0.12f, 48.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
-    draw_centered(fbh * 0.22f, 22.0f, 0xFFFFFFFFu, "select save slot");
+    float const fbh       = pax_buf_get_heightf(fb);
+    float const chevron_x = menu_left_x(0.80f);
+    float const text_x    = chevron_x + MENU_CHEVRON_GUTTER;
+    draw_left(text_x, fbh * 0.12f, 48.0f, MENU_COL_TITLE, "RACE THE SYNTH");
+    draw_left(text_x, fbh * 0.22f, 22.0f, MENU_COL_NORMAL, "select save slot");
 
     float const row_h = 56.0f;
     float const top   = fbh * 0.34f;
@@ -641,12 +918,11 @@ static void draw_slot_select(void) {
         save_peek_info_t info  = {0};
         int              exist = save_slot_peek(i, &info) == 0;
         bool const       sel   = (i == s_slot_cursor);
-        pax_col_t        title_col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
-        pax_col_t        sub_col   = sel ? 0xFFFFFFFFu : 0xFF808088u;
+        pax_col_t        title_col = sel ? MENU_COL_HILITE : MENU_COL_NORMAL;
+        pax_col_t        sub_col   = sel ? MENU_COL_NORMAL : MENU_COL_SUB;
 
-        char title[64];
-        snprintf(title, sizeof(title), "%s slot %d %s",
-                 sel ? ">" : " ", i + 1, sel ? "<" : " ");
+        char title[32];
+        snprintf(title, sizeof(title), "Slot %d", i + 1);
 
         char sub[128];
         if (exist) {
@@ -661,101 +937,139 @@ static void draw_slot_select(void) {
         }
 
         float const y = top + (float)i * row_h;
-        {
-            pax_vec2f sz = rendertext_size(NULL, 24.0f, title);
-            rendertext_draw(fb, title_col, NULL, 24.0f,
-                            (fbw - sz.x) * 0.5f, y, title);
+        if (sel) {
+            draw_chevron(chevron_x, y, 24.0f);
         }
-        {
-            pax_vec2f sz = rendertext_size(NULL, 16.0f, sub);
-            rendertext_draw(fb, sub_col, NULL, 16.0f,
-                            (fbw - sz.x) * 0.5f, y + 28.0f, sub);
-        }
+        draw_left(text_x, y, 24.0f, title_col, title);
+        draw_left(text_x + 16.0f, y + 28.0f, 16.0f, sub_col, sub);
     }
 
-    draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u,
-                  "up / down to choose, enter to confirm, F1 to exit");
+    draw_left(text_x, fbh * 0.92f, 14.0f, MENU_COL_HINT,
+              "up / down to choose, enter to confirm, F1 to exit");
 }
 
-// Main menu — five entries.
+// Main menu — six entries.
 static void draw_main_menu(void) {
-    draw_menu_panel_size(0.80f, 0.94f);
-    char        title[64];
-    snprintf(title, sizeof(title), "slot %d", s_active_slot + 1);
-    float const fbh = pax_buf_get_heightf(fb);
-    float const fbw = pax_buf_get_widthf(fb);
-    draw_centered(fbh * 0.12f, 48.0f, 0xFFFFFF6Bu, "RACE THE SYNTH");
-    draw_centered(fbh * 0.21f, 18.0f, 0xFFFFFFFFu, title);
-
-    char const* labels[MENU_ENTRY_COUNT] = {
-        [MENU_ENTRY_DAILY]   = "Daily Run",
-        [MENU_ENTRY_SEEDED]  = "Seeded Run",
-        [MENU_ENTRY_UPGRADE] = "Upgrade Ship",
-        [MENU_ENTRY_STATS]   = "Stats",
-        [MENU_ENTRY_AUDIO]   = "Audio",
-        [MENU_ENTRY_EXIT]    = "Exit",
+    static char const* const labels[MENU_ENTRY_COUNT] = {
+        [MENU_ENTRY_DAILY]    = "Daily Run",
+        [MENU_ENTRY_SEEDED]   = "Seeded Run",
+        [MENU_ENTRY_UPGRADE]  = "Upgrade Ship",
+        [MENU_ENTRY_STATS]    = "Stats",
+        [MENU_ENTRY_SETTINGS] = "Settings",
+        [MENU_ENTRY_EXIT]     = "Exit",
     };
-
-    float const row_h = 44.0f;
-    float const top   = fbh * 0.34f;
+    menu_row_t rows[MENU_ENTRY_COUNT] = {0};
     for (int i = 0; i < MENU_ENTRY_COUNT; i++) {
-        bool const sel = (i == s_menu_cursor);
-        char line[64];
-        snprintf(line, sizeof(line), "%s %s %s",
-                 sel ? ">" : " ", labels[i], sel ? "<" : " ");
-        pax_col_t col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
-        pax_vec2f sz  = rendertext_size(NULL, 28.0f, line);
-        rendertext_draw(fb, col, NULL, 28.0f,
-                        (fbw - sz.x) * 0.5f, top + (float)i * row_h, line);
+        rows[i].label = labels[i];
+        rows[i].kind  = MENU_VAL_NONE;
     }
+    char subtitle[32];
+    snprintf(subtitle, sizeof(subtitle), "slot %d", s_active_slot + 1);
 
-    draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u,
-                  "up / down to choose, enter to confirm");
+    menu_view_t const m = {
+        .title = "RACE THE SYNTH", .title_h = 48.0f, .subtitle = subtitle,
+        .rows = rows, .row_count = MENU_ENTRY_COUNT, .row_h = 44.0f,
+        .cursor = s_menu_cursor, .hint = "up / down to choose, enter to confirm",
+        .panel_w = 0.80f, .panel_h = 0.94f, .value_dx = 0.0f,
+    };
+    menu_draw(&m);
 }
 
-// Audio-settings screen — two checkboxes, toggled with enter / space.
-static void draw_audio_settings(void) {
-    draw_menu_panel_size(0.60f, 0.70f);
-    float const fbh = pax_buf_get_heightf(fb);
-    float const fbw = pax_buf_get_widthf(fb);
-    draw_centered(fbh * 0.20f, 36.0f, 0xFFFFFF6Bu, "Audio");
-
-    char const* const labels[AUDIO_ENTRY_COUNT] = {
-        [AUDIO_ENTRY_MUSIC] = "Music",
-        [AUDIO_ENTRY_SFX]   = "Sound effects",
-        [AUDIO_ENTRY_HUM]   = "Engine hum",
+// Settings submenu — Controls / Audio.
+static void draw_settings_menu(void) {
+    static char const* const labels[SETTINGS_ENTRY_COUNT] = {
+        [SETTINGS_ENTRY_CONTROLS] = "Controls",
+        [SETTINGS_ENTRY_AUDIO]    = "Audio",
     };
-    bool const states[AUDIO_ENTRY_COUNT] = {
-        [AUDIO_ENTRY_MUSIC] = audio_settings_music_on(),
-        [AUDIO_ENTRY_SFX]   = audio_settings_sfx_on(),
-        [AUDIO_ENTRY_HUM]   = audio_settings_hum_on(),
-    };
-
-    float const row_h = 44.0f;
-    float const top   = fbh * 0.40f;
-    for (int i = 0; i < AUDIO_ENTRY_COUNT; i++) {
-        bool const sel = (i == s_audio_cursor);
-        char line[64];
-        snprintf(line, sizeof(line), "%s %s [%s]",
-                 sel ? ">" : " ",
-                 labels[i],
-                 states[i] ? "X" : " ");
-        pax_col_t col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
-        pax_vec2f sz  = rendertext_size(NULL, 28.0f, line);
-        rendertext_draw(fb, col, NULL, 28.0f,
-                        (fbw - sz.x) * 0.5f, top + (float)i * row_h, line);
+    menu_row_t rows[SETTINGS_ENTRY_COUNT] = {0};
+    for (int i = 0; i < SETTINGS_ENTRY_COUNT; i++) {
+        rows[i].label = labels[i];
+        rows[i].kind  = MENU_VAL_NONE;
     }
+    menu_view_t const m = {
+        .title = "Settings", .title_h = 36.0f, .subtitle = NULL,
+        .rows = rows, .row_count = SETTINGS_ENTRY_COUNT, .row_h = 44.0f,
+        .cursor = s_settings_cursor,
+        .hint = "up / down to choose, enter to open, esc to leave",
+        .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 0.0f,
+    };
+    menu_draw(&m);
+}
 
-    draw_centered(fbh * 0.85f, 14.0f, 0xFFA0A0A8u,
-                  "up / down to choose, enter to toggle, esc to leave");
+// Controls screen — gyro checkbox + four remappable keybinds.
+static void draw_controls_menu(void) {
+    menu_row_t const rows[CONTROLS_ENTRY_COUNT] = {
+        [CONTROLS_ENTRY_GYRO]  = { .label = "Gyroscope", .kind = MENU_VAL_CHECK,
+                                   .checked = controls_settings_gyro_on() },
+        [CONTROLS_ENTRY_LEFT]  = { .label = "Left", .kind = MENU_VAL_KEYBIND,
+                                   .scancode = controls_settings_key(CONTROL_KEY_LEFT) },
+        [CONTROLS_ENTRY_RIGHT] = { .label = "Right", .kind = MENU_VAL_KEYBIND,
+                                   .scancode = controls_settings_key(CONTROL_KEY_RIGHT) },
+        [CONTROLS_ENTRY_ITEM]  = { .label = "Use item", .kind = MENU_VAL_KEYBIND,
+                                   .scancode = controls_settings_key(CONTROL_KEY_ITEM) },
+        [CONTROLS_ENTRY_PAUSE] = { .label = "Pause", .kind = MENU_VAL_KEYBIND,
+                                   .scancode = controls_settings_key(CONTROL_KEY_PAUSE) },
+    };
+    menu_view_t const m = {
+        .title = "Controls", .title_h = 36.0f, .subtitle = NULL,
+        .rows = rows, .row_count = CONTROLS_ENTRY_COUNT, .row_h = 46.0f,
+        .cursor = s_controls_cursor,
+        .hint = "up / down to choose, enter to change, esc to leave",
+        .panel_w = 0.74f, .panel_h = 0.86f, .value_dx = 250.0f,
+    };
+    menu_draw(&m);
+}
+
+// "Press a key" modal shown while a keybind is being remapped.
+static void draw_key_capture(void) {
+    draw_menu_panel_size(0.56f, 0.44f);
+    float const fbh = pax_buf_get_heightf(fb);
+    float const lx  = menu_left_x(0.56f);
+
+    char const* what = "key";
+    switch (s_capture_target) {
+        case CONTROL_KEY_LEFT:  what = "Left";     break;
+        case CONTROL_KEY_RIGHT: what = "Right";    break;
+        case CONTROL_KEY_ITEM:  what = "Use item"; break;
+        case CONTROL_KEY_PAUSE: what = "Pause";    break;
+        default: break;
+    }
+    char prompt[48];
+    snprintf(prompt, sizeof(prompt), "Rebinding: %s", what);
+
+    draw_left(lx, fbh * 0.40f, 36.0f, MENU_COL_TITLE, "Press a key");
+    draw_left(lx, fbh * 0.56f, 22.0f, MENU_COL_NORMAL, prompt);
+    draw_left(lx, fbh * 0.66f, 14.0f, MENU_COL_HINT,
+              "the next key you press becomes the binding");
+}
+
+// Audio-settings screen — three checkboxes, toggled with enter / space.
+static void draw_audio_settings(void) {
+    menu_row_t const rows[AUDIO_ENTRY_COUNT] = {
+        [AUDIO_ENTRY_MUSIC] = { .label = "Music", .kind = MENU_VAL_CHECK,
+                                .checked = audio_settings_music_on() },
+        [AUDIO_ENTRY_SFX]   = { .label = "Sound effects", .kind = MENU_VAL_CHECK,
+                                .checked = audio_settings_sfx_on() },
+        [AUDIO_ENTRY_HUM]   = { .label = "Engine hum", .kind = MENU_VAL_CHECK,
+                                .checked = audio_settings_hum_on() },
+    };
+    menu_view_t const m = {
+        .title = "Audio", .title_h = 36.0f, .subtitle = NULL,
+        .rows = rows, .row_count = AUDIO_ENTRY_COUNT, .row_h = 44.0f,
+        .cursor = s_audio_cursor,
+        .hint = "up / down to choose, enter to toggle, esc to leave",
+        .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 230.0f,
+    };
+    menu_draw(&m);
 }
 
 // Seed-input screen — numeric entry, prefilled from last_custom_seed.
 static void draw_seed_input(void) {
     draw_menu_panel_size(0.70f, 0.76f);
     float const fbh = pax_buf_get_heightf(fb);
-    draw_centered(fbh * 0.20f, 36.0f, 0xFFFFFF6Bu, "Seeded Run");
-    draw_centered(fbh * 0.34f, 18.0f, 0xFFFFFFFFu, "enter seed (digits 0-9)");
+    float const lx  = menu_left_x(0.70f);
+    draw_left(lx, fbh * 0.20f, 36.0f, MENU_COL_TITLE, "Seeded Run");
+    draw_left(lx, fbh * 0.34f, 18.0f, MENU_COL_NORMAL, "enter seed (digits 0-9)");
 
     char display[16];
     if (s_seed_len == 0) {
@@ -763,10 +1077,10 @@ static void draw_seed_input(void) {
     } else {
         snprintf(display, sizeof(display), "%s_", s_seed_buf);
     }
-    draw_centered(fbh * 0.50f, 48.0f, 0xFFFFFF6Bu, display);
+    draw_left(lx, fbh * 0.50f, 48.0f, MENU_COL_TITLE, display);
 
-    draw_centered(fbh * 0.78f, 16.0f, 0xFFA0A0A8u,
-                  "backspace edits, enter starts, esc cancels");
+    draw_left(lx, fbh * 0.78f, 16.0f, MENU_COL_HINT,
+              "backspace edits, enter starts, esc cancels");
 }
 
 // Single-block stats renderer, run twice with different pointers
@@ -811,7 +1125,7 @@ static void draw_stats_view(void) {
     float const tx  = fbw * 0.10f;
     float       y   = fbh * 0.06f;
 
-    draw_centered(y, 32.0f, 0xFFFFFF6Bu, "Stats");
+    draw_left(tx, y, 32.0f, MENU_COL_TITLE, "Stats");
     y += 44.0f;
 
     y = draw_stats_block(tx, y, "Last run", &s_save.stats.last_run);
@@ -822,45 +1136,37 @@ static void draw_stats_view(void) {
              (int)s_save.meta.level, (int)s_save.meta.points);
     rendertext_draw(fb, 0xFFFFFF6Bu, NULL, 18.0f, tx, y, buf);
 
-    draw_centered(fbh * 0.95f, 14.0f, 0xFFA0A0A8u, "press enter or esc to return");
+    draw_left(tx, fbh * 0.95f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
 }
 
 // Pause overlay shown over the frozen game scene (STATE_PAUSED).
 static void draw_pause_overlay(void) {
-    draw_pause_panel();
-    float const fbh = pax_buf_get_heightf(fb);
-    float const fbw = pax_buf_get_widthf(fb);
-
-    draw_centered(fbh * 0.30f, 48.0f, 0xFFFFFF6Bu, "PAUSED");
-
-    char const* labels[PAUSE_ENTRY_COUNT] = {
+    static char const* const labels[PAUSE_ENTRY_COUNT] = {
         [PAUSE_ENTRY_RESUME] = "Resume",
         [PAUSE_ENTRY_ABORT]  = "Abort run",
     };
-
-    float const top   = fbh * 0.48f;
-    float const row_h = 40.0f;
+    menu_row_t rows[PAUSE_ENTRY_COUNT] = {0};
     for (int i = 0; i < PAUSE_ENTRY_COUNT; i++) {
-        bool const sel = (i == s_pause_cursor);
-        char line[48];
-        snprintf(line, sizeof(line), "%s %s %s",
-                 sel ? ">" : " ", labels[i], sel ? "<" : " ");
-        pax_col_t col = sel ? 0xFFFFFF6Bu : 0xFFFFFFFFu;
-        pax_vec2f sz  = rendertext_size(NULL, 28.0f, line);
-        rendertext_draw(fb, col, NULL, 28.0f,
-                        (fbw - sz.x) * 0.5f, top + (float)i * row_h, line);
+        rows[i].label = labels[i];
+        rows[i].kind  = MENU_VAL_NONE;
     }
-
-    draw_centered(fbh * 0.74f, 14.0f, 0xFFA0A0A8u,
-                  "up / down to choose, enter to confirm, F4 to resume");
+    menu_view_t const m = {
+        .title = "PAUSED", .title_h = 48.0f, .subtitle = NULL,
+        .rows = rows, .row_count = PAUSE_ENTRY_COUNT, .row_h = 44.0f,
+        .cursor = s_pause_cursor,
+        .hint = "up / down to choose, enter to confirm, F4 to resume",
+        .panel_w = 0.55f, .panel_h = 0.58f, .value_dx = 0.0f,
+    };
+    menu_draw(&m);
 }
 
 static void draw_upgrade_stub(void) {
     draw_menu_panel_size(0.60f, 0.76f);
     float const fbh = pax_buf_get_heightf(fb);
-    draw_centered(fbh * 0.30f, 48.0f, 0xFFFFFF6Bu, "Upgrade Ship");
-    draw_centered(fbh * 0.50f, 22.0f, 0xFFFFFFFFu, "Coming soon!");
-    draw_centered(fbh * 0.92f, 14.0f, 0xFFA0A0A8u, "press enter or esc to return");
+    float const lx  = menu_left_x(0.60f);
+    draw_left(lx, fbh * 0.30f, 48.0f, MENU_COL_TITLE, "Upgrade Ship");
+    draw_left(lx, fbh * 0.50f, 22.0f, MENU_COL_NORMAL, "Coming soon!");
+    draw_left(lx, fbh * 0.92f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
 }
 
 // Top-right HUD during PLAYING and GAME_OVER: score + multiplier.
@@ -1196,6 +1502,9 @@ void app_main(void) {
     // Load music/SFX enable flags and bring the mixer + I2S up.
     // Idempotent — safe even if a later call repeats it.
     audio_settings_load();
+    // Control settings (gyro flag + remappable keybinds) — input.c
+    // reads these, so load before the first frame.
+    controls_settings_load();
     res = audio_mixer_init();
     if (res != ESP_OK) {
         ESP_LOGW(TAG, "audio_mixer_init failed: %d — audio will be silent", res);
@@ -1666,9 +1975,9 @@ void app_main(void) {
                         case MENU_ENTRY_STATS:
                             app_state = APP_STATE_STATS_VIEW;
                             break;
-                        case MENU_ENTRY_AUDIO:
-                            s_audio_cursor = AUDIO_ENTRY_MUSIC;
-                            app_state = APP_STATE_AUDIO_SETTINGS;
+                        case MENU_ENTRY_SETTINGS:
+                            s_settings_cursor = SETTINGS_ENTRY_CONTROLS;
+                            app_state = APP_STATE_SETTINGS;
                             break;
                         case MENU_ENTRY_EXIT:
                             audio_mixer_shutdown();
@@ -1704,6 +2013,74 @@ void app_main(void) {
                 break;
             }
 
+            case APP_STATE_SETTINGS: {
+                t_after_obs = esp_timer_get_time();
+                draw_settings_menu();
+                draw_exit_hint();
+                if (menu_nav != 0) {
+                    s_settings_cursor -= menu_nav;
+                    if (s_settings_cursor < 0)                     s_settings_cursor = 0;
+                    if (s_settings_cursor >= SETTINGS_ENTRY_COUNT)  s_settings_cursor = SETTINGS_ENTRY_COUNT - 1;
+                }
+                if (pickup_pressed) {
+                    switch (s_settings_cursor) {
+                        case SETTINGS_ENTRY_CONTROLS:
+                            s_controls_cursor = CONTROLS_ENTRY_GYRO;
+                            app_state = APP_STATE_CONTROLS;
+                            break;
+                        case SETTINGS_ENTRY_AUDIO:
+                            s_audio_cursor = AUDIO_ENTRY_MUSIC;
+                            app_state = APP_STATE_AUDIO_SETTINGS;
+                            break;
+                    }
+                }
+                if (menu_esc) {
+                    app_state = APP_STATE_MENU;
+                }
+                break;
+            }
+
+            case APP_STATE_CONTROLS: {
+                t_after_obs = esp_timer_get_time();
+                draw_controls_menu();
+                draw_exit_hint();
+                if (menu_nav != 0) {
+                    s_controls_cursor -= menu_nav;
+                    if (s_controls_cursor < 0)                     s_controls_cursor = 0;
+                    if (s_controls_cursor >= CONTROLS_ENTRY_COUNT)  s_controls_cursor = CONTROLS_ENTRY_COUNT - 1;
+                }
+                if (pickup_pressed) {
+                    if (s_controls_cursor == CONTROLS_ENTRY_GYRO) {
+                        controls_settings_set_gyro_on(!controls_settings_gyro_on());
+                    } else {
+                        // Rows past the gyro checkbox map 1:1 onto
+                        // controls_key_t — open the remap modal.
+                        s_capture_target =
+                            (controls_key_t)(s_controls_cursor - CONTROLS_ENTRY_LEFT);
+                        input_begin_key_capture();
+                        app_state = APP_STATE_KEY_CAPTURE;
+                    }
+                }
+                if (menu_esc) {
+                    app_state = APP_STATE_SETTINGS;
+                }
+                break;
+            }
+
+            case APP_STATE_KEY_CAPTURE: {
+                // The synthwave backdrop is already drawn for this
+                // frame; just overlay the modal. No exit hint — F1
+                // is captured as a binding here, not an exit key.
+                t_after_obs = esp_timer_get_time();
+                draw_key_capture();
+                uint16_t captured = 0;
+                if (input_consume_captured_key(&captured)) {
+                    controls_settings_set_key(s_capture_target, captured);
+                    app_state = APP_STATE_CONTROLS;
+                }
+                break;
+            }
+
             case APP_STATE_AUDIO_SETTINGS: {
                 t_after_obs = esp_timer_get_time();
                 draw_audio_settings();
@@ -1727,7 +2104,7 @@ void app_main(void) {
                     }
                 }
                 if (menu_esc) {
-                    app_state = APP_STATE_MENU;
+                    app_state = APP_STATE_SETTINGS;
                 }
                 break;
             }
