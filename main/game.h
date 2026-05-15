@@ -46,6 +46,20 @@ typedef enum {
     BOOST_COASTING,
 } boost_phase_t;
 
+// Crash explosion: a fixed pool of screen-space spark particles.
+// On a head-on crash the ship is replaced by a burst of these,
+// animated until they burn out (≈ the crash SFX length). Pure
+// visual ephemera — spawned by game_crash_burst, integrated by
+// game_crash_tick, drawn by game_draw_crash_sparks.
+#define CRASH_SPARK_COUNT 56
+
+typedef struct {
+    float x, y;        // screen-space position, pixels
+    float vx, vy;      // screen-space velocity, pixels/s
+    float life;        // life remaining, seconds (<= 0 ⇒ dead)
+    float life_max;    // initial life, for the fade ratio
+} crash_spark_t;
+
 // game_state_t is referred to by forward declaration in save.h to
 // avoid a transitive include — keep the typedef name `game_state_t`
 // stable (the tag `game_state_s` is what save.h forward-declares).
@@ -115,6 +129,11 @@ typedef struct game_state_s {
     // `just_picked_up_tri` is false.
     bool  just_picked_up_tri;
     int   tri_pickup_slot;
+
+    // Crash explosion spark pool (see crash_spark_t above). Zeroed
+    // by game_init; filled by game_crash_burst on the head-on crash
+    // frame, then aged each frame by game_crash_tick.
+    crash_spark_t crash_sparks[CRASH_SPARK_COUNT];
 } game_state_t;
 
 // Reset the run (zeroes the spark pool too).
@@ -122,8 +141,10 @@ void game_init(game_state_t* g);
 
 // Apply bank dynamics and lateral motion for this frame. Call this
 // *before* game_collide so the position passed to collision is the
-// position the player is trying to be in this frame.
-void game_step(game_state_t* g, float dt, int steer);
+// position the player is trying to be in this frame. `steer` is a
+// signed deflection in [-1.0, +1.0] (keys give ±1, gyro tilt is
+// proportional).
+void game_step(game_state_t* g, float dt, float steer);
 
 // Swept AABB collision pass against every active entry in the
 // obstacle pool. The z range tested is the obstacle's *swept*
@@ -180,3 +201,14 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g);
 // in contact right now". Only meaningful during PLAYING; callers
 // in other states should skip it.
 void game_draw_sparks(pax_buf_t* fb, game_state_t const* g);
+
+// Crash explosion. game_crash_burst fills the spark pool with an
+// outward shower originating at the ship's projected screen
+// position — call it once, on the head-on crash frame, in place of
+// the ship. game_crash_tick integrates the sparks (outward motion,
+// gravity, ageing) and returns true while any spark is still alive.
+// game_draw_crash_sparks paints the live sparks as short streaks
+// that shrink and cool from hot yellow to red ember as they fade.
+void game_crash_burst(game_state_t* g);
+bool game_crash_tick(game_state_t* g, float dt);
+void game_draw_crash_sparks(pax_buf_t* fb, game_state_t const* g);

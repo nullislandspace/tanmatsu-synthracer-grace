@@ -159,12 +159,15 @@ void game_init(game_state_t* g) {
     g->multiplier_max    = 1;
 }
 
-void game_step(game_state_t* g, float dt, int steer) {
+void game_step(game_state_t* g, float dt, float steer) {
     if (dt <= 0.0f) return;
 
     // --- Bank dynamics ----------------------------------------------------
-    float const bank_target   = (float)steer;
-    float const bank_rate     = (steer != 0) ? BANK_ACTIVE_RATE : BANK_PASSIVE_RATE;
+    // `steer` is a proportional deflection in [-1, +1]; the bank
+    // chases it. "Active" (faster) ramp whenever the player is
+    // asking for any deflection at all, "passive" recentre otherwise.
+    float const bank_target   = steer;
+    float const bank_rate     = (steer != 0.0f) ? BANK_ACTIVE_RATE : BANK_PASSIVE_RATE;
     float const bank_max_step = bank_rate * dt;
     float       bank_delta    = bank_target - g->bank;
     if (bank_delta >  bank_max_step) bank_delta =  bank_max_step;
@@ -575,4 +578,82 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
 void game_draw_sparks(pax_buf_t* fb, game_state_t const* g) {
     if (g->scrape_left)  draw_wingtip_burst(fb, g, -1);
     if (g->scrape_right) draw_wingtip_burst(fb, g, +1);
+}
+
+// --- Crash explosion ----------------------------------------------------------
+
+// Per-spark life — the longest-lived spark (≈0.6 s) outlasts the
+// ~0.5 s crash SFX slightly so the shower covers the whole sound.
+#define CRASH_SPARK_LIFE_MIN    0.30f   // s
+#define CRASH_SPARK_LIFE_MAX    0.60f   // s
+// Outward speed range, screen pixels/s — a wide spread so the burst
+// reads as a chaotic shower rather than a uniform ring.
+#define CRASH_SPARK_SPEED_MIN   120.0f
+#define CRASH_SPARK_SPEED_MAX   540.0f
+// Downward pull on the streaks (px/s²) so they arc like debris.
+#define CRASH_SPARK_GRAVITY     430.0f
+// Streak length at full life, pixels (shrinks as the spark fades).
+#define CRASH_SPARK_LEN         10.0f
+
+void game_crash_burst(game_state_t* g) {
+    // Origin: the ship's centre projected to the screen. After this
+    // the ship is no longer drawn — the sparks stand in for it.
+    float ox, oy;
+    render_project(g->ship_x_world, SHIP_BASE_Y, SHIP_Z_PLANE,
+                   g->cam_x, &ox, &oy);
+
+    for (int i = 0; i < CRASH_SPARK_COUNT; i++) {
+        crash_spark_t* p   = &g->crash_sparks[i];
+        float const    ang = spark_rand() * 6.28318531f;
+        float const    spd = CRASH_SPARK_SPEED_MIN
+                           + spark_rand() * (CRASH_SPARK_SPEED_MAX - CRASH_SPARK_SPEED_MIN);
+        p->x        = ox;
+        p->y        = oy;
+        p->vx       = cosf(ang) * spd;
+        p->vy       = sinf(ang) * spd;
+        p->life_max = CRASH_SPARK_LIFE_MIN
+                    + spark_rand() * (CRASH_SPARK_LIFE_MAX - CRASH_SPARK_LIFE_MIN);
+        p->life     = p->life_max;
+    }
+}
+
+bool game_crash_tick(game_state_t* g, float dt) {
+    bool any_alive = false;
+    for (int i = 0; i < CRASH_SPARK_COUNT; i++) {
+        crash_spark_t* p = &g->crash_sparks[i];
+        if (p->life <= 0.0f) continue;
+        p->life -= dt;
+        if (p->life <= 0.0f) { p->life = 0.0f; continue; }
+        p->vy += CRASH_SPARK_GRAVITY * dt;
+        p->x  += p->vx * dt;
+        p->y  += p->vy * dt;
+        any_alive = true;
+    }
+    return any_alive;
+}
+
+void game_draw_crash_sparks(pax_buf_t* fb, game_state_t const* g) {
+    for (int i = 0; i < CRASH_SPARK_COUNT; i++) {
+        crash_spark_t const* p = &g->crash_sparks[i];
+        if (p->life <= 0.0f) continue;
+
+        // Fade ratio 1 (fresh) → 0 (spent): the streak shrinks and
+        // its colour cools from hot yellow-white to a red ember.
+        float const f = (p->life_max > 0.0f) ? (p->life / p->life_max) : 0.0f;
+
+        // Streak trails *behind* the velocity vector.
+        float const sp = sqrtf(p->vx * p->vx + p->vy * p->vy);
+        float       ux = 0.0f;
+        float       uy = -1.0f;
+        if (sp > 1.0f) { ux = p->vx / sp; uy = p->vy / sp; }
+        float const tail = CRASH_SPARK_LEN * (0.35f + 0.65f * f);
+        float const ex   = p->x - ux * tail;
+        float const ey   = p->y - uy * tail;
+
+        int const gc = (int)(0x20 + 0xC0 * f);   // green channel: 0x20..0xE0
+        int const bc = (int)(0x10 + 0x60 * f);   // blue  channel: 0x10..0x70
+        uint32_t const col = 0xFFFF0000u
+                           | ((uint32_t)gc << 8) | (uint32_t)bc;
+        pax_simple_line(fb, col, p->x, p->y, ex, ey);
+    }
 }

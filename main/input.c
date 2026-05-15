@@ -1,10 +1,13 @@
 #include "input.h"
 
+#include <math.h>
+
 #include "bsp/input.h"
 #include "controls_settings.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "graceloader_imu.h"
 #include "hw_settings.h"
 
 // Volume keys step in 5% increments — matches the launcher and the
@@ -59,6 +62,17 @@ void input_init(void) {
     if (res != ESP_OK) {
         ESP_LOGE(TAG, "bsp_input_get_queue failed: %d", res);
         s_event_queue = NULL;
+    }
+
+    // Bring up the accelerometer for optional tilt ("gyroscope")
+    // steering. The BMI270 is already initialized by
+    // bsp_device_initialize() (called in main()); we only enable the
+    // accel sensor here. Leaving it on for the whole app lifetime is
+    // fine — power draw is negligible. Failure is non-fatal: tilt
+    // steering just won't produce any input.
+    esp_err_t imu = bsp_orientation_enable_accelerometer();
+    if (imu != ESP_OK) {
+        ESP_LOGW(TAG, "accelerometer enable failed: %d (tilt steering off)", imu);
     }
 }
 
@@ -189,7 +203,56 @@ static bool poll_scancode(bsp_input_scancode_t code) {
     return (res == ESP_OK) && held;
 }
 
-int input_steering(void) {
+// --- Tilt ("gyroscope") steering -----------------------------------
+// The Controls menu's "Gyroscope" toggle enables motion steering.
+// Despite the menu label the signal comes from the *accelerometer*,
+// not the rate gyroscope: both control styles the player expects —
+// holding the device upright and rolling it like a steering wheel,
+// or holding it flat and tipping it like a marble game — are
+// absolute-tilt gestures. Gravity gives a drift-free absolute tilt
+// reference; a rate gyro would need integration and would drift.
+// Conveniently the device's +Y axis (right edge → left edge)
+// captures the lateral gravity component in *both* poses, so one
+// signal — accel_y — drives both styles:
+//   * flat,    tipped right-edge-down → left edge rises → accel_y > 0
+//   * upright, rolled wheel-right     → left edge rises → accel_y > 0
+// so accel_y > 0 always means "steer right".
+#define GYRO_DEADZONE_ACCEL   0.7f    // m/s² (~4° tilt) — ignore hand jitter
+#define GYRO_FULL_TILT_ACCEL  4.5f    // m/s² (~27° tilt) — full lock
+#define GYRO_FILTER_ALPHA     0.35f   // per-frame low-pass on accel_y
+
+static float s_accel_y_filt = 0.0f;
+static bool  s_accel_seen   = false;
+
+// Returns tilt steering in [-1, +1] (+ = right), or 0 when the
+// gyro toggle is off or no accelerometer sample is available.
+static float gyro_steering(void) {
+    if (!controls_settings_gyro_on()) return 0.0f;
+
+    bool      a_ready = false;
+    float     ay      = 0.0f;
+    esp_err_t res     = bsp_orientation_get(NULL, &a_ready, NULL, NULL, NULL,
+                                            NULL, &ay, NULL);
+    if (res == ESP_OK && a_ready) {
+        if (!s_accel_seen) {
+            s_accel_y_filt = ay;
+            s_accel_seen   = true;
+        } else {
+            s_accel_y_filt += (ay - s_accel_y_filt) * GYRO_FILTER_ALPHA;
+        }
+    }
+
+    float const a   = s_accel_y_filt;
+    float const mag = fabsf(a);
+    if (mag <= GYRO_DEADZONE_ACCEL) return 0.0f;
+
+    float v = (mag - GYRO_DEADZONE_ACCEL)
+            / (GYRO_FULL_TILT_ACCEL - GYRO_DEADZONE_ACCEL);
+    if (v > 1.0f) v = 1.0f;
+    return (a < 0.0f) ? -v : v;
+}
+
+float input_steering(void) {
     bool left  = poll_nav(BSP_INPUT_NAVIGATION_KEY_LEFT);
     bool right = poll_nav(BSP_INPUT_NAVIGATION_KEY_RIGHT);
 
@@ -204,7 +267,14 @@ int input_steering(void) {
                     (bsp_input_scancode_t)controls_settings_key(CONTROL_KEY_RIGHT));
     }
 
-    return (right ? 1 : 0) - (left ? 1 : 0);
+    int const key_steer = (right ? 1 : 0) - (left ? 1 : 0);
+
+    // A held key locks to full deflection and overrides tilt input —
+    // digital steering always wins over the gyro. With no key held
+    // the gyro provides proportional steering (0 when its toggle is
+    // off, so key-only players are unaffected).
+    if (key_steer != 0) return (float)key_steer;
+    return gyro_steering();
 }
 
 bool input_consume_pickup(void) {

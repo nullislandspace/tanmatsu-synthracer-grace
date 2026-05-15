@@ -2824,6 +2824,81 @@
       [100, 118]; `samples_per_16th` is now a per-run
       `music_proc_t` field, not a compile-time constant.
 
+- 2026-05-15 — **Upstream IMU API cherry-picked.** Pulled the
+  template's gyro/IMU commits (`Add IMU API`, `BF gyro api`) —
+  new `include/graceloader_imu.h` (BMI270 accelerometer +
+  gyroscope: `bsp_orientation_enable_*` / `bsp_orientation_get`,
+  axis documentation) and the updated `fakelib/liball.so` that
+  exports the orientation symbols. The upstream `Fix readme`
+  commit was deliberately *not* taken — it only touches
+  `README.md`, and our README is a local game-specific version
+  that must stay as-is.
+
+- 2026-05-15 — **Gyro tilt steering wired to the Controls
+  toggle.** The "Gyroscope" checkbox added in the 2026-05-15 menu
+  redesign (previously stored-but-inert) now drives motion
+  steering.
+    - **Accelerometer, not the rate gyro.** Despite the menu
+      label, the signal is `accel_y` from the BMI270
+      accelerometer. Both control styles the player asked for —
+      holding the device upright and rolling it like a steering
+      wheel, or holding it flat and tipping it like a marble game
+      — are *absolute-tilt* gestures, and gravity is a drift-free
+      tilt reference (a rate gyro would need integration and would
+      drift). The device's +Y axis (right edge → left edge)
+      captures the lateral gravity component in *both* poses, so a
+      single signal serves both: `accel_y > 0` ⇒ steer right in
+      either pose. No mode switch.
+    - **Pipeline.** `input_init()` enables the accelerometer once
+      at startup (non-fatal on failure). New `gyro_steering()` in
+      `input.c` low-pass-filters `accel_y` (`GYRO_FILTER_ALPHA`),
+      applies a deadzone (`GYRO_DEADZONE_ACCEL`, ~4°) and scales
+      to full lock at `GYRO_FULL_TILT_ACCEL` (~27°). Returns 0
+      when the toggle is off, so key-only players are unaffected.
+    - **Analog steering.** `input_steering()` now returns `float`
+      in [-1,+1] (was `int` ∈ {-1,0,+1}); `game_step()` takes a
+      `float steer`. A held key still locks to ±1 and overrides
+      tilt (digital wins); the gyro fills in the proportional
+      in-between. Endpoints are bit-identical to the old int path,
+      so the **max turn rate is unchanged** — full tilt ≡ a held
+      key ≡ the old ±1.
+    - On-device tuning knobs if needed: the three `GYRO_*`
+      constants in `input.c`, and the sign of `gyro_steering()`'s
+      final return if the steering direction turns out inverted.
+
+- 2026-05-15 — **Crash explosion + stall hold-out.** The end-of-run
+  transition no longer jumps straight from PLAYING to GAME_OVER.
+  Two intermediate hold states make the run's end legible.
+    - **`APP_STATE_CRASHING`** — on a head-on crash the ship is
+      replaced by a 56-particle spark shower (`game_crash_burst` /
+      `game_crash_tick` / `game_draw_crash_sparks` in `game.c`; the
+      `crash_spark_t` pool — ~1.3 KB — lives in `game_state_t`).
+      Sparks fly outward from the ship's projected position with
+      random speed/direction, arc under gravity, and fade — each
+      streak shrinks and cools hot-yellow → red-ember. The world
+      keeps scrolling at the crash-moment speed (wreck momentum);
+      input is ignored. The state ends when the sparks burn out
+      (`game_crash_tick` going false — longest spark ≈0.6 s, ≈ the
+      ~0.5 s crash SFX; `CRASH_ANIM_SECONDS` 0.70 is a dt guard),
+      then GAME_OVER. The crashed ship is not redrawn under the
+      game-over panel.
+    - **`APP_STATE_STALL_OUT`** — when the ship coasts to a halt
+      (shadow stall / sunset) the frozen scene is held for
+      `STALL_HOLD_SECONDS` (1.5 s), ship still visible, input
+      ignored, so the player registers the stall before the panel.
+      No explosion SFX — the crash sound is crash-only now.
+    - **End-cause fix.** PLAYING used to collapse crash + stall
+      into one `head_on` signal, and GAME_OVER always passed
+      `head_on=true` to `commit_run_end()` — so *every* run was
+      saved as `SAVE_END_CRASH` (stalls/sunsets mis-recorded in the
+      stats). The signals are now split (`crashed` / `stalled`);
+      a file-static `s_run_was_crash` carries the real cause into
+      GAME_OVER, so stalls save as `SAVE_END_STALL` and sunsets as
+      `SAVE_END_SUNSET`.
+    - On-device tuning knobs: the `CRASH_SPARK_*` constants in
+      `game.c` (count/life/speed/gravity/length) and
+      `STALL_HOLD_SECONDS` in `main.c`.
+
 ---
 
 ## Future FPS improvements

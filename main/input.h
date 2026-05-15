@@ -25,10 +25,12 @@ void input_set_mode(input_mode_t mode);
 // internal latches that will be observable via the accessors below.
 bool input_drain_events(void);
 
-// Returns the steering input as a signed value in {-1, 0, +1} after
-// OR-ing all three left/right paths (D-pad / A&D / Esc&Backspace), with
-// the modal pair gated by the current input_mode.
-int  input_steering(void);
+// Returns the steering input as a signed value in [-1.0, +1.0]:
+// the D-pad and the remappable Left/Right keys give full-deflection
+// ±1 (modal pair gated by input_mode), and — when the Controls
+// "Gyroscope" toggle is on and no key is held — the accelerometer
+// gives proportional tilt steering. A held key overrides tilt.
+float input_steering(void);
 
 // True for the frame where the "use pickup" button (Space or Gamepad-A)
 // was just pressed. Self-clears after one read.

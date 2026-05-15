@@ -156,6 +156,8 @@ typedef enum {
     APP_STATE_AUDIO_SETTINGS,   // three-checkbox panel: music / SFX / hum
     APP_STATE_PLAYING,
     APP_STATE_PAUSED,           // pause overlay: Resume / Abort run
+    APP_STATE_CRASHING,         // post-crash: ship → spark shower, world still flows
+    APP_STATE_STALL_OUT,        // post-stall: frozen scene held a beat before GAME_OVER
     APP_STATE_GAME_OVER,
 } app_state_t;
 
@@ -258,6 +260,22 @@ static double  s_run_play_seconds = 0.0;
 static int     s_peak_stage       = 1;
 static int     s_run_was_custom   = 0;
 static int64_t s_run_seed_used    = 0;
+
+// End-of-run hold timers + cause. `s_run_was_crash` records whether
+// the run ended on a head-on crash (true) or a stall/sunset (false)
+// so GAME_OVER commits the correct save reason. The two timers
+// accumulate per-frame dt while the matching hold state is active.
+static bool   s_run_was_crash   = false;
+static double s_crash_anim_time = 0.0;
+static double s_stall_hold_time = 0.0;
+
+// Crash spark shower runs until game_crash_tick reports all sparks
+// spent (≈ the crash SFX length); this cap just guards against an
+// abnormally long dt stranding the run in CRASHING.
+#define CRASH_ANIM_SECONDS  0.70
+// After a stall, hold the frozen scene this long so the player
+// registers what happened before the game-over panel appears.
+#define STALL_HOLD_SECONDS  1.5
 
 static void blit(void) {
     bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(fb));
@@ -1833,8 +1851,8 @@ void app_main(void) {
             if (game.sun_y > GAME_SUN_SINK_RANGE_PX)   game.sun_y = GAME_SUN_SINK_RANGE_PX;
         }
 
-        bool const pickup_pressed = input_consume_pickup();
-        int  const steer          = input_steering();
+        bool  const pickup_pressed = input_consume_pickup();
+        float const steer          = input_steering();
 
         // Debug: TAB cuts the current area short and forces the
         // next one to a specific type. Currently hard-wired to
@@ -1847,7 +1865,11 @@ void app_main(void) {
         }
 
         int64_t const t_after_input = esp_timer_get_time();
-        bool          head_on       = false;
+        // End-of-run signals for this frame, kept separate so the
+        // render switch can pick the right post-run state: a head-on
+        // crash plays the explosion, a stall just holds the scene.
+        bool crashed = false;
+        bool stalled = false;
 
         // Physics pass — only meaningful in PLAYING; the other states
         // record zero physics time so the breakdown stays honest.
@@ -1858,13 +1880,12 @@ void app_main(void) {
             // 3. After-collide work that reads the flags: ramp speed,
             //    emit + advance sparks.
             game_step(&game, dt, steer);
-            head_on = game_collide(&game, &world, dt);
+            crashed = game_collide(&game, &world, dt);
             // game_after_collide runs sun integration, shadow
             // detection, and speed dynamics. Returns true when the
-            // ship has coasted to a halt in shadow — same end-of-run
-            // signal as a head-on collision.
-            bool const stalled = game_after_collide(&game, &world, dt);
-            head_on            = head_on || stalled;
+            // ship has coasted to a halt in shadow — the stall
+            // end-of-run signal.
+            stalled = game_after_collide(&game, &world, dt);
             world_advance(&world, dt, game.ship_speed_z, game.cam_x);
             // Accumulate active play time (excludes paused frames).
             // Used by save_commit_run_end so the duration_s stat
@@ -1920,6 +1941,25 @@ void app_main(void) {
             // the multiplier bump together.
             if (game.just_picked_up_tri) {
                 sfx_pickup_plink_play(game.tri_pickup_slot);
+            }
+        } else if (app_state == APP_STATE_CRASHING) {
+            // Ship is destroyed — no steering, no collision. Keep
+            // the world scrolling at the crash-moment speed so the
+            // scene still flows, and age the spark shower. Hold here
+            // until the sparks burn out (≈ the crash SFX length),
+            // then drop into GAME_OVER.
+            world_advance(&world, dt, game.ship_speed_z, game.cam_x);
+            s_crash_anim_time += (double)dt;
+            bool const sparks_live = game_crash_tick(&game, dt);
+            if (!sparks_live || s_crash_anim_time >= CRASH_ANIM_SECONDS) {
+                app_state = APP_STATE_GAME_OVER;
+            }
+        } else if (app_state == APP_STATE_STALL_OUT) {
+            // Ship has coasted to a halt. Hold the frozen scene a
+            // beat so the player registers the stall, then GAME_OVER.
+            s_stall_hold_time += (double)dt;
+            if (s_stall_hold_time >= STALL_HOLD_SECONDS) {
+                app_state = APP_STATE_GAME_OVER;
             }
         }
         int64_t const t_after_phys = esp_timer_get_time();
@@ -1978,9 +2018,14 @@ void app_main(void) {
         // visible behind the overlay — same render path as
         // GAME_OVER (obstacles + shadows in their last positions,
         // but no scrolling and no fresh shadows).
-        float const floor_scroll = is_menu_state                       ? title_scroll_speed * dt
-                                   : (app_state == APP_STATE_PLAYING)  ? game.ship_speed_z * dt
-                                                                       : 0.0f;
+        // CRASHING keeps the world advancing (the wreck's momentum),
+        // so its floor scrolls like PLAYING; STALL_OUT / PAUSED /
+        // GAME_OVER hold the floor still.
+        bool const world_is_live = (app_state == APP_STATE_PLAYING
+                                    || app_state == APP_STATE_CRASHING);
+        float const floor_scroll = is_menu_state    ? title_scroll_speed * dt
+                                   : world_is_live  ? game.ship_speed_z * dt
+                                                    : 0.0f;
         float const floor_cam_x      = is_menu_state ? 0.0f : game.cam_x;
         bool  const fully_shadowed   = !is_menu_state
                                        && (game.sun_y >= GAME_SUN_SINK_RANGE_PX);
@@ -2309,30 +2354,37 @@ void app_main(void) {
                 // Track peak stage reached this run.
                 if ((int)world.stage > s_peak_stage) s_peak_stage = (int)world.stage;
 
-                if (head_on) {
-                    // Order matters here. The end-of-run save commits
-                    // an NBT file to flash, which on this hardware
-                    // can stall the main loop for several hundred ms
-                    // (and the audio mixer task on core 1 picks up
-                    // brief cache-disable stalls during the write,
-                    // so I2S DMA loops the previous buffer if it
-                    // underruns). To keep the crash feel snappy:
-                    //   1. Fire crash SFX *first* — the audio task
-                    //      now has a fresh sample to play through
-                    //      the stall.
-                    //   2. Tear down music + persistent voices so
-                    //      the engine hum doesn't keep humming
-                    //      under the game-over panel.
-                    //   3. Transition app_state so the state machine
-                    //      knows we're done with PLAYING.
-                    //   4. Defer the save to the GAME_OVER state's
-                    //      first frame (below) so the slow flash
-                    //      write hides behind a static screen
-                    //      instead of mid-action.
+                if (crashed) {
+                    // Head-on crash. Fire the explosion SFX first —
+                    // the audio task then has a fresh sample to play
+                    // through any cache-disable stall — then tear
+                    // down the run's persistent voices, spawn the
+                    // spark shower in place of the ship, and enter
+                    // CRASHING. The world keeps flowing and the
+                    // sparks animate there until they burn out
+                    // (≈ the crash SFX length), at which point the
+                    // physics pass flips to GAME_OVER. The slow
+                    // end-of-run flash save stays deferred to
+                    // GAME_OVER's first frame.
                     sfx_crash_play();
                     end_run_audio();
+                    game_crash_burst(&game);
+                    s_run_was_crash   = true;
+                    s_crash_anim_time = 0.0;
                     s_gameover_flavour_idx = (int)((uint32_t)esp_timer_get_time() % (uint32_t)GAMEOVER_FLAVOUR_COUNT);
-                    app_state = APP_STATE_GAME_OVER;
+                    app_state = APP_STATE_CRASHING;
+                    input_set_mode(INPUT_MODE_GAME_OVER);
+                } else if (stalled) {
+                    // Ship coasted to a halt (shadow stall / sunset).
+                    // No explosion SFX — just stop the run audio and
+                    // hold the frozen scene a beat in STALL_OUT so
+                    // the player registers the stall before the
+                    // game-over panel appears.
+                    end_run_audio();
+                    s_run_was_crash   = false;
+                    s_stall_hold_time = 0.0;
+                    s_gameover_flavour_idx = (int)((uint32_t)esp_timer_get_time() % (uint32_t)GAMEOVER_FLAVOUR_COUNT);
+                    app_state = APP_STATE_STALL_OUT;
                     input_set_mode(INPUT_MODE_GAME_OVER);
                 } else if (pause_toggle) {
                     s_pause_cursor = PAUSE_ENTRY_RESUME;
@@ -2340,6 +2392,42 @@ void app_main(void) {
                     input_set_mode(INPUT_MODE_PAUSED);
                     pause_audio_for_pause_menu();
                 }
+                break;
+            }
+
+            case APP_STATE_CRASHING: {
+                // The world still flows (physics advanced it above);
+                // the ship is gone, replaced by the spark shower.
+                // No pause hint, no input — the physics pass drops
+                // us into GAME_OVER once the sparks burn out.
+                render_obstacles(fb, &world, game.cam_x);
+                t_after_obs = esp_timer_get_time();
+                game_draw_crash_sparks(fb, &game);
+                if (stage_banner_visible(&world)) {
+                    draw_stage_banner((int)world.stage + 1);
+                }
+                draw_multiplier_panel(&game);
+                draw_score_readout(&game);
+                draw_stage_readout(&world);
+                draw_sun_readout(game.sun_y);
+                break;
+            }
+
+            case APP_STATE_STALL_OUT: {
+                // Frozen scene held for a beat after the stall. The
+                // ship is still drawn — it sat down, it didn't blow
+                // up. No input; the physics pass times out into
+                // GAME_OVER.
+                render_obstacles(fb, &world, game.cam_x);
+                t_after_obs = esp_timer_get_time();
+                game_draw_ship(fb, &game);
+                if (stage_banner_visible(&world)) {
+                    draw_stage_banner((int)world.stage + 1);
+                }
+                draw_multiplier_panel(&game);
+                draw_score_readout(&game);
+                draw_stage_readout(&world);
+                draw_sun_readout(game.sun_y);
                 break;
             }
 
@@ -2405,27 +2493,29 @@ void app_main(void) {
             }
 
             case APP_STATE_GAME_OVER: {
-                // Deferred from the PLAYING head_on path so the slow
-                // flash write happens after the audio teardown has
-                // already queued the crash SFX. Runs once on the
-                // first GAME_OVER frame; `run_end_committed` keeps
-                // it from re-firing every frame. The head_on
-                // argument is `true` because PLAYING's head_on flag
-                // already collapses real head-on and stall into one
-                // signal — same behaviour as before the deferral.
+                // Deferred from the CRASHING / STALL_OUT hold states
+                // so the slow flash write happens after the audio
+                // teardown and the post-run animation. Runs once on
+                // the first GAME_OVER frame; `run_end_committed`
+                // keeps it from re-firing. `s_run_was_crash` carries
+                // the real end cause (head-on crash vs stall/sunset)
+                // so the save records the correct reason.
                 if (!run_end_committed) {
-                    commit_run_end(&game, &world, /*head_on=*/true);
+                    commit_run_end(&game, &world, s_run_was_crash);
                     run_end_committed = true;
                 }
 
-                // World frozen at the crash. No sparks here — they
-                // are a per-frame radial flash that only reads as
-                // a scrape indication during PLAYING. Sun readout
+                // World frozen at the end of the run. Sun readout
                 // stays visible so Q/A nudging still works for
                 // visually tuning the sunset threshold.
                 render_obstacles(fb, &world, game.cam_x);
                 t_after_obs = esp_timer_get_time();
-                game_draw_ship(fb, &game);
+                // A crashed ship was blown to sparks during CRASHING
+                // — don't resurrect it under the panel. A stalled
+                // ship is still sitting on the track, so draw it.
+                if (!s_run_was_crash) {
+                    game_draw_ship(fb, &game);
+                }
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
                 }
