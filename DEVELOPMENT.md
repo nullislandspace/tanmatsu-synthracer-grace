@@ -58,6 +58,7 @@
 - 2026-05-07 — Volume keys must update the launcher-shared `"system"` NVS
   namespace, not a private one.
 - 2026-05-07 — Custom-seed runs do not award meta-progression.
+  *(Superseded 2026-05-15 — see below.)*
 - 2026-05-07 — Synthwave shapes are pre-triangulated once at boot.
 - 2026-05-07 — Sun is drawn before mountains so it can sink behind them.
 - 2026-05-07 — Obstacles cast shadows that slow the ship.
@@ -500,9 +501,8 @@
   so it's stable across die-and-retry inside one session.
   Fallback for an unset RTC (year < 2024) is a fixed constant
   `1` — the user can still play, just deterministically, until
-  the clock is set. Phase 8's NVS anti-cheat (last-known-good
-  date, prevents farming yesterday's seed) and custom-seed
-  menu are still TODO. Trade-off: the seed is captured at
+  the clock is set. Phase 8's custom-seed menu is still TODO.
+  Trade-off: the seed is captured at
   boot, so playing across midnight keeps the old seed until
   app restart. Deliberate — no surprise mid-run.
 - 2026-05-11 — **Swept-z collision + kinematic classifier.**
@@ -1437,10 +1437,11 @@
     Slot for future Phase 11 ship-upgrade UI.
   - `STATE_PLAYING` → `STATE_GAME_OVER` → `STATE_MENU` (no
     longer back to a press-space-to-start title screen).
-  Custom-seed runs (`STATE_SEED_INPUT` → PLAYING) still set
-  the `is_custom` flag so meta-progression doesn't award
-  (Phase 11 enforces; today it's just stored on the save
-  alongside `last_custom_seed`).
+  Custom-seed runs (`STATE_SEED_INPUT` → PLAYING) award
+  meta-progression identically to daily runs — see the
+  2026-05-15 decisions-log entry. The seed value is stored on
+  the save as `last_custom_seed` only to prefill the input
+  screen next time.
 
 - 2026-05-13 — **World generation modularised.** The previous
   monolithic `world.c` was carrying object spawners, area
@@ -2649,6 +2650,30 @@
     - "Air tris" / "tris in one region" challenge variants —
       Phase 11.
 
+- 2026-05-15 — **No clock-rollback anti-cheat; custom-seed runs
+  award meta-progression.** Two Phase 8 design changes, both
+  simplifications:
+    1. The planned NVS "last-known-good date" anti-cheat is
+       dropped. This is an offline, single-player, open-source
+       game with no online leaderboard — there is nothing to
+       protect, and policing the clock only adds failure modes
+       (an unset or drifted RTC locking the player out of the
+       current daily seed). `meta.last_seen_date` survives, but
+       purely as a day-rollover detector: on boot, if today's
+       RTC date differs from it, reset the `daily_done_*`
+       challenge-completion booleans and store today. Rolling
+       the clock back simply replays that day's world.
+    2. Custom-seed runs now award meta-progression (challenge
+       points, level-ups, unlocks) **exactly like daily runs**.
+       The original 2026-05-07 decision withheld it to stop the
+       player farming easy seeds, but with no leaderboard the
+       only person affected is the player themselves — gating
+       their own progression behind "you must use today's seed"
+       is friction with no payoff. The `is_custom` flag is
+       removed entirely: every run feeds `meta.c` the same way,
+       and `world_init()` takes just the seed. `last_custom_seed`
+       remains, only to prefill the seed-input screen.
+
 ---
 
 ## Future FPS improvements
@@ -2784,8 +2809,9 @@ Scope confirmed with user:
 - **Full 25-level metaprogression ladder** mirroring the original.
 - **Hand-coded 3D-to-2D perspective projection** for obstacles and ship.
 - **RTC-driven daily seed** for world layout and challenges, **with an
-  optional custom-seed practice mode** so the player can replay the same
-  level deterministically.
+  optional custom-seed mode** so the player can replay the same
+  level deterministically. Custom-seed runs count toward meta-progression
+  the same as daily runs.
 - **Simple SFX from day one** (PCM samples mixed via I2S task), no music.
 - **Volume keys must change device-wide volume** (mirroring launcher/videoplayer).
 - **Synthwave shapes are pre-triangulated once** at boot, redrawn per
@@ -2986,24 +3012,23 @@ the function makes it explicit and lets us animate the sun.
   1. **Daily seed** (default, **landed**): `seed = year*10000 +
      month*100 + day` from `time(NULL)` / `localtime_r()`,
      captured once at app boot in `derive_daily_seed()`. If the
-     year is < 2024 the RTC is unset — Phase 8 will fall back
-     to a stored "last known good" date in NVS so the player
-     can't farm yesterday's seed by rolling the clock back;
-     until then the unset-RTC fallback is the fixed constant
-     `1`.
-  2. **Custom seed** (practice mode, **TODO**): player enters
-     a seed on the title screen via a "Custom Seed…" menu
-     item. Used for replaying the same world repeatedly. **No
-     meta-progression is awarded in custom-seed runs** (no
-     challenge points, no level-up, no unlock toward
-     attachments) — but the highscore *for that specific
-     seed* is tracked in a small ring of recent custom-seed
-     best scores. This prevents the player from gaming the
-     meta-progression by replaying easy seeds, but still
-     rewards mastery.
-- The seed mode is set by `world_init(seed)` plus a future
-  `is_custom` flag; downstream modules (notably `meta.c`)
-  check the flag before awarding challenge progress.
+     year is < 2024 the RTC is unset — the fallback is the fixed
+     constant `1`, so the game stays playable (deterministically)
+     until the clock is set. No clock-rollback anti-cheat: this
+     is an offline, single-player, open-source game with no
+     online leaderboard, so replaying an old seed harms nobody.
+  2. **Custom seed** (**TODO**): player enters a seed on the
+     title screen via a "Custom Seed…" menu item. Used for
+     replaying the same world repeatedly. Custom-seed runs
+     **do** award meta-progression (challenge points, level-up,
+     unlocks) exactly like daily-seed runs — see the 2026-05-15
+     decisions-log entry. There is no functional difference
+     between a daily run and a seeded run other than which seed
+     drives world generation; the highscore *for a specific
+     seed* may still be tracked in a small per-seed best ring
+     for the title screen.
+- The seed mode is set by `world_init(seed)`. No `is_custom`
+  flag — every run feeds meta-progression the same way.
 
 - **Pickup pool** — Phase 9 will extend the existing
   obstacle pool with `OBSTACLE_KIND_PICKUP_*` entries (stubs
@@ -3265,7 +3290,7 @@ typedef struct {
         int32_t unlock_labyrinth;            // lv25
         int32_t attach1, attach2;            // equipped attachment IDs (0 = none)
         int64_t last_custom_seed;            // most recently entered seed
-        int64_t last_seen_date;              // yyyymmdd anti-cheat
+        int64_t last_seen_date;              // yyyymmdd; day-rollover detection
     } meta;
 
     // daily — today's challenge state (resets when last_seen_date rolls
@@ -3298,11 +3323,14 @@ typedef struct {
   end-of-run persistence so the call site in main.c stays one
   line.
 
-**Anti-cheat (planned, not yet implemented):** if RTC year < 2024
-*or* the current date is earlier than `meta.last_seen_date`, the
-daily seed is taken from `last_seen_date` rather than the
-current RTC. Otherwise update `last_seen_date` to today. Reset
-the `daily_done_*` booleans whenever the date moves forward.
+**Day-rollover (planned, not yet implemented):** `meta.last_seen_date`
+is purely a record of the last calendar day the player launched the
+game. On boot, if the current RTC date differs from `last_seen_date`,
+reset the `daily_done_*` booleans and store today. No clock-rollback
+anti-cheat — this is an offline single-player open-source game with no
+online leaderboard, so the player is free to replay any seed they like
+(including by setting the clock). Rolling the clock back simply gives
+the player that day's world again; nothing is gated on it.
 
 **Custom seed:** `last_custom_seed` is updated whenever the
 user starts a seeded run; the seed-input screen prefills its
@@ -3615,9 +3643,11 @@ Done in this order so each phase produces a runnable build:
    + tuning).
 8. **Daily seed + custom seed + persistence**: read RTC, derive daily
    seed, persist highscore/level/points to NVS namespace `synthracer`.
-   Validate the "last known date" anti-cheat. Add the title-screen
-   "Custom Seed…" entry dialog + `last_custom_seed` / `cs_best`
-   persistence. Verify that custom-seed runs don't award meta-progression.
+   Use `last_seen_date` only to detect day-rollover (reset daily-challenge
+   completion) — no clock-rollback anti-cheat (offline single-player game).
+   Add the title-screen "Custom Seed…" entry dialog + `last_custom_seed` /
+   `cs_best` persistence. Custom-seed runs award meta-progression
+   identically to daily runs.
 9. **Pickups & attachments**: jump, shield, checkpoint pickups +
    the attachment slots and magnet/battery upgrades.
 10. **Regions**: ✅ dissolved 2026-05-13. Content variation now
@@ -3676,8 +3706,8 @@ For each phase:
    different pattern.
 5. **Custom seed determinism**: enter a fixed custom seed twice; verify
    the world is identical (same obstacle/pickup placement region by
-   region). Verify a custom-seed run does NOT increment `points` or
-   `level` even after a long survive.
+   region). A custom-seed run awards `points` / `level` exactly like a
+   daily run — confirm meta-progression advances normally.
 6. **Sun occlusion**: drain the sun timer manually (or watch a long
    run) and confirm the sun visually slides behind the mountain
    silhouette rather than being clipped at a hard edge.
