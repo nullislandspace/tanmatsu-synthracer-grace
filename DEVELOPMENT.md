@@ -3186,6 +3186,53 @@
   the geometric shadow ray, the moving camera, border-wall clamp,
   the jump booster, ramps, and the simple_platform test area.
 
+- 2026-05-19 — **Engine-hum default off; elevated-platform fixes;
+  current performance baseline.**
+    - Engine-hum SFX now defaults **off** when no value is stored in
+      NVS (`audio_settings.c` — `s_hum_on = false`).
+    - `simple_platform` block elevation doubled — `SP_BLOCK_Y_BASE`
+      0.75 → 1.5, so the block top sits at world-y 2.0 (above a plain
+      jump's ~1.78 reach; the launch ramp is now the intended way up).
+    - The default cube renderer gained a **bottom face**. It was
+      written assuming cubes sit at ground level below the camera and
+      only drew front/left/right/top; with elevated platform blocks
+      the ship now drives *under* them, so a `show_bottom`
+      (`render_camera().y < yB`) face + its wireframe edges were
+      added. Fixes the see-through underside and pickups-on-tops
+      bleeding through the missing face.
+    - **Current on-device performance baseline** (gameplay, ~25.5 FPS,
+      ~39 ms frame, fully CPU-bound — `vsync=0`):
+
+      | Phase  | ms    | % frame | Notes |
+      |--------|-------|---------|-------|
+      | in     | 0.07  |  <1%    | input drain |
+      | phys   | 0.65  |   2%    | game_step/collide/world_advance |
+      | bgkick | 10.4  |  27%    | backdrop — PSRAM-bandwidth-bound |
+      | bgflr  | 14.8  |  38%    | floor fill + lane lines |
+      | bgwait | 0.01  |  <1%    | |
+      | obs    | 6.16  |  16%    | 3D obstacle pass (direct_565) |
+      | fgrest | 6.35  |  16%    | ship + sparks + HUD |
+      | blit   | 0.67  |   2%    | DMA queue |
+      | **FPS**| —     | —       | **~25.5** |
+
+      Note: the `obs=46 ms` figure quoted in the older RGB565
+      scoreboard entries is **stale** — the `direct_565` rewrite cut
+      the obstacle pass to ~6 ms. The frame is now dominated by
+      `bgflr` + `bgkick` (~25 ms, 64%).
+    - **Renderer-correctness discussion (no code yet).** Per-object
+      painter's sort by centre `z_world` can't resolve a pickup
+      resting on a block when viewed from below (vertical separation
+      the z-only key ignores). Options weighed: per-facet
+      squared-distance-to-camera sort (near-zero cost, fixes the
+      stacked case, still sort-dependent); a 1-bit SRAM coverage mask
+      with front-to-back draw (kills overdraw + needs no PSRAM depth
+      buffer, still sort-dependent); a per-pixel z-buffer (bulletproof,
+      keeps edge lines via a depth-biased no-z-write line pass,
+      ~+4–8 ms ⇒ ~21–23 FPS); a raycaster (rejected — compute-bound,
+      and exact per-pixel intersection buys nothing for flat-shaded
+      polygons). User wants full correctness ⇒ leaning z-buffer.
+      Decision/implementation deferred.
+
 ---
 
 ## Future FPS improvements

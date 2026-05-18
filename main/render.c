@@ -439,13 +439,11 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         bool  const front_visible = (zF_raw >= RENDER_NEAR_CLIP_Z);
         float const zF            = front_visible ? zF_raw : RENDER_NEAR_CLIP_Z;
 
-        // Project the 6 corners we actually need (front face + the
-        // back edge of the visible side + the back-top edge for the
-        // top face). The two unused back-bottom corners (LBB, RBB)
-        // would only be needed if we drew the bottom face, which the
-        // default renderer doesn't handle (cubes whose entire body
-        // sits above the camera want custom draw callbacks — they're
-        // out of scope here).
+        // Project all 8 corners. Front face + visible side + top use
+        // most of them; the back-bottom pair (LBB, RBB) feeds the
+        // bottom face, which the renderer now draws for elevated
+        // cubes (simple_platform blocks) once the camera passes
+        // beneath them.
         float sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_LTF, sy_LTF, sx_RTF, sy_RTF;
         float sx_LTB, sy_LTB, sx_RTB, sy_RTB, sx_LBB, sy_LBB, sx_RBB, sy_RBB;
         render_project(xL, yB, zF, &sx_LBF, &sy_LBF);
@@ -459,9 +457,10 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
 
         // Visible-face selection. A face is visible when the camera
         // is on the side its outward normal points to.
-        bool const show_left  = cam_x < xL;             // camera left of the cube → left face visible
-        bool const show_right = cam_x > xR;             // camera right of the cube → right face visible
-        bool const show_top   = render_camera().y > yT; // camera above the cube → top face visible
+        bool const show_left   = cam_x < xL;              // camera left of the cube → left face visible
+        bool const show_right  = cam_x > xR;              // camera right of the cube → right face visible
+        bool const show_top    = render_camera().y > yT;  // camera above the cube → top face visible
+        bool const show_bottom = render_camera().y < yB;  // camera below the cube → bottom face visible
 
         // Painter's order within the cube: side and top are at least
         // partially deeper than the front, so draw them first. The
@@ -486,6 +485,15 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
             direct_565_tri(fb_pixels, sx_LTF, sy_LTF, sx_RTB, sy_RTB, sx_LTB, sy_LTB, c);
         }
 
+        // Bottom face — quad LBF → RBF → RBB → LBB. Shaded with the
+        // side colour (undersides read as dark). Drawn before the
+        // front face so the front edge overpaints any sliver.
+        if (show_bottom) {
+            uint16_t const c = direct_565_pack(o->side_color, rev_endian);
+            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RBB, sy_RBB, c);
+            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBB, sy_RBB, sx_LBB, sy_LBB, c);
+        }
+
         if (front_visible) {
             uint16_t const c = direct_565_pack(o->front_color, rev_endian);
             direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF, c);
@@ -503,7 +511,7 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         // side of a tall pillar. Direct-565 line: one halfword
         // store per pixel, no PAX setter dispatch.
         uint16_t const wf = direct_565_pack(o->outline_color, rev_endian);
-        if (front_visible)               direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_RBF, (int)sy_RBF, wf);
+        if (front_visible || show_bottom) direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_RBF, (int)sy_RBF, wf);
         if (front_visible || show_top)   direct_565_line(fb_pixels, (int)sx_LTF, (int)sy_LTF, (int)sx_RTF, (int)sy_RTF, wf);
         if (front_visible || show_left)  direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LTF, (int)sy_LTF, wf);
         if (front_visible || show_right) direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RTF, (int)sy_RTF, wf);
@@ -517,6 +525,15 @@ void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
         if (show_right) {
             direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RBB, (int)sy_RBB, wf);
             direct_565_line(fb_pixels, (int)sx_RBB, (int)sy_RBB, (int)sx_RTB, (int)sy_RTB, wf);
+        }
+        // Bottom-face edges: the back-bottom edge plus the two
+        // bottom verticals. The left/right verticals may already be
+        // drawn by the side branches above — a repeated line is the
+        // same idempotent halfword write, so re-drawing is harmless.
+        if (show_bottom) {
+            direct_565_line(fb_pixels, (int)sx_LBB, (int)sy_LBB, (int)sx_RBB, (int)sy_RBB, wf);
+            direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LBB, (int)sy_LBB, wf);
+            direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RBB, (int)sy_RBB, wf);
         }
     }
 }
