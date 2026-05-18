@@ -16,7 +16,10 @@
 // (stacked, straddling and interpenetrating geometry all just work).
 //
 // Depth is stored as a scaled reciprocal-z: larger value = nearer.
-// The buffer is cleared to 0 (infinitely far) at scene_begin.
+// The depth buffer is never bulk-cleared: a parallel per-pixel frame
+// stamp marks which depths belong to the current frame, so a stale
+// pixel reads as infinitely far and scene_begin costs one counter
+// increment instead of a full-screen memset.
 //
 // Triangles are rasterized immediately on submit — the z-buffer makes
 // their order irrelevant. Wireframe edges are deferred and drawn by
@@ -24,13 +27,13 @@
 // so an edge wins against the coplanar face it outlines but still
 // loses to genuinely nearer geometry.
 
-// Allocate the depth buffer and the deferred-edge buffer (both PSRAM).
-// Call once at boot, before the first frame.
+// Allocate the depth buffer, frame-stamp plane and deferred-edge
+// buffer (all PSRAM). Call once at boot, before the first frame.
 void scene_init(void);
 
-// Begin a frame's 3D pass: bind the framebuffer, clear the depth
-// buffer, reset the deferred-edge buffer. Call once per frame before
-// any scene_tri / scene_line.
+// Begin a frame's 3D pass: bind the framebuffer, advance the frame
+// stamp (logically emptying the depth buffer), reset the deferred-
+// edge buffer. Call once per frame before any scene_tri / scene_line.
 void scene_begin(pax_buf_t* fb);
 
 // Submit a world-space triangle. Projected and rasterized immediately

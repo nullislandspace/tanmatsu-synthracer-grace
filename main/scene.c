@@ -13,30 +13,37 @@ static char const* TAG = "scene";
 
 // --- Depth encoding -----------------------------------------------------------
 //
-// Depth is the reciprocal of world-z (1/z), which is the quantity
-// that interpolates linearly in screen space under the pinhole
+// Depth is the reciprocal of world-z (1/z), the quantity that
+// interpolates linearly in screen space under the pinhole
 // projection. Near-clipped z is RENDER_NEAR_CLIP_Z (0.5), so 1/z
-// peaks at 2.0; SCENE_DEPTH_SCALE maps that to ~64000, leaving the
-// uint16 range comfortably unsaturated. Larger encoded value = nearer.
+// peaks at 2.0; SCENE_DEPTH_SCALE maps that to 64000 — inside the
+// uint16 range with headroom, so the rasterizer never has to clamp
+// the high end. Larger encoded value = nearer.
 #define SCENE_DEPTH_SCALE   32000.0f
 
 // Wireframe edges are nudged this fraction nearer (in 1/z space)
 // before the depth compare, so an edge reliably beats the coplanar
-// face it outlines without z-fighting. Small enough that it does not
-// punch an edge through genuinely nearer geometry.
+// face it outlines without z-fighting, while still losing to
+// genuinely nearer geometry.
 #define SCENE_LINE_BIAS     1.02f
 
-static inline uint16_t scene_depth16(float inv_z) {
-    float d = inv_z * SCENE_DEPTH_SCALE;
-    if (d < 0.0f)        d = 0.0f;
-    if (d > 65535.0f)    d = 65535.0f;
-    return (uint16_t)d;
-}
-
 // --- Buffers ------------------------------------------------------------------
+//
+// The depth buffer is never cleared. Instead a parallel 8-bit stamp
+// plane records, per pixel, the frame number that last wrote a depth
+// there. A depth value counts only when its stamp equals the current
+// frame; a stale stamp reads as "infinitely far". So every frame
+// starts with a logically-empty depth buffer for the cost of one
+// counter increment — no 768 KB memset — and depth traffic happens
+// only on pixels the 3D scene actually draws, not the whole screen.
+//
+// The stamp is 8-bit, so it wraps every 256 frames; a pixel that an
+// obstacle covered, then went exactly a 256-frame multiple without
+// being touched, then was covered again, could mis-resolve for one
+// pixel for one frame. That is invisible in practice. Frame 0 is
+// skipped on wrap so an untouched (zero-initialised) stamp cell never
+// matches a live frame.
 
-// Pixel count == framebuffer pixel count; the depth buffer is indexed
-// with the exact same direct_565_logical_index() mapping as the fb.
 #define SCENE_PIXELS  (DISPLAY_LOG_W * DISPLAY_RAW_STRIDE)
 
 // Deferred wireframe edges. ~80 obstacles * ~14 edges + the ship
@@ -52,29 +59,38 @@ typedef struct {
     uint16_t    packed;
 } scene_seg_t;
 
-static uint16_t*   s_depth   = NULL;
-static scene_seg_t* s_lines  = NULL;
-static int         s_line_n  = 0;
+static uint16_t*    s_depth   = NULL;   // encoded 1/z, indexed like the fb
+static uint8_t*     s_stamp   = NULL;   // frame tag per pixel
+static scene_seg_t* s_lines   = NULL;
+static int          s_line_n  = 0;
 
-static uint16_t*   s_fb      = NULL;
-static bool        s_rev     = false;
+static uint16_t*    s_fb      = NULL;
+static bool         s_rev     = false;
+static uint8_t      s_frame   = 0;      // current frame tag (never 0 while live)
 
 void scene_init(void) {
     s_depth = heap_caps_malloc(SCENE_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+    s_stamp = heap_caps_malloc(SCENE_PIXELS * sizeof(uint8_t),  MALLOC_CAP_SPIRAM);
     s_lines = heap_caps_malloc(SCENE_LINE_CAP * sizeof(scene_seg_t), MALLOC_CAP_SPIRAM);
-    if (!s_depth || !s_lines) {
-        ESP_LOGE(TAG, "scene buffer allocation failed (depth=%p lines=%p)",
-                 s_depth, s_lines);
+    if (!s_depth || !s_stamp || !s_lines) {
+        ESP_LOGE(TAG, "scene buffer allocation failed (depth=%p stamp=%p lines=%p)",
+                 s_depth, s_stamp, s_lines);
+        return;
     }
+    // One-time stamp clear so no garbage cell matches the first
+    // live frame tag (1). The depth buffer needs no init — a cell is
+    // only ever read after its stamp says it was written this frame.
+    memset(s_stamp, 0, SCENE_PIXELS * sizeof(uint8_t));
 }
 
 void scene_begin(pax_buf_t* fb) {
     s_fb     = (uint16_t*)pax_buf_get_pixels(fb);
     s_rev    = fb->reverse_endianness;
     s_line_n = 0;
-    if (s_depth) {
-        memset(s_depth, 0, SCENE_PIXELS * sizeof(uint16_t));
-    }
+    // Advance the frame tag; skip 0 so a zero-initialised stamp cell
+    // is never mistaken for "written this frame".
+    s_frame++;
+    if (s_frame == 0) s_frame = 1;
 }
 
 // --- Projection ---------------------------------------------------------------
@@ -95,38 +111,47 @@ static inline void scene_project(float x, float y, float z, scene_vtx_t* out) {
 // --- Triangle rasterizer ------------------------------------------------------
 
 // Fill one vertical run (logical x fixed) with a per-pixel depth
-// test. The depth across the run is the affine function
-// w(y) = A*x + B*y + C evaluated incrementally. Under PAX_O_ROT_CW a
-// +1 logical-y step is a -1 step in both the fb and depth indices.
+// test. Encoded depth across the run is the affine function
+// d(y) = As*x + Bs*y + Cs — already scaled into uint16 units, so the
+// inner loop is one float add per pixel (no multiply, no clamp on the
+// high end). Under PAX_O_ROT_CW a +1 logical-y step is a -1 step in
+// the fb / depth / stamp indices alike.
 static inline void scene_vrun(int lx, int y_top, int y_bot,
-                              float A, float B, float C, uint16_t packed) {
+                              float As, float Bs, float Cs, uint16_t packed) {
     if (lx < 0 || lx >= DISPLAY_LOG_W) return;
     if (y_top < 0)              y_top = 0;
     if (y_bot >= DISPLAY_LOG_H) y_bot = DISPLAY_LOG_H - 1;
     if (y_top > y_bot) return;
 
+    uint8_t const frame = s_frame;
     int const idx = direct_565_logical_index(lx, y_top);
     uint16_t* fp  = s_fb    + idx;
     uint16_t* zp  = s_depth + idx;
-    float     w   = A * (float)lx + B * (float)y_top + C;
+    uint8_t*  sp  = s_stamp + idx;
+    float     d   = As * (float)lx + Bs * (float)y_top + Cs;
     int       cnt = y_bot - y_top + 1;
     while (cnt-- > 0) {
-        uint16_t const d = scene_depth16(w);
-        if (d > *zp) { *zp = d; *fp = packed; }
-        fp--; zp--;
-        w += B;
+        int di = (int)d;
+        if (di < 0) di = 0;                      // sub-pixel edge overshoot guard
+        uint16_t const stored = (*sp == frame) ? *zp : 0;
+        if ((uint16_t)di > stored) {
+            *zp = (uint16_t)di;
+            *sp = frame;
+            *fp = packed;
+        }
+        fp--; zp--; sp--;
+        d += Bs;
     }
 }
 
 // Depth-tested flat-shaded triangle. Same logical-X column scan as
-// direct_565_tri (contiguous raw runs, cache-friendly), plus a
-// per-pixel 1/z depth test. The depth plane w = A*x + B*y + C is
-// derived from the three vertices' 1/z values before the x-sort.
+// direct_565_tri (contiguous raw runs, cache-friendly). The depth
+// plane d = As*x + Bs*y + Cs (in encoded uint16 units) is derived
+// from the three vertices' 1/z values before the x-sort.
 static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
                              uint16_t packed) {
-    // Depth plane through the three (sx, sy, w) points. The cross
-    // product of two edge vectors gives the plane normal; nz near
-    // zero means a degenerate (zero-area) triangle — skip it.
+    // Plane through the three (sx, sy, w) points; nz near zero is a
+    // degenerate (zero-area) triangle — skip it.
     float const ex1 = b.sx - a.sx, ey1 = b.sy - a.sy, ew1 = b.w - a.w;
     float const ex2 = c.sx - a.sx, ey2 = c.sy - a.sy, ew2 = c.w - a.w;
     float const nx  = ey1 * ew2 - ew1 * ey2;
@@ -134,12 +159,13 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     float const nz  = ex1 * ey2 - ey1 * ex2;
     if (nz > -1e-6f && nz < 1e-6f) return;
     float const inv_nz = 1.0f / nz;
-    float const A = -nx * inv_nz;
-    float const B = -ny * inv_nz;
-    float const C = a.w - A * a.sx - B * a.sy;
+    // Plane coefficients, pre-scaled into encoded-depth units so the
+    // per-pixel run does no multiply.
+    float const As = (-nx * inv_nz) * SCENE_DEPTH_SCALE;
+    float const Bs = (-ny * inv_nz) * SCENE_DEPTH_SCALE;
+    float const Cs = a.w * SCENE_DEPTH_SCALE - As * a.sx - Bs * a.sy;
 
-    // Sort vertices so x0 <= x1 <= x2 (w no longer needed — the plane
-    // has been captured in A/B/C).
+    // Sort vertices so x0 <= x1 <= x2 (w is now captured in As/Bs/Cs).
     float x0 = a.sx, y0 = a.sy, x1 = b.sx, y1 = b.sy, x2 = c.sx, y2 = c.sy;
     float tx, ty;
     if (x1 < x0) { tx=x0; ty=y0; x0=x1; y0=y1; x1=tx; y1=ty; }
@@ -167,7 +193,7 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
         float const yb = y0 + dydx_01 * dx;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        scene_vrun(x, (int)ceilf(yt), (int)floorf(yz), A, B, C, packed);
+        scene_vrun(x, (int)ceilf(yt), (int)floorf(yz), As, Bs, Cs, packed);
     }
     for (int x = ix_split; x < ix_endex; x++) {
         float const dx02 = (float)x - x0;
@@ -176,15 +202,16 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
         float const yb   = y1 + dydx_12 * dx12;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        scene_vrun(x, (int)ceilf(yt), (int)floorf(yz), A, B, C, packed);
+        scene_vrun(x, (int)ceilf(yt), (int)floorf(yz), As, Bs, Cs, packed);
     }
 }
 
 // --- Line rasterizer ----------------------------------------------------------
 
-// Depth-tested wireframe edge. Bresenham line with 1/z interpolated
-// along it; tests the depth buffer (with the SCENE_LINE_BIAS nudge)
-// but never writes it — an edge is an overlay, not a depth occluder.
+// Depth-tested wireframe edge. Bresenham line with encoded depth
+// interpolated along it; tests the depth buffer (with the
+// SCENE_LINE_BIAS nudge baked into the endpoint depths) but never
+// writes it — an edge is an overlay, not a depth occluder.
 static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     int const x0 = (int)lroundf(a.sx), y0 = (int)lroundf(a.sy);
     int const x1 = (int)lroundf(b.sx), y1 = (int)lroundf(b.sy);
@@ -195,29 +222,35 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     int const sy = (y0 < y1) ? 1 : -1;
     int       err = dx - dy;
 
-    int const steps = (dx > dy) ? dx : dy;
-    float     w     = a.w;
-    float const dw  = (steps > 0) ? (b.w - a.w) / (float)steps : 0.0f;
+    int   const steps = (dx > dy) ? dx : dy;
+    float const eda   = a.w * (SCENE_LINE_BIAS * SCENE_DEPTH_SCALE);
+    float const edb   = b.w * (SCENE_LINE_BIAS * SCENE_DEPTH_SCALE);
+    float       d     = eda;
+    float const dd    = (steps > 0) ? (edb - eda) / (float)steps : 0.0f;
 
-    int const ptr_dx = (sx > 0) ? DISPLAY_RAW_STRIDE : -DISPLAY_RAW_STRIDE;
-    int const ptr_dy = (sy > 0) ? -1 : 1;
+    uint8_t const frame  = s_frame;
+    int     const ptr_dx = (sx > 0) ? DISPLAY_RAW_STRIDE : -DISPLAY_RAW_STRIDE;
+    int     const ptr_dy = (sy > 0) ? -1 : 1;
 
     int const idx = direct_565_logical_index(x0, y0);
     uint16_t* fp  = s_fb    + idx;
     uint16_t* zp  = s_depth + idx;
+    uint8_t*  sp  = s_stamp + idx;
     int       lx  = x0;
     int       ly  = y0;
 
     while (1) {
         if (lx >= 0 && lx < DISPLAY_LOG_W && ly >= 0 && ly < DISPLAY_LOG_H) {
-            uint16_t const d = scene_depth16(w * SCENE_LINE_BIAS);
-            if (d >= *zp) *fp = packed;
+            int di = (int)d;
+            if (di < 0) di = 0;
+            uint16_t const stored = (*sp == frame) ? *zp : 0;
+            if ((uint16_t)di >= stored) *fp = packed;
         }
         if (lx == x1 && ly == y1) break;
         int const e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; lx += sx; fp += ptr_dx; zp += ptr_dx; }
-        if (e2 <  dx) { err += dx; ly += sy; fp += ptr_dy; zp += ptr_dy; }
-        w += dw;
+        if (e2 > -dy) { err -= dy; lx += sx; fp += ptr_dx; zp += ptr_dx; sp += ptr_dx; }
+        if (e2 <  dx) { err += dx; ly += sy; fp += ptr_dy; zp += ptr_dy; sp += ptr_dy; }
+        d += dd;
     }
 }
 

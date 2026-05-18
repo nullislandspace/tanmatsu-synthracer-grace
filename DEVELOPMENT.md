@@ -3277,6 +3277,58 @@
     - Builds clean (`make clean build`, `make verify`). On-device
       FPS impact to be measured.
 
+- 2026-05-19 — **Z-buffer first measurement + optimisation pass;
+  debug godmode.**
+    - **First on-device measurement:** the z-buffer pushed `obs`
+      6 → ~30 ms (FPS ~25 → ~16). Two causes: the 768 KB depth-clear
+      `memset` to PSRAM each frame, and the fill inner loop losing
+      its near-`memset` fast path (per pixel: float depth multiply,
+      clamp, cast, compare, two buffer writes).
+    - **Killed the clear — frame-stamp plane.** The frame-ID-in-the-
+      depth-word trick was rejected: it widens every per-pixel depth
+      access, and since the 3D scene covers most of the screen that
+      costs more than the clear it removes. Instead a parallel 8-bit
+      stamp plane (`s_stamp`, 384 KB PSRAM) records the frame tag
+      that last wrote each pixel's depth; a depth counts only when
+      its stamp == the current frame, else it reads as far.
+      `scene_begin` just increments the tag (skipping 0) — no memset.
+      Depth traffic is now proportional to drawn area, not the whole
+      screen. Stamp is 8-bit so it wraps every 256 frames — a
+      worst-case 1-pixel/1-frame mis-resolve, invisible in practice.
+    - **Tightened the fill loop.** The depth plane coefficients are
+      pre-scaled into encoded-uint16 units, so `scene_vrun` does one
+      float add per pixel — no multiply, no high-end clamp (the
+      near-clip guarantees the range), just a low-end overshoot
+      guard.
+    - **Debug godmode (G key).** Toggles `s_godmode`; while on, the
+      crash and stall end-of-run signals are forced false in the
+      physics pass, so the ship coasts through head-on hits and never
+      stalls — lets the run be slowed down / inspected. New slot-4
+      HUD readout below `sun=`: `god=ON/off x=.. y=..` (cyan when
+      active, grey when not). `input_consume_godmode_toggle()` mirrors
+      the TAB force-area debug hook.
+    - **Post-optimisation measurement.** `obs` 30 → ~21 ms, FPS
+      ~16 → ~20 — the pass recovered ~9 ms (≈6 ms was the clear,
+      ≈3 ms the tighter fill loop). Scoreboard across the three
+      stages of the z-buffer work:
+
+      | Phase | pre-z-buf | z-buf v1 | z-buf v2 |
+      |-------|-----------|----------|----------|
+      | obs   | 6 ms      | ~30 ms   | ~21 ms   |
+      | FPS   | ~25.5     | ~16      | ~20      |
+
+      The residual ~21 ms vs the old 6 ms is the intrinsic cost of
+      per-pixel correctness: every filled pixel does a depth + stamp
+      read + compare (three PSRAM regions touched — fb, depth, stamp
+      — vs one before), and ~1500 wireframe edges each depth-test per
+      pixel. Further `obs` gains are diminishing returns; the frame
+      is now bottlenecked by `bgflr` + `bgkick` (~25 ms, ~50% of the
+      frame), which is the real target for any future FPS work.
+      Smaller `obs` levers left, if wanted later: interleave depth +
+      stamp into one buffer for cache locality, move the line buffer
+      to internal SRAM, front-to-back order to skip color writes on
+      depth-rejected pixels.
+
 ---
 
 ## Future FPS improvements
