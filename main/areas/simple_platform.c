@@ -16,11 +16,11 @@
 // aligned. Width is a comfortable landing strip. y_base sits just
 // above the ship's grounded collision top (SHIP_BASE_Y +
 // SHIP_COLLISION_HEIGHT = 0.52) so the ship passes cleanly under;
-// the top face (y_base + height = 1.25) stays well inside a jump's
-// reach (jump peaks the belly ~1.78 world-y).
+// the top face sits at y_base + height = 2.0 — above a plain jump's
+// reach (~1.78), so the launch ramp is the intended way up.
 #define SP_BLOCK_HALF_W       1.5f
 #define SP_BLOCK_HALF_D       WALL_SEGMENT_HALF_D
-#define SP_BLOCK_Y_BASE       0.75f
+#define SP_BLOCK_Y_BASE       1.5f
 #define SP_BLOCK_HEIGHT       0.5f
 
 // Lead-in: clear run before the first block. The launch ramp sits
