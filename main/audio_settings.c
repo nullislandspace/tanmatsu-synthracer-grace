@@ -12,7 +12,7 @@ static char const KEY_HUM[]   = "audio_hum_on";
 
 static bool s_music_on = true;
 static bool s_sfx_on   = true;
-static bool s_hum_on   = true;
+static bool s_hum_on   = false;  // engine hum defaults off when unset in NVS
 
 static void load_one(nvs_handle_t h, char const* key, bool* out) {
     uint8_t v = 1;
