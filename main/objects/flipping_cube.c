@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "direct_565.h"
 #include "magicnumbers.h"
-#include "render.h"   // render_project, RENDER_NEAR_CLIP_Z, RENDER_CAM_Y
+#include "render.h"   // render_camera, RENDER_NEAR_CLIP_Z
+#include "scene.h"    // scene_tri, scene_line
 #include "sfx/sfx_cube_bump.h"
 #include "world.h"
 
@@ -120,56 +120,40 @@ static void flipping_physics(obstacle_t* o, world_state_t* w, float dt, float ca
     o->y_base  = 0.0f;
 }
 
-// Custom draw — projects the 8 rotated corners (4 cross-section ×
-// 2 z faces) and fills the visible side faces + the front face.
-// Same near-plane clipping rule as the default cube renderer:
-// drop the whole cube if the back face is already past the clip,
-// clip the front face to RENDER_NEAR_CLIP_Z otherwise.
+// Emit callback — hands the prism's geometry (4 rotated cross-section
+// corners × front/back z faces) to the scene as world-space triangles
+// and edges. Side faces are emitted only when camera-facing (a speed
+// optimisation); the front face is always emitted and the depth
+// buffer resolves occlusion against everything else.
 //
-// Face visibility uses the rotated 2D normal of each cross-section
-// edge vs the camera-edge midpoint vector. The "back" face (z=zB)
-// is never visible from a forward-pointing camera at z=0 with
-// obstacles at z > 0, so we skip it.
-static void flipping_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
+// Side-face visibility uses the rotated 2D normal of each cross-
+// section edge vs the camera-edge midpoint vector.
+static void flipping_emit(obstacle_t const* o) {
     flipping_state_t const* s = (flipping_state_t const*)o->scratch;
 
-    float const zF_raw = o->z_world - o->half_d;
-    float const zB     = o->z_world + o->half_d;
+    float const zF = o->z_world - o->half_d;   // near face
+    float const zB = o->z_world + o->half_d;   // far face
     if (zB < RENDER_NEAR_CLIP_Z) return;
-    bool  const front_visible = (zF_raw >= RENDER_NEAR_CLIP_Z);
-    float const zF            = front_visible ? zF_raw : RENDER_NEAR_CLIP_Z;
 
     float cx[4], cy[4];
     flipping_compute_corners(s, cx, cy);
 
-    // 8 projected corners: cross-section × (front z, back z).
-    float sxF[4], syF[4], sxB[4], syB[4];
-    for (int i = 0; i < 4; i++) {
-        render_project(cx[i], cy[i], zF, &sxF[i], &syF[i]);
-        render_project(cx[i], cy[i], zB, &sxB[i], &syB[i]);
-    }
+    uint32_t const front_c = o->front_color;
+    uint32_t const side_c  = o->side_color;
+    uint32_t const top_c   = o->top_color;
+    uint32_t const out_c   = o->outline_color;
 
-    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    bool      const rev       = fb->reverse_endianness;
-    uint16_t  const front_pk  = direct_565_pack(o->front_color,   rev);
-    uint16_t  const side_pk   = direct_565_pack(o->side_color,    rev);
-    uint16_t  const top_pk    = direct_565_pack(o->top_color,     rev);
-    uint16_t  const out_pk    = direct_565_pack(o->outline_color, rev);
-
-    // Determine which side faces are visible. The cross-section is
-    // listed CCW, so the outward normal of edge i→(i+1) is the
-    // right-perpendicular of the edge vector:
-    //   edge = (B-A); normal = (edge.y, -edge.x)
-    // The face is visible iff `normal · (camera_xy - edge_mid_xy) > 0`.
-    // Camera sits at (cam_x, RENDER_CAM_Y).
-    //
     // Face role tagging — used for colour choice. The originally-top
     // edge (TR→TL = index 2) gets the top palette so the highlighted
-    // surface follows the cube as it tips. Both adjacent vertical
-    // edges share the standard side palette. The bottom edge
-    // (BL→BR = index 0) is the cube's contact with the ground; if
-    // the rotation lifts it visibly into view it borrows side palette.
-    uint16_t const face_color[4] = { side_pk, side_pk, top_pk, side_pk };
+    // surface follows the cube as it tips; the others use the side
+    // palette.
+    uint32_t const face_color[4] = { side_c, side_c, top_c, side_c };
+
+    // Which side faces are camera-facing. The cross-section is listed
+    // CCW, so the outward normal of edge i→(i+1) is the right-
+    // perpendicular of the edge vector: normal = (edge.y, -edge.x).
+    // Visible iff normal · (camera_xy - edge_mid_xy) > 0.
+    render_camera_t const cam = render_camera();
     bool show[4];
     for (int i = 0; i < 4; i++) {
         int   const j   = (i + 1) & 3;
@@ -179,60 +163,37 @@ static void flipping_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
         float const ny  = -ex;
         float const mx  = 0.5f * (cx[i] + cx[j]);
         float const my  = 0.5f * (cy[i] + cy[j]);
-        show[i] = (nx * (cam_x - mx) + ny * (render_camera().y - my)) > 0.0f;
+        show[i] = (nx * (cam.x - mx) + ny * (cam.y - my)) > 0.0f;
     }
 
-    // Painter's order: side faces first (they're partially behind
-    // the front face), then the front face overpaints any sliver
-    // bleeding through to the front edge. Wireframe last so the
-    // outline stays crisp.
+    // Side faces — quad F[i] F[j] B[j] B[i], two triangles each.
     for (int i = 0; i < 4; i++) {
         if (!show[i]) continue;
         int const j = (i + 1) & 3;
-        direct_565_tri(fb_pixels,
-                       sxF[i], syF[i], sxF[j], syF[j], sxB[j], syB[j],
-                       face_color[i]);
-        direct_565_tri(fb_pixels,
-                       sxF[i], syF[i], sxB[j], syB[j], sxB[i], syB[i],
-                       face_color[i]);
+        scene_tri(cx[i], cy[i], zF,  cx[j], cy[j], zF,  cx[j], cy[j], zB,
+                  face_color[i]);
+        scene_tri(cx[i], cy[i], zF,  cx[j], cy[j], zB,  cx[i], cy[i], zB,
+                  face_color[i]);
     }
 
-    if (front_visible) {
-        // Cross-section is a (rotated) convex quad — fan from corner
-        // 0 covers it with two triangles.
-        direct_565_tri(fb_pixels,
-                       sxF[0], syF[0], sxF[1], syF[1], sxF[2], syF[2],
-                       front_pk);
-        direct_565_tri(fb_pixels,
-                       sxF[0], syF[0], sxF[2], syF[2], sxF[3], syF[3],
-                       front_pk);
-    }
+    // Front face — the (rotated) convex cross-section quad, fanned
+    // from corner 0.
+    scene_tri(cx[0], cy[0], zF,  cx[1], cy[1], zF,  cx[2], cy[2], zF,  front_c);
+    scene_tri(cx[0], cy[0], zF,  cx[2], cy[2], zF,  cx[3], cy[3], zF,  front_c);
 
     // Wireframe. The outline_color carries the per-subtype red/green
-    // tint, so drawing all visible edges is what makes the two
-    // subtypes visually distinct. Front quad always (if visible),
-    // back quad edge per visible side face, plus the connecting
-    // verticals at the shared corners.
-    if (front_visible) {
-        for (int i = 0; i < 4; i++) {
-            int const j = (i + 1) & 3;
-            direct_565_line(fb_pixels,
-                            (int)sxF[i], (int)syF[i],
-                            (int)sxF[j], (int)syF[j], out_pk);
-        }
+    // tint. Front quad always; back-quad edge + connecting verticals
+    // for each visible side face.
+    for (int i = 0; i < 4; i++) {
+        int const j = (i + 1) & 3;
+        scene_line(cx[i], cy[i], zF,  cx[j], cy[j], zF,  out_c);
     }
     for (int i = 0; i < 4; i++) {
         if (!show[i]) continue;
         int const j = (i + 1) & 3;
-        direct_565_line(fb_pixels,
-                        (int)sxB[i], (int)syB[i],
-                        (int)sxB[j], (int)syB[j], out_pk);
-        direct_565_line(fb_pixels,
-                        (int)sxF[i], (int)syF[i],
-                        (int)sxB[i], (int)syB[i], out_pk);
-        direct_565_line(fb_pixels,
-                        (int)sxF[j], (int)syF[j],
-                        (int)sxB[j], (int)syB[j], out_pk);
+        scene_line(cx[i], cy[i], zB,  cx[j], cy[j], zB,  out_c);
+        scene_line(cx[i], cy[i], zF,  cx[i], cy[i], zB,  out_c);
+        scene_line(cx[j], cy[j], zF,  cx[j], cy[j], zB,  out_c);
     }
 }
 
@@ -252,7 +213,7 @@ obstacle_t* flipping_cube_spawn(world_state_t* w, float x, float z, int directio
     s->x_initial    = x;
     s->landed_fired = false;
     o->physics   = flipping_physics;
-    o->draw      = flipping_draw;
+    o->emit      = flipping_emit;
     // collide left at NULL → default OBSTACLE_KIND_CUBE dispatch:
     //   head-on while the player approaches the upright cube, scrape
     //   if it lands and the player's coming around its trailing edge.

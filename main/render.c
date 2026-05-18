@@ -5,7 +5,7 @@
 #include "direct_565.h"
 #include "esp_timer.h"
 #include "magicnumbers.h"
-#include "shapes/pax_tris.h"
+#include "scene.h"
 
 // Scale every RGB channel of an ARGB pax_col_t by `scale` (0..1).
 // Alpha kept intact. Same shape as the dim_argb helper in game.c
@@ -20,21 +20,16 @@ static inline pax_col_t dim_argb_render(pax_col_t col, float scale) {
 
 // Per-obstacle dimensions and colours come from the obstacle_t
 // itself (world.c sets them at spawn time) so the renderer treats
-// every entry — dynamic obstacles, side-wall segments, future
-// pickups — uniformly. The cube has a square footprint when
-// half_w == half_d; non-square footprints (e.g. wall segments
-// running along z) work without any special-case code.
+// every entry — dynamic obstacles, side-wall segments, pickups —
+// uniformly. The cube has a square footprint when half_w == half_d;
+// non-square footprints (e.g. wall segments running along z) work
+// without any special-case code.
 //
-// Near-plane clipping. When the camera moves into a long obstacle's
-// z range (the front edge passes the camera before the back does)
-// the projection of the front face heads to infinity. We don't try
-// to render anything closer than RENDER_NEAR_CLIP_Z; if the front edge is
-// past the clip plane we drop the front face entirely and clip the
-// side and top faces' front edges back to RENDER_NEAR_CLIP_Z. The whole
-// cube is skipped if the back edge is also past the clip — by then
-// the obstacle's despawn condition will fire on the next frame.
-// (Constant lives in render.h so custom-draw object modules clip
-// their own geometry consistently.)
+// Near-plane handling now lives in scene.c: scene_tri / scene_line
+// clamp each vertex's z to RENDER_NEAR_CLIP_Z and drop geometry that
+// is wholly behind the near plane, so the emitters below just hand
+// over raw world-space geometry. The whole-object `z` culls kept
+// here are a cheap early-out, not a correctness requirement.
 
 // The camera global. x defaults to track centre, y to the resting
 // (grounded) eye height; main.c overwrites both every frame.
@@ -88,9 +83,9 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
         float const shadow_len  = o->height * factor;
         float const z_near_raw  = z_far - shadow_len;                // toward camera
 
-        // Same near-plane clipping rule as render_obstacles: drop
-        // the whole shadow if its far edge is already past the
-        // near clip; otherwise clip the near edge of the quad to
+        // Same near-plane clipping rule as the emitters: drop the
+        // whole shadow if its far edge is already past the near
+        // clip; otherwise clip the near edge of the quad to
         // RENDER_NEAR_CLIP_Z so the projection doesn't blow up.
         if (z_far < RENDER_NEAR_CLIP_Z) continue;
         float const z_near = (z_near_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : z_near_raw;
@@ -110,78 +105,61 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
     }
 }
 
-// Draw one pickup as a square-based pyramid (used by Tri pickup —
-// Phase 6). Apex sits at (obs.x, obs.height, obs.z); the 4 base
-// corners are on the y=0 plane at obs.x±half_w / obs.z±half_d.
-// Painter's order inside the pyramid: visible side face first,
-// then front. The back face is never visible (camera always
-// sits in front and slightly above), so it's skipped. Colours
-// come from the obstacle's palette unchanged — no pulse — so
-// the same renderer serves any pyramid-shaped pickup that wants
-// to override the cube default; the booster used this shape pre-
-// Phase 6 but now uses `render_booster_icosahedron` below.
-static void render_pickup_pyramid(uint16_t* fb_pixels, obstacle_t const* o, float cam_x,
-                                  bool rev_endian) {
-    // Whole-pyramid near-plane cull. Pyramids are short in z
-    // (half_d = 0.4) and small, so once the apex is at or behind
-    // RENDER_NEAR_CLIP_Z just drop the whole thing — saves the
-    // projection / clipping math for almost-passed pickups.
+// ================================================================
+// Geometry emitters.
+//
+// Each emitter hands its object's geometry to the scene as world-
+// space triangles + wireframe edges. No projection, no rasterization,
+// no draw-order reasoning — scene.c's z-buffer resolves visibility.
+// Per-face camera-side culls are kept purely as a speed optimisation
+// (they roughly halve the triangle count); the result is identical
+// with or without them because the depth test would discard the
+// hidden faces anyway.
+// ================================================================
+
+// Tri pickup — a square-based pyramid. Apex at (x, y_base+height, z);
+// the four base corners sit on the y_base plane.
+static void emit_pyramid(obstacle_t const* o) {
     if (o->z_world < RENDER_NEAR_CLIP_Z) return;
 
     float const xL = o->x_world - o->half_w;
     float const xR = o->x_world + o->half_w;
     float const zF = o->z_world - o->half_d;
     float const zB = o->z_world + o->half_d;
-    float const zN = (zF < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : zF;
-
-    // 5 projected vertices: apex + 4 base corners (clockwise from
-    // front-left when viewed from above).
-    float sx_A,  sy_A;
-    float sx_FL, sy_FL, sx_FR, sy_FR;
-    float sx_BL, sy_BL, sx_BR, sy_BR;
-    // Base sits on o->y_base, apex o->height above it — so a pickup
-    // resting on a platform top (y_base > 0) renders elevated.
     float const yB = o->y_base;
+    float const xA = o->x_world;
     float const yA = o->y_base + o->height;
-    render_project(o->x_world, yA, o->z_world, &sx_A,  &sy_A);
-    render_project(xL,         yB, zN,          &sx_FL, &sy_FL);
-    render_project(xR,         yB, zN,          &sx_FR, &sy_FR);
-    render_project(xL,         yB, zB,          &sx_BL, &sy_BL);
-    render_project(xR,         yB, zB,          &sx_BR, &sy_BR);
+    float const zA = o->z_world;
 
-    bool const show_left  = cam_x < o->x_world;
-    bool const show_right = cam_x > o->x_world;
+    render_camera_t const cam = render_camera();
+    bool const show_left  = cam.x < o->x_world;
+    bool const show_right = cam.x > o->x_world;
 
-    uint16_t const front_packed = direct_565_pack(o->front_color, rev_endian);
-    uint16_t const side_packed  = direct_565_pack(o->side_color,  rev_endian);
-    uint16_t const out_packed   = direct_565_pack(o->outline_color, rev_endian);
+    uint32_t const fc = o->front_color;
+    uint32_t const sc = o->side_color;
+    uint32_t const oc = o->outline_color;
 
-    // Side first (whichever's facing the camera), then front. Back
-    // face never drawn — camera is always in front of the pickup.
+    // Front face, then whichever side faces the camera. The back
+    // face is never camera-facing, so it is not emitted.
+    scene_tri(xA, yA, zA,  xR, yB, zF,  xL, yB, zF,  fc);
+    if (show_left)  scene_tri(xA, yA, zA,  xL, yB, zF,  xL, yB, zB,  sc);
+    if (show_right) scene_tri(xA, yA, zA,  xR, yB, zB,  xR, yB, zF,  sc);
+
+    scene_line(xA, yA, zA,  xL, yB, zF,  oc);
+    scene_line(xA, yA, zA,  xR, yB, zF,  oc);
+    scene_line(xL, yB, zF,  xR, yB, zF,  oc);
     if (show_left) {
-        direct_565_tri(fb_pixels, sx_A, sy_A, sx_FL, sy_FL, sx_BL, sy_BL, side_packed);
-    } else if (show_right) {
-        direct_565_tri(fb_pixels, sx_A, sy_A, sx_BR, sy_BR, sx_FR, sy_FR, side_packed);
+        scene_line(xA, yA, zA,  xL, yB, zB,  oc);
+        scene_line(xL, yB, zF,  xL, yB, zB,  oc);
     }
-    direct_565_tri(fb_pixels, sx_A, sy_A, sx_FR, sy_FR, sx_FL, sy_FL, front_packed);
-
-    // Wireframe: apex to each base corner of visible faces + the
-    // visible base edges. Outline stays bright for a crisp
-    // silhouette regardless of the body's fill colour.
-    direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_FL, (int)sy_FL, out_packed);
-    direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_FR, (int)sy_FR, out_packed);
-    direct_565_line(fb_pixels, (int)sx_FL, (int)sy_FL, (int)sx_FR, (int)sy_FR, out_packed);
-    if (show_left) {
-        direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_BL, (int)sy_BL, out_packed);
-        direct_565_line(fb_pixels, (int)sx_FL, (int)sy_FL, (int)sx_BL, (int)sy_BL, out_packed);
-    } else if (show_right) {
-        direct_565_line(fb_pixels, (int)sx_A,  (int)sy_A,  (int)sx_BR, (int)sy_BR, out_packed);
-        direct_565_line(fb_pixels, (int)sx_FR, (int)sy_FR, (int)sx_BR, (int)sy_BR, out_packed);
+    if (show_right) {
+        scene_line(xA, yA, zA,  xR, yB, zB,  oc);
+        scene_line(xR, yB, zF,  xR, yB, zB,  oc);
     }
 }
 
 // ----------------------------------------------------------------
-// Booster icosahedron (Phase 6 — 2026-05-14 design refresh).
+// Booster icosahedron.
 // ----------------------------------------------------------------
 
 // Golden ratio. Regular icosahedron vertices land at
@@ -190,10 +168,7 @@ static void render_pickup_pyramid(uint16_t* fb_pixels, obstacle_t const* o, floa
 #define ICO_PHI 1.618033988749895f
 
 // Local-space vertex coordinates, multiplied by ICO_SCALE at use
-// time to fit GAME_BOOSTER_HALF_W. Max abs coordinate is φ, so
-// the bounding-box half-extent of the un-scaled icosahedron is
-// also φ; ICO_SCALE = HALF_W / φ scales it into the booster's
-// collision footprint.
+// time to fit GAME_BOOSTER_HALF_W.
 #define ICO_SCALE (GAME_BOOSTER_HALF_W / ICO_PHI)
 
 static float const ICO_VERTS[12][3] = {
@@ -212,11 +187,8 @@ static float const ICO_VERTS[12][3] = {
 };
 
 // 20 faces of a regular icosahedron, each a triple of vertex
-// indices. Order chosen so each vertex appears in exactly 5
-// faces (verified by topology). Winding doesn't matter for our
-// back-face cull (which uses the face centroid direction, not the
-// triangle's cross-product normal) — the cull rule is purely
-// geometric for a centered convex polyhedron.
+// indices. Winding doesn't matter — the back-face cull uses the
+// face centroid direction, not the triangle's cross-product normal.
 static uint8_t const ICO_FACES[20][3] = {
     {  0,  8,  4 }, {  0,  4,  6 }, {  0,  6, 10 }, {  0, 10,  2 }, {  0,  2,  8 },
     {  3,  1,  9 }, {  3, 11,  1 }, {  3,  7, 11 }, {  3,  5,  7 }, {  3,  9,  5 },
@@ -224,46 +196,31 @@ static uint8_t const ICO_FACES[20][3] = {
     { 10, 11,  7 }, { 10,  7,  2 }, {  2,  7,  5 }, {  2,  5,  8 }, {  8,  5,  9 },
 };
 
-// Render the booster as a rotating regular icosahedron. The
-// rotation phase (`angle` in radians) is computed once per frame
-// by the caller and shared across all boosters in the scene, so
-// every booster spins in lockstep with the global time clock.
+// Emit the booster as a rotating regular icosahedron. The rotation
+// phase (`angle` in radians) is computed once per frame by the
+// caller and shared across all boosters so they spin in lockstep.
 //
-// Pipeline per booster:
-//   1. Rotate all 12 vertices around the Y axis by `angle`.
-//   2. Translate to world, project to screen.
-//   3. For each face, compute the local rotated centroid; this
-//      direction IS the face's outward normal (property of any
-//      face centroid on a convex polyhedron centred at origin).
-//      Back-face cull via the dot product of that direction with
-//      the view direction (face → camera).
-//   4. For visible faces, compute a face-normal lighting tint and
-//      draw the filled triangle.
-//   5. Stroke each visible face's three edges. Edges shared
-//      between two visible faces get drawn twice but `direct_565_line`
-//      is idempotent and the outline stays crisp.
-//
-// For a convex polyhedron after back-face culling, visible faces
-// don't overlap in 2D projection — no need to z-sort within the
-// icosahedron's own faces.
-static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o, float cam_x,
-                                       bool rev_endian, float angle) {
+//   1. Rotate all 12 vertices around the Y axis by `angle`, keeping
+//      both the local rotated positions (for the centroid maths) and
+//      the world positions (for emission).
+//   2. For each face, the local rotated centroid direction IS the
+//      face's outward normal (centred convex polyhedron). Back-face
+//      cull via the dot product with the view direction.
+//   3. For visible faces, compute a face-normal lighting tint and
+//      emit the filled triangle + its three edges.
+static void emit_icosahedron(obstacle_t const* o, float angle) {
     if (o->z_world < RENDER_NEAR_CLIP_Z) return;
 
     float const cosa = cosf(angle);
     float const sina = sinf(angle);
 
-    // Y-centre of the icosahedron in world space — the collision
-    // AABB is [y_base, y_base + HEIGHT], so the icosahedron centres
-    // at y_base + half-height (y_base is non-zero for a booster
-    // resting on a platform top).
+    // Y-centre of the icosahedron: the collision AABB is
+    // [y_base, y_base + HEIGHT], so it centres at y_base + half-height.
     float const y_centre = o->y_base + GAME_BOOSTER_HEIGHT * 0.5f;
 
-    // Rotated local vertex positions + their projected screen
-    // coordinates. Keep both so face centroid math (back-face cull
-    // + lighting) can use the rotated local vectors directly.
+    // Rotated local vertex positions + their world positions.
     float lvx[12], lvy[12], lvz[12];
-    float sx[12], sy[12];
+    float wvx[12], wvy[12], wvz[12];
     for (int i = 0; i < 12; i++) {
         float const x = ICO_VERTS[i][0] * ICO_SCALE;
         float const y = ICO_VERTS[i][1] * ICO_SCALE;
@@ -275,58 +232,43 @@ static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o,
         float const zr = -x * sina + z * cosa;
 
         lvx[i] = xr; lvy[i] = yr; lvz[i] = zr;
-
-        float const wx = o->x_world + xr;
-        float const wy = y_centre   + yr;
-        float const wz = o->z_world + zr;
-        render_project(wx, wy, wz, &sx[i], &sy[i]);
+        wvx[i] = o->x_world + xr;
+        wvy[i] = y_centre   + yr;
+        wvz[i] = o->z_world + zr;
     }
 
     // Lighting direction (front-top-left, fixed in world space).
-    // Picked so the front faces of the icosahedron — the ones the
-    // player sees most — sit somewhere between the lit and the
-    // mid-tone, making the rotation visibly modulate the brightness
-    // of individual faces over time.
     float const light_x = -0.4f;
     float const light_y =  0.7f;
     float const light_z = -0.6f;
 
-    uint16_t const out_packed = direct_565_pack(o->outline_color, rev_endian);
+    render_camera_t const cam = render_camera();
 
     for (int f = 0; f < 20; f++) {
         int const a = ICO_FACES[f][0];
         int const b = ICO_FACES[f][1];
         int const c = ICO_FACES[f][2];
 
-        // Local-space face centroid (already rotated, since lvx/y/z
-        // hold rotated positions). For a centred convex polyhedron,
-        // the centroid vector from origin IS the face's outward
-        // normal direction — saves a cross product.
+        // Local-space (rotated) face centroid — the outward normal
+        // direction for a centred convex polyhedron.
         float const cx_l = (lvx[a] + lvx[b] + lvx[c]) * (1.0f / 3.0f);
         float const cy_l = (lvy[a] + lvy[b] + lvy[c]) * (1.0f / 3.0f);
         float const cz_l = (lvz[a] + lvz[b] + lvz[c]) * (1.0f / 3.0f);
 
         // World-space centroid + view direction (face → camera).
-        // Camera sits at (cam_x, render_camera().y, 0).
         float const cx_w = o->x_world + cx_l;
         float const cy_w = y_centre   + cy_l;
         float const cz_w = o->z_world + cz_l;
-        float const dvx = cam_x              - cx_w;
-        float const dvy = render_camera().y  - cy_w;
-        float const dvz = 0.0f               - cz_w;
+        float const dvx  = cam.x - cx_w;
+        float const dvy  = cam.y - cy_w;
+        float const dvz  = 0.0f  - cz_w;
 
-        // Back-face cull. Outward normal (cx_l, cy_l, cz_l) needs a
-        // positive dot product with the view direction to be facing
-        // the camera.
+        // Back-face cull.
         float const dot_view = cx_l * dvx + cy_l * dvy + cz_l * dvz;
         if (dot_view <= 0.0f) continue;
 
-        // Lighting tint. Normalise the rotated centroid (face
-        // centroids on a regular icosahedron all have similar but
-        // not identical lengths, so we do this to keep brightness
-        // consistent across faces). Then dot with the fixed light
-        // direction; positive = lit, clamp at 0.
-        float const len = sqrtf(cx_l * cx_l + cy_l * cy_l + cz_l * cz_l);
+        // Lighting tint from the normalised face normal.
+        float const len     = sqrtf(cx_l * cx_l + cy_l * cy_l + cz_l * cz_l);
         float const inv_len = (len > 1e-6f) ? (1.0f / len) : 0.0f;
         float const nx = cx_l * inv_len;
         float const ny = cy_l * inv_len;
@@ -335,205 +277,110 @@ static void render_booster_icosahedron(uint16_t* fb_pixels, obstacle_t const* o,
         if (d < 0.0f) d = 0.0f;
         float const tint = 0.55f + 0.45f * d;
 
-        // Alternate front_color / side_color by face index so the
-        // icosahedron has visible two-tone faceting even before the
-        // lighting tint kicks in.
+        // Alternate front_color / side_color by face index for a
+        // visible two-tone faceting.
         uint32_t const base_col = (f & 1) ? o->side_color : o->front_color;
-        uint16_t const fill_packed = direct_565_pack(dim_argb_render(base_col, tint),
-                                                     rev_endian);
 
-        direct_565_tri(fb_pixels,
-                       sx[a], sy[a], sx[b], sy[b], sx[c], sy[c],
-                       fill_packed);
+        scene_tri(wvx[a], wvy[a], wvz[a],
+                  wvx[b], wvy[b], wvz[b],
+                  wvx[c], wvy[c], wvz[c],
+                  dim_argb_render(base_col, tint));
 
-        // Edges of this face. Pairs that are shared with another
-        // visible face will be drawn twice; that's cheaper than
-        // building an edge-visibility mask and the line draws are
-        // idempotent.
-        direct_565_line(fb_pixels, (int)sx[a], (int)sy[a], (int)sx[b], (int)sy[b], out_packed);
-        direct_565_line(fb_pixels, (int)sx[b], (int)sy[b], (int)sx[c], (int)sy[c], out_packed);
-        direct_565_line(fb_pixels, (int)sx[c], (int)sy[c], (int)sx[a], (int)sy[a], out_packed);
+        scene_line(wvx[a], wvy[a], wvz[a], wvx[b], wvy[b], wvz[b], o->outline_color);
+        scene_line(wvx[b], wvy[b], wvz[b], wvx[c], wvy[c], wvz[c], o->outline_color);
+        scene_line(wvx[c], wvy[c], wvz[c], wvx[a], wvy[a], wvz[a], o->outline_color);
     }
 }
 
-void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x) {
-    // Build an index list over the active subset, then sort it
-    // descending by z so painter's algorithm draws far → near. n is
-    // bounded by the pool size (64) so insertion sort is plenty. We
-    // sort by the obstacle's centre z_world; obstacles rarely overlap
-    // in z so this is a fine proxy for the cube's actual extent.
-    int idx[WORLD_OBSTACLE_POOL_SIZE];
-    int n = 0;
-    for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
-        if (w->obstacles[i].active) idx[n++] = i;
+// Default cube / wall / gate-slab. y range is [y_base, y_base+height].
+static void emit_cube(obstacle_t const* o) {
+    float const xL = o->x_world - o->half_w;
+    float const xR = o->x_world + o->half_w;
+    float const zF = o->z_world - o->half_d;
+    float const zB = o->z_world + o->half_d;
+    float const yB = o->y_base;
+    float const yT = o->y_base + o->height;
+    if (zB < RENDER_NEAR_CLIP_Z) return;
+
+    render_camera_t const cam = render_camera();
+    bool const show_left   = cam.x < xL;   // left face's normal faces the camera
+    bool const show_right  = cam.x > xR;
+    bool const show_top    = cam.y > yT;
+    bool const show_bottom = cam.y < yB;
+
+    uint32_t const fc = o->front_color;
+    uint32_t const sc = o->side_color;
+    uint32_t const tc = o->top_color;
+    uint32_t const oc = o->outline_color;
+
+    // Front face (-z normal) always faces the camera (camera is at
+    // z = 0, the cube is at z > 0). The other faces are emitted only
+    // when camera-facing — a pure speed optimisation.
+    scene_tri(xL, yB, zF,  xR, yB, zF,  xR, yT, zF,  fc);
+    scene_tri(xL, yB, zF,  xR, yT, zF,  xL, yT, zF,  fc);
+    if (show_left) {
+        scene_tri(xL, yB, zF,  xL, yT, zF,  xL, yT, zB,  sc);
+        scene_tri(xL, yB, zF,  xL, yT, zB,  xL, yB, zB,  sc);
     }
-    for (int i = 1; i < n; i++) {
-        int   k    = idx[i];
-        float zk   = w->obstacles[k].z_world;
-        int   j    = i - 1;
-        while (j >= 0 && w->obstacles[idx[j]].z_world < zk) {
-            idx[j + 1] = idx[j];
-            j--;
-        }
-        idx[j + 1] = k;
+    if (show_right) {
+        scene_tri(xR, yB, zF,  xR, yT, zF,  xR, yT, zB,  sc);
+        scene_tri(xR, yB, zF,  xR, yT, zB,  xR, yB, zB,  sc);
+    }
+    if (show_top) {
+        scene_tri(xL, yT, zF,  xR, yT, zF,  xR, yT, zB,  tc);
+        scene_tri(xL, yT, zF,  xR, yT, zB,  xL, yT, zB,  tc);
+    }
+    if (show_bottom) {
+        scene_tri(xL, yB, zF,  xR, yB, zF,  xR, yB, zB,  sc);
+        scene_tri(xL, yB, zF,  xR, yB, zB,  xL, yB, zB,  sc);
     }
 
-    // Wireframe outlines bypass PAX and write straight into the
-    // framebuffer halfwords via direct_565_line. The pre-packed
-    // colour is recomputed per cube because each obstacle carries
-    // its own outline_color, but that's one pack per cube (not per
-    // line or per pixel). Triangle fills stay on PAX —
-    // pax_range_setter_16bpp is already an optimal halfword memset
-    // for solid horizontal runs.
-    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    bool      const rev_endian = fb->reverse_endianness;
+    // All 12 edges, emitted unconditionally. The depth test (with the
+    // small edge bias) hides whichever edges a face occludes, so the
+    // old per-edge visibility bookkeeping is no longer needed.
+    scene_line(xL, yB, zF,  xR, yB, zF,  oc);   // front quad
+    scene_line(xR, yB, zF,  xR, yT, zF,  oc);
+    scene_line(xR, yT, zF,  xL, yT, zF,  oc);
+    scene_line(xL, yT, zF,  xL, yB, zF,  oc);
+    scene_line(xL, yB, zB,  xR, yB, zB,  oc);   // back quad
+    scene_line(xR, yB, zB,  xR, yT, zB,  oc);
+    scene_line(xR, yT, zB,  xL, yT, zB,  oc);
+    scene_line(xL, yT, zB,  xL, yB, zB,  oc);
+    scene_line(xL, yB, zF,  xL, yB, zB,  oc);   // connectors
+    scene_line(xR, yB, zF,  xR, yB, zB,  oc);
+    scene_line(xL, yT, zF,  xL, yT, zB,  oc);
+    scene_line(xR, yT, zF,  xR, yT, zB,  oc);
+}
 
+void render_submit_obstacles(world_state_t const* w) {
     // Booster rotation angle, computed once per frame and shared by
-    // every booster so they spin in lockstep. The icosahedron does
-    // one full Y-axis rotation per `GAME_BOOSTER_ROTATION_PERIOD_S`
-    // (currently 1.0 s). The modulo on now_us keeps the float small
-    // so the modf into [0, 1) inside sinf/cosf stays well-conditioned
+    // every booster so they spin in lockstep. One full Y-axis
+    // rotation per GAME_BOOSTER_ROTATION_PERIOD_S. The modulo on
+    // now_us keeps the float small so the fmodf stays well-conditioned
     // even after the device has been running for hours.
-    int64_t const now_us         = esp_timer_get_time();
-    float   const time_s         = (float)(now_us % 600000000LL) * 1e-6f;
-    float   const booster_angle  = fmodf(time_s, GAME_BOOSTER_ROTATION_PERIOD_S)
-                                   / GAME_BOOSTER_ROTATION_PERIOD_S
-                                   * (2.0f * (float)M_PI);
+    int64_t const now_us        = esp_timer_get_time();
+    float   const time_s        = (float)(now_us % 600000000LL) * 1e-6f;
+    float   const booster_angle = fmodf(time_s, GAME_BOOSTER_ROTATION_PERIOD_S)
+                                  / GAME_BOOSTER_ROTATION_PERIOD_S
+                                  * (2.0f * (float)M_PI);
 
-    for (int k = 0; k < n; k++) {
-        obstacle_t const* o = &w->obstacles[idx[k]];
+    // No sort — the scene's z-buffer resolves visibility per pixel,
+    // so obstacles are emitted in pool order.
+    for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+        obstacle_t const* o = &w->obstacles[i];
+        if (!o->active) continue;
 
-        // Per-object draw callback wins when set. Otherwise default
-        // dispatch: pickup boosters as a rotating icosahedron (Phase
-        // 6), Tri pickups as a pyramid (same shape the booster used
-        // pre-Phase-6, copied here so the two pickups visually drift
-        // apart). Everything else falls through to the cube path.
-        if (o->draw) {
-            o->draw(fb, o, cam_x);
+        // Per-object emit callback wins when set. Otherwise default
+        // dispatch: pickup boosters as a rotating icosahedron, Tri
+        // pickups as a pyramid, everything else as a cube.
+        if (o->emit) {
+            o->emit(o);
             continue;
         }
-        if (o->kind == OBSTACLE_KIND_PICKUP_BOOST) {
-            render_booster_icosahedron(fb_pixels, o, cam_x, rev_endian, booster_angle);
-            continue;
-        }
-        if (o->kind == OBSTACLE_KIND_PICKUP_TRI) {
-            render_pickup_pyramid(fb_pixels, o, cam_x, rev_endian);
-            continue;
-        }
-
-        // Cube extents come straight from the obstacle. z_world is
-        // the centre along z; front face sits at zF_raw, back at
-        // zB. If the back edge is already past the near clip the
-        // whole cube has nothing to draw — bail. Otherwise clip the
-        // front edge to RENDER_NEAR_CLIP_Z; if zF_raw was further than the
-        // clip we keep the real front face, otherwise we drop the
-        // front face and the side/top faces use the clipped near
-        // edge instead of the geometric front.
-        float const xL     = o->x_world - o->half_w;
-        float const xR     = o->x_world + o->half_w;
-        float const zF_raw = o->z_world - o->half_d;
-        float const zB     = o->z_world + o->half_d;
-        float const yB     = o->y_base;
-        float const yT     = o->y_base + o->height;
-        if (zB < RENDER_NEAR_CLIP_Z) continue;
-        bool  const front_visible = (zF_raw >= RENDER_NEAR_CLIP_Z);
-        float const zF            = front_visible ? zF_raw : RENDER_NEAR_CLIP_Z;
-
-        // Project all 8 corners. Front face + visible side + top use
-        // most of them; the back-bottom pair (LBB, RBB) feeds the
-        // bottom face, which the renderer now draws for elevated
-        // cubes (simple_platform blocks) once the camera passes
-        // beneath them.
-        float sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_LTF, sy_LTF, sx_RTF, sy_RTF;
-        float sx_LTB, sy_LTB, sx_RTB, sy_RTB, sx_LBB, sy_LBB, sx_RBB, sy_RBB;
-        render_project(xL, yB, zF, &sx_LBF, &sy_LBF);
-        render_project(xR, yB, zF, &sx_RBF, &sy_RBF);
-        render_project(xL, yT, zF, &sx_LTF, &sy_LTF);
-        render_project(xR, yT, zF, &sx_RTF, &sy_RTF);
-        render_project(xL, yT, zB, &sx_LTB, &sy_LTB);
-        render_project(xR, yT, zB, &sx_RTB, &sy_RTB);
-        render_project(xL, yB, zB, &sx_LBB, &sy_LBB);
-        render_project(xR, yB, zB, &sx_RBB, &sy_RBB);
-
-        // Visible-face selection. A face is visible when the camera
-        // is on the side its outward normal points to.
-        bool const show_left   = cam_x < xL;              // camera left of the cube → left face visible
-        bool const show_right  = cam_x > xR;              // camera right of the cube → right face visible
-        bool const show_top    = render_camera().y > yT;  // camera above the cube → top face visible
-        bool const show_bottom = render_camera().y < yB;  // camera below the cube → bottom face visible
-
-        // Painter's order within the cube: side and top are at least
-        // partially deeper than the front, so draw them first. The
-        // front face overpaints any sliver of side/top that leaks
-        // through to the front edge. Each face uses direct_565_tri:
-        // colour pre-packed once per face, scanlines walk in
-        // logical-X direction so the inner pixel writes are a
-        // contiguous raw-byte run (cache-friendly under ROT_CW).
-        if (show_left) {
-            uint16_t const c = direct_565_pack(o->side_color, rev_endian);
-            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_LTF, sy_LTF, sx_LTB, sy_LTB, c);
-            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_LTB, sy_LTB, sx_LBB, sy_LBB, c);
-        } else if (show_right) {
-            uint16_t const c = direct_565_pack(o->side_color, rev_endian);
-            direct_565_tri(fb_pixels, sx_RBF, sy_RBF, sx_RTF, sy_RTF, sx_RTB, sy_RTB, c);
-            direct_565_tri(fb_pixels, sx_RBF, sy_RBF, sx_RTB, sy_RTB, sx_RBB, sy_RBB, c);
-        }
-
-        if (show_top) {
-            uint16_t const c = direct_565_pack(o->top_color, rev_endian);
-            direct_565_tri(fb_pixels, sx_LTF, sy_LTF, sx_RTF, sy_RTF, sx_RTB, sy_RTB, c);
-            direct_565_tri(fb_pixels, sx_LTF, sy_LTF, sx_RTB, sy_RTB, sx_LTB, sy_LTB, c);
-        }
-
-        // Bottom face — quad LBF → RBF → RBB → LBB. Shaded with the
-        // side colour (undersides read as dark). Drawn before the
-        // front face so the front edge overpaints any sliver.
-        if (show_bottom) {
-            uint16_t const c = direct_565_pack(o->side_color, rev_endian);
-            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RBB, sy_RBB, c);
-            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBB, sy_RBB, sx_LBB, sy_LBB, c);
-        }
-
-        if (front_visible) {
-            uint16_t const c = direct_565_pack(o->front_color, rev_endian);
-            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF, c);
-            direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RTF, sy_RTF, sx_LTF, sy_LTF, c);
-        }
-
-        // Cyan wireframe — each of the cube's 12 edges is drawn
-        // exactly once, conditionally on whether it bounds any
-        // visible face. Bottom and back faces are never visible
-        // (camera is above ground and looking forward), so edges
-        // belonging only to those are silently skipped. Listing
-        // edge-by-edge avoids the bug where merging the front
-        // face's left/right verticals into the side-face branches
-        // would drop one of them whenever the camera saw only one
-        // side of a tall pillar. Direct-565 line: one halfword
-        // store per pixel, no PAX setter dispatch.
-        uint16_t const wf = direct_565_pack(o->outline_color, rev_endian);
-        if (front_visible || show_bottom) direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_RBF, (int)sy_RBF, wf);
-        if (front_visible || show_top)   direct_565_line(fb_pixels, (int)sx_LTF, (int)sy_LTF, (int)sx_RTF, (int)sy_RTF, wf);
-        if (front_visible || show_left)  direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LTF, (int)sy_LTF, wf);
-        if (front_visible || show_right) direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RTF, (int)sy_RTF, wf);
-        if (show_top)                    direct_565_line(fb_pixels, (int)sx_LTB, (int)sy_LTB, (int)sx_RTB, (int)sy_RTB, wf);
-        if (show_top || show_left)       direct_565_line(fb_pixels, (int)sx_LTF, (int)sy_LTF, (int)sx_LTB, (int)sy_LTB, wf);
-        if (show_top || show_right)      direct_565_line(fb_pixels, (int)sx_RTF, (int)sy_RTF, (int)sx_RTB, (int)sy_RTB, wf);
-        if (show_left) {
-            direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LBB, (int)sy_LBB, wf);
-            direct_565_line(fb_pixels, (int)sx_LBB, (int)sy_LBB, (int)sx_LTB, (int)sy_LTB, wf);
-        }
-        if (show_right) {
-            direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RBB, (int)sy_RBB, wf);
-            direct_565_line(fb_pixels, (int)sx_RBB, (int)sy_RBB, (int)sx_RTB, (int)sy_RTB, wf);
-        }
-        // Bottom-face edges: the back-bottom edge plus the two
-        // bottom verticals. The left/right verticals may already be
-        // drawn by the side branches above — a repeated line is the
-        // same idempotent halfword write, so re-drawing is harmless.
-        if (show_bottom) {
-            direct_565_line(fb_pixels, (int)sx_LBB, (int)sy_LBB, (int)sx_RBB, (int)sy_RBB, wf);
-            direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LBB, (int)sy_LBB, wf);
-            direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RBB, (int)sy_RBB, wf);
+        switch (o->kind) {
+            case OBSTACLE_KIND_PICKUP_BOOST: emit_icosahedron(o, booster_angle); break;
+            case OBSTACLE_KIND_PICKUP_TRI:   emit_pyramid(o);                    break;
+            default:                         emit_cube(o);                      break;
         }
     }
 }

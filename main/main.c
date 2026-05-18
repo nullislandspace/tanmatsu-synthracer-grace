@@ -36,6 +36,7 @@
 #include "render.h"
 #include "rendertext.h"
 #include "save.h"
+#include "scene.h"
 #include "sfx/sfx_crash.h"
 #include "sfx/sfx_engine_hum.h"
 #include "sfx/sfx_pickup_ding.h"
@@ -277,6 +278,10 @@ static int64_t s_session_date = 0;
 static bool   s_run_was_crash   = false;
 static double s_crash_anim_time = 0.0;
 static double s_stall_hold_time = 0.0;
+
+// Debug godmode (toggled with the G key): crash and stall end-of-run
+// conditions are suppressed so the run can be slowed down / inspected.
+static bool   s_godmode         = false;
 
 // Crash spark shower runs until game_crash_tick reports all sparks
 // spent (≈ the crash SFX length); this cap just guards against an
@@ -736,6 +741,20 @@ static void draw_sun_readout(float sun_y) {
     rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 3.0f * (text_h + 4.0f), buf);
 }
 
+// Debug readout — slot 4, directly below `sun=`. Shows the godmode
+// toggle state (G key) plus the ship's world position so the run
+// can be inspected while flown around with crash/stall disabled.
+static void draw_debug_readout(game_state_t const* g) {
+    char        buf[48];
+    snprintf(buf, sizeof(buf), "god=%s x=%.2f y=%.2f",
+             s_godmode ? "ON" : "off", g->ship_x_world, g->ship_y);
+    float const   text_h = 18.0f;
+    pax_col_t const col  = s_godmode ? 0xFF31FBFBu : 0xFF808080u;
+    pax_vec2f     sz     = rendertext_size(NULL, text_h, buf);
+    float const   x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
+    rendertext_draw(fb, col, NULL, text_h, x, 12.0f + 4.0f * (text_h + 4.0f), buf);
+}
+
 // Bottom-left HUD: a solid green upward-pointing triangle that's
 // visible whenever a boost is active (any phase that isn't IDLE).
 // Sized at 3× the debug-readout text height so it's easy to read
@@ -898,6 +917,18 @@ static void menu_draw(menu_view_t const* m) {
     }
 }
 
+// Render the depth-buffered 3D scene for a run: clear the z-buffer,
+// emit every obstacle and (optionally) the ship, then rasterize the
+// deferred wireframe. The backdrop / floor / shadows must already be
+// in the framebuffer — they are 2D layers drawn before this.
+static void render_run_scene(world_state_t const* w, game_state_t const* g,
+                             bool draw_ship) {
+    scene_begin(fb);
+    render_submit_obstacles(w);
+    if (draw_ship) game_submit_ship(g);
+    scene_flush();
+}
+
 // Render the scene behind a settings screen. Opened from the pause
 // menu, the frozen game (obstacles + ship in their last positions)
 // shows through — matching the pause overlay. Opened from the main
@@ -905,8 +936,7 @@ static void menu_draw(menu_view_t const* m) {
 // backdrop drawn earlier in the frame stands.
 static void draw_settings_scene(world_state_t const* w, game_state_t const* g) {
     if (s_settings_origin != APP_STATE_PAUSED) return;
-    render_obstacles(fb, w, g->cam_x);
-    game_draw_ship(fb, g);
+    render_run_scene(w, g, true);
 }
 
 static void draw_game_over_overlay(void) {
@@ -1700,6 +1730,7 @@ void app_main(void) {
     pax_buf_set_orientation(&fb_b, orientation);
 
     synthwave_init();
+    scene_init();
     icons_load();
     input_init();
     input_set_mode(INPUT_MODE_TITLE);
@@ -1935,6 +1966,10 @@ void app_main(void) {
         if (input_consume_force_next_area() && app_state == APP_STATE_PLAYING) {
             world_force_next_area(&world, AREA_TYPE_SIMPLE_PLATFORM);
         }
+        // Debug: G toggles godmode (crash / stall suppressed below).
+        if (input_consume_godmode_toggle()) {
+            s_godmode = !s_godmode;
+        }
 
         int64_t const t_after_input = esp_timer_get_time();
         // End-of-run signals for this frame, kept separate so the
@@ -1965,6 +2000,13 @@ void app_main(void) {
             // ship has coasted to a halt in shadow — the stall
             // end-of-run signal.
             stalled = game_after_collide(&game, &world, dt);
+            // Debug godmode: keep the run alive regardless. The ship
+            // simply coasts through head-on hits and never stalls
+            // out, so the world can be slowed down and inspected.
+            if (s_godmode) {
+                crashed = false;
+                stalled = false;
+            }
             world_advance(&world, dt, game.ship_speed_z, game.cam_x);
             // Accumulate active play time (excludes paused frames).
             // Used by save_commit_run_end so the duration_s stat
@@ -2393,11 +2435,10 @@ void app_main(void) {
 
             case APP_STATE_PLAYING: {
                 // Shadows are already on the floor (drawn between
-                // the floor base and the lines above), so we just
-                // need the obstacles on top.
-                render_obstacles(fb, &world, game.cam_x);
+                // the floor base and the lines above); the depth-
+                // buffered scene (obstacles + ship) goes on top.
+                render_run_scene(&world, &game, true);
                 t_after_obs = esp_timer_get_time();
-                game_draw_ship(fb, &game);
                 game_draw_sparks(fb, &game);
                 if (stage_banner_visible(&world)) {
                     // Rest areas (pre-stage-1 lead-in + between-stage
@@ -2413,6 +2454,7 @@ void app_main(void) {
                 draw_stage_readout(&world);
                 draw_speed_readout(game.ship_speed_z);
                 draw_sun_readout(game.sun_y);
+                draw_debug_readout(&game);
                 draw_boost_indicator(&game);
                 draw_jump_inventory(&game);
 
@@ -2465,7 +2507,7 @@ void app_main(void) {
                 // the ship is gone, replaced by the spark shower.
                 // No pause hint, no input — the physics pass drops
                 // us into GAME_OVER once the sparks burn out.
-                render_obstacles(fb, &world, game.cam_x);
+                render_run_scene(&world, &game, false);
                 t_after_obs = esp_timer_get_time();
                 game_draw_crash_sparks(fb, &game);
                 if (stage_banner_visible(&world)) {
@@ -2483,9 +2525,8 @@ void app_main(void) {
                 // ship is still drawn — it sat down, it didn't blow
                 // up. No input; the physics pass times out into
                 // GAME_OVER.
-                render_obstacles(fb, &world, game.cam_x);
+                render_run_scene(&world, &game, true);
                 t_after_obs = esp_timer_get_time();
-                game_draw_ship(fb, &game);
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
                 }
@@ -2501,9 +2542,8 @@ void app_main(void) {
                 // approach as GAME_OVER — obstacles + ship in their
                 // last positions). The physics step above is gated
                 // on PLAYING so nothing moves.
-                render_obstacles(fb, &world, game.cam_x);
+                render_run_scene(&world, &game, true);
                 t_after_obs = esp_timer_get_time();
-                game_draw_ship(fb, &game);
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
                 }
@@ -2573,14 +2613,11 @@ void app_main(void) {
                 // World frozen at the end of the run. Sun readout
                 // stays visible so Q/A nudging still works for
                 // visually tuning the sunset threshold.
-                render_obstacles(fb, &world, game.cam_x);
-                t_after_obs = esp_timer_get_time();
                 // A crashed ship was blown to sparks during CRASHING
                 // — don't resurrect it under the panel. A stalled
                 // ship is still sitting on the track, so draw it.
-                if (!s_run_was_crash) {
-                    game_draw_ship(fb, &game);
-                }
+                render_run_scene(&world, &game, !s_run_was_crash);
+                t_after_obs = esp_timer_get_time();
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
                 }

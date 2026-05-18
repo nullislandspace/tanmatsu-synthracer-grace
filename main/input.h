@@ -82,6 +82,10 @@ bool input_consume_pause_toggle(void);
 // Self-clears.
 bool input_consume_force_next_area(void);
 
+// True if G was pressed since last call. Debug-only hook for
+// toggling godmode (crash / stall end-of-run disabled). Self-clears.
+bool input_consume_godmode_toggle(void);
+
 // Begin key-capture for the Controls remap dialog. While capture is
 // active, the next plain key press is latched and every other event
 // (steering, menu nav, F1 exit, volume, …) is swallowed so the

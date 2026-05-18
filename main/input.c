@@ -27,6 +27,7 @@ static bool          s_backspace     = false; // latest BACKSPACE press
 static int           s_digit         = -1;    // 0..9 if a digit was typed, else -1
 static bool          s_pause_toggle  = false; // latest pause-key press edge
 static bool          s_force_area    = false; // latest TAB press edge (debug)
+static bool          s_godmode_edge  = false; // latest G press edge (debug)
 
 // Key-capture mode for the Controls remap dialog. While `s_capturing`
 // is true, the next plain key press is latched into `s_captured`
@@ -165,6 +166,8 @@ bool input_drain_events(void) {
                     s_sun_delta -= 1;     // push sun back toward zenith
                 } else if (sc == BSP_INPUT_SCANCODE_TAB) {
                     s_force_area = true;  // debug: force next area type
+                } else if (sc == BSP_INPUT_SCANCODE_G) {
+                    s_godmode_edge = true;  // debug: toggle godmode
                 }
                 // Pause is a remappable bind (default F4) — checked
                 // independently of the chain above so a player who
@@ -335,6 +338,12 @@ bool input_consume_pause_toggle(void) {
 bool input_consume_force_next_area(void) {
     bool e        = s_force_area;
     s_force_area = false;
+    return e;
+}
+
+bool input_consume_godmode_toggle(void) {
+    bool e          = s_godmode_edge;
+    s_godmode_edge = false;
     return e;
 }
 

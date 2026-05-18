@@ -2,8 +2,8 @@
 
 #include <stdint.h>
 
-#include "direct_565.h"
-#include "render.h"      // render_project, RENDER_NEAR_CLIP_Z
+#include "render.h"      // render_camera, RENDER_NEAR_CLIP_Z
+#include "scene.h"       // scene_tri, scene_line
 #include "world.h"
 
 // Dull yellow body with a bright-yellow wireframe — distinct from
@@ -13,71 +13,55 @@
 #define RAMP_TOP_COLOR      0xFFB89820u   // dull yellow — the sloped surface
 #define RAMP_OUTLINE_COLOR  0xFFFFE84Au   // bright yellow
 
-// Draw callback. The ramp is a triangular prism: a flat bottom at
+// Emit callback. The ramp is a triangular prism: a flat bottom at
 // world-y 0, a vertical far face, and the sloped top (hypotenuse)
 // the ship rides up. Only the two faces the player ever sees are
-// drawn — the sloped top and the camera-side triangle; the far
+// emitted — the sloped top and the camera-side triangle; the far
 // face and bottom point away from a forward, slightly-raised
-// camera.
-static void ramp_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
-    float const zN_raw = o->z_world - o->half_d;
-    float const zF     = o->z_world + o->half_d;
+// camera. The depth buffer handles occlusion against everything
+// else, so no draw-order reasoning is needed.
+static void ramp_emit(obstacle_t const* o) {
+    float const zN = o->z_world - o->half_d;   // near edge (low)
+    float const zF = o->z_world + o->half_d;   // far edge (top of slope)
     if (zF < RENDER_NEAR_CLIP_Z) return;
-    // Clip the near (low) edge to the near plane so the projection
-    // can't blow up once the ramp is right on top of the camera.
-    float const zN = (zN_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : zN_raw;
 
     float const xL   = o->x_world - o->half_w;
     float const xR   = o->x_world + o->half_w;
     float const rise = o->height;
 
-    // 6 corners: near-bottom, far-bottom, far-top — each L and R.
-    float sx_nbL, sy_nbL, sx_nbR, sy_nbR;
-    float sx_fbL, sy_fbL, sx_fbR, sy_fbR;
-    float sx_ftL, sy_ftL, sx_ftR, sy_ftR;
-    render_project(xL, 0.0f, zN, &sx_nbL, &sy_nbL);
-    render_project(xR, 0.0f, zN, &sx_nbR, &sy_nbR);
-    render_project(xL, 0.0f, zF, &sx_fbL, &sy_fbL);
-    render_project(xR, 0.0f, zF, &sx_fbR, &sy_fbR);
-    render_project(xL, rise, zF, &sx_ftL, &sy_ftL);
-    render_project(xR, rise, zF, &sx_ftR, &sy_ftR);
+    uint32_t const top  = o->top_color;
+    uint32_t const side = o->side_color;
+    uint32_t const out  = o->outline_color;
 
-    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    bool      const rev       = fb->reverse_endianness;
-    uint16_t  const top_pk    = direct_565_pack(o->top_color,     rev);
-    uint16_t  const side_pk   = direct_565_pack(o->side_color,    rev);
-    uint16_t  const out_pk     = direct_565_pack(o->outline_color, rev);
     // A side face is visible only when the camera is beyond that
-    // edge of the ramp — when the camera is *over* the ramp
-    // (xL <= cam_x <= xR), as it is whenever the ship rides it,
-    // neither side shows. (Comparing against the centre, not the
-    // edges, always drew one face — that was the render bug.)
-    bool      const show_left  = (cam_x < xL);
-    bool      const show_right = (cam_x > xR);
+    // edge of the ramp; while the ship rides the ramp the camera is
+    // over it (xL <= cam.x <= xR) and neither side shows.
+    render_camera_t const cam = render_camera();
+    bool const show_left  = (cam.x < xL);
+    bool const show_right = (cam.x > xR);
 
-    // Camera-side triangle (the wedge's profile) first, then the
-    // sloped top overpaints any sliver bleeding through.
+    // Camera-side triangle (the wedge's profile).
     if (show_left) {
-        direct_565_tri(fb_pixels, sx_nbL, sy_nbL, sx_fbL, sy_fbL, sx_ftL, sy_ftL, side_pk);
+        scene_tri(xL, 0.0f, zN,  xL, 0.0f, zF,  xL, rise, zF,  side);
     } else if (show_right) {
-        direct_565_tri(fb_pixels, sx_nbR, sy_nbR, sx_fbR, sy_fbR, sx_ftR, sy_ftR, side_pk);
+        scene_tri(xR, 0.0f, zN,  xR, 0.0f, zF,  xR, rise, zF,  side);
     }
     // Sloped top — quad nbL → nbR → ftR → ftL, two triangles.
-    direct_565_tri(fb_pixels, sx_nbL, sy_nbL, sx_nbR, sy_nbR, sx_ftR, sy_ftR, top_pk);
-    direct_565_tri(fb_pixels, sx_nbL, sy_nbL, sx_ftR, sy_ftR, sx_ftL, sy_ftL, top_pk);
+    scene_tri(xL, 0.0f, zN,  xR, 0.0f, zN,  xR, rise, zF,  top);
+    scene_tri(xL, 0.0f, zN,  xR, rise, zF,  xL, rise, zF,  top);
 
     // Bright outline — the sloped top's four edges, plus the two
     // sloping edges of the visible side triangle.
-    direct_565_line(fb_pixels, (int)sx_nbL, (int)sy_nbL, (int)sx_nbR, (int)sy_nbR, out_pk);
-    direct_565_line(fb_pixels, (int)sx_nbR, (int)sy_nbR, (int)sx_ftR, (int)sy_ftR, out_pk);
-    direct_565_line(fb_pixels, (int)sx_ftR, (int)sy_ftR, (int)sx_ftL, (int)sy_ftL, out_pk);
-    direct_565_line(fb_pixels, (int)sx_ftL, (int)sy_ftL, (int)sx_nbL, (int)sy_nbL, out_pk);
+    scene_line(xL, 0.0f, zN,  xR, 0.0f, zN,  out);
+    scene_line(xR, 0.0f, zN,  xR, rise, zF,  out);
+    scene_line(xR, rise, zF,  xL, rise, zF,  out);
+    scene_line(xL, rise, zF,  xL, 0.0f, zN,  out);
     if (show_left) {
-        direct_565_line(fb_pixels, (int)sx_nbL, (int)sy_nbL, (int)sx_fbL, (int)sy_fbL, out_pk);
-        direct_565_line(fb_pixels, (int)sx_fbL, (int)sy_fbL, (int)sx_ftL, (int)sy_ftL, out_pk);
+        scene_line(xL, 0.0f, zN,  xL, 0.0f, zF,  out);
+        scene_line(xL, 0.0f, zF,  xL, rise, zF,  out);
     } else if (show_right) {
-        direct_565_line(fb_pixels, (int)sx_nbR, (int)sy_nbR, (int)sx_fbR, (int)sy_fbR, out_pk);
-        direct_565_line(fb_pixels, (int)sx_fbR, (int)sy_fbR, (int)sx_ftR, (int)sy_ftR, out_pk);
+        scene_line(xR, 0.0f, zN,  xR, 0.0f, zF,  out);
+        scene_line(xR, 0.0f, zF,  xR, rise, zF,  out);
     }
 }
 
@@ -88,6 +72,6 @@ obstacle_t* ramp_spawn_at(world_state_t* w, float x, float z,
         x, z,
         half_w, half_d, rise,
         RAMP_FRONT_COLOR, RAMP_SIDE_COLOR, RAMP_TOP_COLOR, RAMP_OUTLINE_COLOR);
-    if (o) o->draw = ramp_draw;
+    if (o) o->emit = ramp_emit;
     return o;
 }

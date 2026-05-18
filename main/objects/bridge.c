@@ -19,79 +19,14 @@
 // beneath.
 #define SPAN_HALF_W             (TRACK_HALF_WIDTH + WALL_HALF_W)
 
-// --- Span draw callback --------------------------------------------
+// --- Span rendering ------------------------------------------------
 // The span sits at y in [BRIDGE_SPAN_Y_BASE, BRIDGE_SPAN_Y_BASE +
-// BRIDGE_SPAN_HEIGHT]. The default cube renderer assumes y=0 base
-// and can't represent elevation, so we draw the span manually:
-// project the 8 corners we need (4 bottom + 4 top), then fill the
-// visible faces. Camera at y = RENDER_CAM_Y (= 1) sits *below* the
-// span, so the visible faces are: bottom (looking up), front
-// (toward camera in z). Side faces are never visible because the
-// span spans the full playfield laterally — cam_x is always inside
-// the span's x range. The back face never faces the camera.
-static void span_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
-    (void)cam_x;  // span is full-width; render_project reads the camera global
-    float const xL = o->x_world - o->half_w;
-    float const xR = o->x_world + o->half_w;
-    float const zF_raw = o->z_world - o->half_d;
-    float const zB     = o->z_world + o->half_d;
-    if (zB < RENDER_NEAR_CLIP_Z) return;
-    float const zF = (zF_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : zF_raw;
-    bool  const front_visible = (zF_raw >= RENDER_NEAR_CLIP_Z);
-
-    float const yB = BRIDGE_SPAN_Y_BASE;
-    float const yT = BRIDGE_SPAN_Y_BASE + o->height;
-
-    // 8 corners: L/R × B(ottom)/T(op) × F(ront)/B(ack).
-    float sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_LTF, sy_LTF, sx_RTF, sy_RTF;
-    float sx_LBB, sy_LBB, sx_RBB, sy_RBB, sx_LTB, sy_LTB, sx_RTB, sy_RTB;
-    render_project(xL, yB, zF, &sx_LBF, &sy_LBF);
-    render_project(xR, yB, zF, &sx_RBF, &sy_RBF);
-    render_project(xL, yT, zF, &sx_LTF, &sy_LTF);
-    render_project(xR, yT, zF, &sx_RTF, &sy_RTF);
-    render_project(xL, yB, zB, &sx_LBB, &sy_LBB);
-    render_project(xR, yB, zB, &sx_RBB, &sy_RBB);
-    render_project(xL, yT, zB, &sx_LTB, &sy_LTB);
-    render_project(xR, yT, zB, &sx_RTB, &sy_RTB);
-
-    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    bool      const rev_endian = fb->reverse_endianness;
-    uint16_t  const front_packed = direct_565_pack(o->front_color,   rev_endian);
-    uint16_t  const side_packed  = direct_565_pack(o->side_color,    rev_endian);  // bottom uses side palette
-    uint16_t  const top_packed   = direct_565_pack(o->top_color,     rev_endian);
-    uint16_t  const out_packed   = direct_565_pack(o->outline_color, rev_endian);
-
-    // Bottom face (visible — camera below). Two triangles covering
-    // the underside rectangle (xL..xR, zF..zB) at y=yB.
-    direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RBB, sy_RBB, side_packed);
-    direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBB, sy_RBB, sx_LBB, sy_LBB, side_packed);
-
-    // Top face — visible only if the camera looks up from below far
-    // enough, which it never does at RENDER_CAM_Y = 1 against a
-    // span at y ≥ 3. Skip rendering entirely; behind-the-span pixels
-    // belong to the sky / mountains, already drawn.
-
-    // Front face (visible while in front of the span).
-    if (front_visible) {
-        direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RBF, sy_RBF, sx_RTF, sy_RTF, front_packed);
-        direct_565_tri(fb_pixels, sx_LBF, sy_LBF, sx_RTF, sy_RTF, sx_LTF, sy_LTF, front_packed);
-    }
-
-    (void)top_packed;  // unused for now; kept for future if span top becomes visible
-
-    // Wireframe — the front rectangle + the bottom edges receding
-    // toward the back so the span reads as a 3D slab. Cheap (single
-    // line each, packed colour cached above).
-    if (front_visible) {
-        direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_RBF, (int)sy_RBF, out_packed);
-        direct_565_line(fb_pixels, (int)sx_LTF, (int)sy_LTF, (int)sx_RTF, (int)sy_RTF, out_packed);
-        direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LTF, (int)sy_LTF, out_packed);
-        direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RTF, (int)sy_RTF, out_packed);
-    }
-    direct_565_line(fb_pixels, (int)sx_LBF, (int)sy_LBF, (int)sx_LBB, (int)sy_LBB, out_packed);
-    direct_565_line(fb_pixels, (int)sx_RBF, (int)sy_RBF, (int)sx_RBB, (int)sy_RBB, out_packed);
-    direct_565_line(fb_pixels, (int)sx_LBB, (int)sy_LBB, (int)sx_RBB, (int)sy_RBB, out_packed);
-}
+// BRIDGE_SPAN_HEIGHT]. Its obstacle carries that elevation in
+// `y_base` (set in bridge_spawn), and the default cube emitter is
+// y_base-aware, so the span needs no custom emit callback — the
+// generic emitter renders the underside (the face the player flies
+// beneath), front and any visible side correctly, and the depth
+// buffer occludes it against everything else.
 
 // --- Span shadow callback ------------------------------------------
 // The span is elevated, so the default "shadow length = height ×
@@ -161,24 +96,22 @@ void bridge_spawn(world_state_t* w, float z) {
         CONCRETE_TOP_COLOR,   CONCRETE_OUTLINE_COLOR);
     if (right_pillar) right_pillar->y_base = WALL_HEIGHT;
 
-    // Span: full-width slab with custom draw + shadow callbacks so
-    // its elevation renders correctly. Collision is the default
-    // Y-aware cube dispatch — the span sits well above the ship, so
-    // the ship flies under it (and, post-9.1c, can land on it).
+    // Span: full-width slab. Rendering is the default y_base-aware
+    // cube emitter; only the elevated shadow needs a custom callback.
+    // Collision is the default Y-aware cube dispatch — the span sits
+    // well above the ship, so the ship flies under it (and, post-9.1c,
+    // can land on it).
     obstacle_t* const span = obstacle_spawn(w, OBSTACLE_KIND_CUBE,
                                             0.0f, z,
                                             SPAN_HALF_W, BRIDGE_HALF_D, BRIDGE_SPAN_HEIGHT,
                                             CONCRETE_FRONT_COLOR, CONCRETE_SIDE_COLOR,
                                             CONCRETE_TOP_COLOR,   CONCRETE_OUTLINE_COLOR);
     if (span) {
-        // The collision AABB must sit where the span is *rendered*.
-        // span_draw lifts the span to BRIDGE_SPAN_Y_BASE, but the
-        // obstacle's y_base defaults to 0 — pre-9.1b the span_collide
-        // IGNORE hack masked that. With Y-aware collision the AABB
-        // has to carry the real elevation, or the ship crashes into
-        // the span's ground-level phantom box while flying under it.
+        // y_base carries the span's elevation: the emitter renders it
+        // there, the Y-aware collision AABB sits there, and the ship
+        // flies under (and can land on) it. Pre-9.1b a span_collide
+        // IGNORE hack masked a y_base of 0; that is long gone.
         span->y_base = BRIDGE_SPAN_Y_BASE;
-        span->draw   = span_draw;
         span->shadow = span_shadow;
     }
 }

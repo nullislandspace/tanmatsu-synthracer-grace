@@ -3,10 +3,10 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "direct_565.h"
 #include "esp_timer.h"
 #include "magicnumbers.h"
-#include "render.h"      // render_project, render_camera, RENDER_NEAR_CLIP_Z
+#include "render.h"      // render_camera, RENDER_NEAR_CLIP_Z
+#include "scene.h"       // scene_tri, scene_line
 #include "world.h"
 
 // Red palette — distinct from the green speed booster and the
@@ -49,11 +49,12 @@ static uint8_t const OCT_FACES[8][3] = {
     { 1, 2, 4 }, { 1, 2, 5 }, { 1, 3, 4 }, { 1, 3, 5 },
 };
 
-// Draw callback — a red octahedron spinning around Y, one full
+// Emit callback — a red octahedron spinning around Y, one full
 // turn per GAME_BOOSTER_ROTATION_PERIOD_S (shared cadence with the
 // speed booster). Visible faces are filled two-tone for faceting
-// and stroked; back faces are culled.
-static void jump_booster_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
+// and stroked; back faces are culled (a speed optimisation — the
+// depth buffer would discard them anyway).
+static void jump_booster_emit(obstacle_t const* o) {
     if (o->z_world < RENDER_NEAR_CLIP_Z) return;
 
     int64_t const now_us = esp_timer_get_time();
@@ -69,8 +70,9 @@ static void jump_booster_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
     float const y_centre = o->y_base + GAME_BOOSTER_HEIGHT * 0.5f;
 
     // Rotated local positions (kept for the centroid cull) + their
-    // projected screen coordinates.
-    float lvx[6], lvy[6], lvz[6], sx[6], sy[6];
+    // world-space positions (handed to the scene).
+    float lvx[6], lvy[6], lvz[6];
+    float wvx[6], wvy[6], wvz[6];
     for (int i = 0; i < 6; i++) {
         float const x  = OCT_VERTS[i][0] * s;
         float const y  = OCT_VERTS[i][1] * s;
@@ -78,14 +80,12 @@ static void jump_booster_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
         float const xr =  x * cosa + z * sina;
         float const zr = -x * sina + z * cosa;
         lvx[i] = xr; lvy[i] = y; lvz[i] = zr;
-        render_project(o->x_world + xr, y_centre + y, o->z_world + zr,
-                       &sx[i], &sy[i]);
+        wvx[i] = o->x_world + xr;
+        wvy[i] = y_centre   + y;
+        wvz[i] = o->z_world + zr;
     }
 
-    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    bool      const rev       = fb->reverse_endianness;
-    uint16_t  const out_pk    = direct_565_pack(o->outline_color, rev);
-    float     const cam_h     = render_camera().y;
+    render_camera_t const cam = render_camera();
 
     for (int f = 0; f < 8; f++) {
         int const a = OCT_FACES[f][0];
@@ -98,8 +98,8 @@ static void jump_booster_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
         float const cz_l = (lvz[a] + lvz[b] + lvz[c]) * (1.0f / 3.0f);
 
         // Back-face cull against the face → camera vector.
-        float const dvx = cam_x - (o->x_world + cx_l);
-        float const dvy = cam_h - (y_centre   + cy_l);
+        float const dvx = cam.x - (o->x_world + cx_l);
+        float const dvy = cam.y - (y_centre   + cy_l);
         float const dvz = 0.0f  - (o->z_world + cz_l);
         if (cx_l * dvx + cy_l * dvy + cz_l * dvz <= 0.0f) continue;
 
@@ -122,12 +122,14 @@ static void jump_booster_draw(pax_buf_t* fb, obstacle_t const* o, float cam_x) {
         // colour — unlike a flat `f & 1`, which clumps them.
         uint32_t const base = (((a & 1) + (b & 1) + (c & 1)) & 1)
                                 ? o->side_color : o->front_color;
-        uint16_t const fill = direct_565_pack(jump_dim(base, tint), rev);
 
-        direct_565_tri(fb_pixels, sx[a], sy[a], sx[b], sy[b], sx[c], sy[c], fill);
-        direct_565_line(fb_pixels, (int)sx[a], (int)sy[a], (int)sx[b], (int)sy[b], out_pk);
-        direct_565_line(fb_pixels, (int)sx[b], (int)sy[b], (int)sx[c], (int)sy[c], out_pk);
-        direct_565_line(fb_pixels, (int)sx[c], (int)sy[c], (int)sx[a], (int)sy[a], out_pk);
+        scene_tri(wvx[a], wvy[a], wvz[a],
+                  wvx[b], wvy[b], wvz[b],
+                  wvx[c], wvy[c], wvz[c],
+                  jump_dim(base, tint));
+        scene_line(wvx[a], wvy[a], wvz[a], wvx[b], wvy[b], wvz[b], o->outline_color);
+        scene_line(wvx[b], wvy[b], wvz[b], wvx[c], wvy[c], wvz[c], o->outline_color);
+        scene_line(wvx[c], wvy[c], wvz[c], wvx[a], wvy[a], wvz[a], o->outline_color);
     }
 }
 
@@ -139,7 +141,7 @@ obstacle_t* jump_booster_spawn_at(world_state_t* w, float x, float z) {
         JUMP_FRONT_COLOR, JUMP_SIDE_COLOR,
         /* top_color (unused — custom draw) */ JUMP_FRONT_COLOR,
         JUMP_OUTLINE_COLOR);
-    if (o) o->draw = jump_booster_draw;
+    if (o) o->emit = jump_booster_emit;
     return o;
 }
 

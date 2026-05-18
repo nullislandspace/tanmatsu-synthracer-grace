@@ -53,7 +53,10 @@ void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_s
 // `fully_shadowed` flag), and this function does nothing.
 void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float sun_y);
 
-// Draw all active obstacles. Sorted back-to-front (descending z) and
-// drawn as flat-shaded front faces with painter's algorithm — no
-// z-buffer needed. `cam_x` is the camera's lateral world position.
-void render_obstacles(pax_buf_t* fb, world_state_t const* w, float cam_x);
+// Emit every active obstacle's geometry into the scene (see scene.h).
+// No sort and no painter's algorithm — the scene's per-pixel z-buffer
+// resolves visibility, so obstacles are submitted in pool order. The
+// caller must have called scene_begin() first and must call
+// scene_flush() after all geometry (obstacles + ship) is submitted.
+// The camera is read from render_camera().
+void render_submit_obstacles(world_state_t const* w);

@@ -70,11 +70,13 @@ typedef obstacle_hit_result_t (*obstacle_collide_fn)(obstacle_t* o,
                                                     struct game_state_s* g,
                                                     bool came_from_ahead);
 
-// Called from render_obstacles inside the painter's-algorithm loop.
-// Receives the framebuffer pointer and camera x. Default dispatch
-// renders cubes / pyramids per kind; this overrides for objects with
-// non-standard geometry.
-typedef void (*obstacle_draw_fn)(pax_buf_t* fb, obstacle_t const* o, float cam_x);
+// Called from render_submit_obstacles. The object emits its geometry
+// for this frame as world-space triangles and wireframe edges via
+// scene_tri() / scene_line() (see scene.h); the scene module projects
+// and depth-tests it. The camera is read from render_camera() — no
+// parameters are threaded. Default dispatch emits cubes / pyramids /
+// icosahedra per kind; this overrides for non-standard geometry.
+typedef void (*obstacle_emit_fn)(obstacle_t const* o);
 
 // Called from render_shadows. Receives sun_y in addition to fb /
 // cam_x so the callback can compute the shadow's z extent the same
@@ -98,8 +100,8 @@ struct obstacle_s {
     // objects (pillars sitting on top of walls, bridge spans, future
     // floating decals) set this so the renderer puts the geometry
     // at the right altitude. The cube's y range is
-    // [y_base, y_base + height]. Default render reads this; custom
-    // draw callbacks may override.
+    // [y_base, y_base + height]. Default emit reads this; custom
+    // emit callbacks may override.
     float    y_base;
 
     // --- Standard colour set (read by the default renderer) -----
@@ -115,7 +117,7 @@ struct obstacle_s {
     obstacle_physics_fn physics;
     obstacle_cleanup_fn cleanup;
     obstacle_collide_fn collide;
-    obstacle_draw_fn    draw;
+    obstacle_emit_fn    emit;
     obstacle_shadow_fn  shadow;
 
     // --- Per-object private state -------------------------------

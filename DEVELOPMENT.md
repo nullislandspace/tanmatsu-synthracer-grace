@@ -3233,6 +3233,50 @@
       polygons). User wants full correctness ⇒ leaning z-buffer.
       Decision/implementation deferred.
 
+- 2026-05-19 — **Z-buffer renderer + geometry-emitter pipeline.**
+  Replaced the per-object painter's algorithm with a per-pixel
+  depth-buffered scene. Built on branch `z_buffer`.
+    - **New module `scene.{c,h}`.** Owns a `uint16_t` depth buffer
+      (384 000 px, 768 KB PSRAM) indexed identically to the
+      framebuffer. Depth is scaled reciprocal-z (1/z; larger =
+      nearer; cleared to 0 each frame in `scene_begin`).
+      `scene_tri()` projects + rasterizes a world-space triangle
+      *immediately* with a per-pixel depth test + write — the
+      z-buffer makes triangle draw order irrelevant, so no sort and
+      no triangle buffer. `scene_line()` defers edges into a buffer;
+      `scene_flush()` rasterizes them last, depth-tested with a
+      ×1.02 bias (an edge beats the coplanar face it outlines but
+      still loses to nearer geometry) and **no** depth write.
+      Near-plane handling is centralised here: each vertex's z is
+      clamped to `RENDER_NEAR_CLIP_Z`, wholly-behind geometry
+      dropped.
+    - **Geometry emitters.** `render_obstacles` → `render_submit_-
+      obstacles`: the z-sort is gone; cube / pyramid / icosahedron
+      became emitters that submit world-space tris+lines. The four
+      custom `draw` callbacks (jump_booster, flipping_cube, ramp,
+      and — removed entirely — bridge span) became `emit` callbacks;
+      `obstacle_t.draw` → `obstacle_t.emit`, signature now just
+      `(obstacle_t const*)` (camera read from `render_camera()`).
+      The bridge span's custom renderer was deleted outright — its
+      `y_base` already carries its elevation and the y_base-aware
+      `emit_cube` renders it correctly. Per-face camera-side culls
+      are kept purely as a speed optimisation.
+    - **Ship is now part of the world.** `game_draw_ship` →
+      `game_submit_ship`: the ship mesh submits into the scene like
+      any obstacle, so it is depth-tested against geometry it flies
+      under / behind / alongside (no more separate 2D pass).
+    - **main.c** — `scene_init()` at boot; the six `render_obstacles`
+      + `game_draw_ship` sites collapsed to one `render_run_scene()`
+      helper (`scene_begin` → submit obstacles → optional ship →
+      `scene_flush`). `obs` now profiles the whole z-buffered pass.
+    - Visual style preserved: same palettes, flat shading, cyan
+      wireframe, near-clip behaviour. What changed is that
+      visibility is per-pixel correct — stacked / straddling /
+      mutually-overlapping geometry all resolve without draw-order
+      reasoning, and the obstacle code got simpler as a result.
+    - Builds clean (`make clean build`, `make verify`). On-device
+      FPS impact to be measured.
+
 ---
 
 ## Future FPS improvements

@@ -220,8 +220,10 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt);
 // collision).
 bool game_after_collide(game_state_t* g, world_state_t const* w, float dt);
 
-// Render the ship as a 3D mesh, banked by `g->bank`.
-void game_draw_ship(pax_buf_t* fb, game_state_t const* g);
+// Submit the ship — a banked 3D mesh — into the scene (see scene.h)
+// so it is depth-tested against obstacle geometry. Call between
+// scene_begin() and scene_flush().
+void game_submit_ship(game_state_t const* g);
 
 // Draw a radial burst of red lines from each scraping wingtip.
 // No persistence — each call paints a fresh random pattern, so

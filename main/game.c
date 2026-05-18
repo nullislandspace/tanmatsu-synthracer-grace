@@ -5,6 +5,7 @@
 
 #include "pax_gfx.h"
 #include "render.h"
+#include "scene.h"
 #include "shapes/pax_tris.h"
 
 // --- Lateral motion -----------------------------------------------------------
@@ -719,31 +720,32 @@ static inline pax_col_t dim_argb(pax_col_t col, float scale) {
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
+void game_submit_ship(game_state_t const* g) {
     float const angle = g->bank * MAX_BANK_RAD;
     float const c     = cosf(angle);
     float const s     = sinf(angle);
 
-    pax_vec2f screen[SHIP_VERT_COUNT];
+    // The ship is a small 3D mesh near the camera (z = SHIP_Z_PLANE).
+    // It is submitted into the scene like any obstacle, so the depth
+    // buffer occludes it correctly against geometry it flies under,
+    // behind or alongside.
+    float wx[SHIP_VERT_COUNT], wy[SHIP_VERT_COUNT], wz[SHIP_VERT_COUNT];
     for (size_t i = 0; i < SHIP_VERT_COUNT; i++) {
         ship_vert_t const* v = &ship_verts[i];
         float const lx = v->x * c + v->y * s;
         float const ly = -v->x * s + v->y * c;
-        float const wx = lx + g->ship_x_world;
-        float const wy = ly + SHIP_BASE_Y + g->ship_y;
-        float const wz = v->z + SHIP_Z_PLANE;
-        render_project(wx, wy, wz, &screen[i].x, &screen[i].y);
+        wx[i] = lx + g->ship_x_world;
+        wy[i] = ly + SHIP_BASE_Y + g->ship_y;
+        wz[i] = v->z + SHIP_Z_PLANE;
     }
 
     // Pre-dim every ship colour once if the ship is in shadow —
     // 30% darker face + ridge fills. Far cheaper than per-pixel
-    // attenuation, and works whether faces stay on PAX or move
-    // to direct_565 later. Keeping the originals in locals so
-    // the compiler can hoist either branch.
-    pax_col_t       belly      = SHIP_BELLY_COLOR;
-    pax_col_t       roof_left  = SHIP_ROOF_LEFT_COLOR;
-    pax_col_t       roof_right = SHIP_ROOF_RIGHT_COLOR;
-    pax_col_t       ridge      = SHIP_RIDGE_COLOR;
+    // attenuation.
+    pax_col_t belly      = SHIP_BELLY_COLOR;
+    pax_col_t roof_left  = SHIP_ROOF_LEFT_COLOR;
+    pax_col_t roof_right = SHIP_ROOF_RIGHT_COLOR;
+    pax_col_t ridge      = SHIP_RIDGE_COLOR;
     if (g->in_shadow) {
         belly      = dim_argb(belly,      GAME_SHIP_SHADOW_TINT);
         roof_left  = dim_argb(roof_left,  GAME_SHIP_SHADOW_TINT);
@@ -759,18 +761,15 @@ void game_draw_ship(pax_buf_t* fb, game_state_t const* g) {
             case SHIP_FACE_ROOF_RIGHT: col = roof_right; break;
             case SHIP_FACE_BELLY:      col = belly;      break;
         }
-        pax_simple_tri(fb, col,
-                       screen[t->a].x, screen[t->a].y,
-                       screen[t->b].x, screen[t->b].y,
-                       screen[t->c].x, screen[t->c].y);
+        scene_tri(wx[t->a], wy[t->a], wz[t->a],
+                  wx[t->b], wy[t->b], wz[t->b],
+                  wx[t->c], wy[t->c], wz[t->c], col);
     }
 
     for (size_t i = 0; i < SHIP_OUTLINE_COUNT; i++) {
         uint8_t const a = ship_outline_edges[i][0];
         uint8_t const b = ship_outline_edges[i][1];
-        pax_simple_line(fb, ridge,
-                        screen[a].x, screen[a].y,
-                        screen[b].x, screen[b].y);
+        scene_line(wx[a], wy[a], wz[a], wx[b], wy[b], wz[b], ridge);
     }
 }
 
