@@ -100,6 +100,14 @@ typedef struct game_state_s {
     float shield_timer;
     float shield_hit_cooldown;
 
+    // Checkpoint inventory (Phase 9.3). `checkpoint_held` is true
+    // while the player carries a checkpoint — capped at one, HUD
+    // renders it as a black/white checkerboard. Collecting one sets
+    // `just_picked_up_checkpoint`, the edge flag main.c reads to
+    // snapshot the whole run state and play the gong.
+    bool  checkpoint_held;
+    bool  just_picked_up_checkpoint;
+
     // Phase 6 scoring. `multiplier` defaults to 1 and is bumped by
     // Tri pickups (not yet wired). `multiplier_max` tracks the peak
     // value reached this run for the per-run stat. Score and
@@ -119,6 +127,7 @@ typedef struct game_state_s {
     int pickups_tri;
     int pickups_jump;
     int pickups_shield;
+    int pickups_checkpoint;
 
     // Phase 5: sun position drives the run length. 0 = sun high
     // (start of run); GAME_SUN_SINK_RANGE_PX = fully behind the

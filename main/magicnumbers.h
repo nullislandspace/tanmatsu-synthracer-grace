@@ -228,6 +228,10 @@
 // scheduled per stage from this stage onward (Phase 9.2).
 #define GAME_SHIELD_FIRST_STAGE            3
 
+// First stage on which a checkpoint pickup appears. One checkpoint
+// is scheduled per stage from this stage onward (Phase 9.3).
+#define GAME_CHECKPOINT_FIRST_STAGE        5
+
 // Shield inventory cap (HUD: violet hexagon) and effect tuning
 // (Phase 9.2). The player holds at most one shield. On a head-on
 // crash that charge opens a GAME_SHIELD_DURATION-second

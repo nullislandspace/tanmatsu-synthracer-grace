@@ -162,6 +162,10 @@ typedef struct world_state_s {
     // GAME_SHIELD_FIRST_STAGE, -1 otherwise (and once it has fired).
     float      shield_due_at_progress;
 
+    // Same, for the once-per-stage checkpoint (Phase 9.3). Set for
+    // stages >= GAME_CHECKPOINT_FIRST_STAGE, -1 otherwise.
+    float      checkpoint_due_at_progress;
+
     // Debug-only override: when ≥ 0, the next `start_next_area` call
     // uses this area type instead of the picker (bypassing all
     // min-stage gating). Cleared as soon as it's consumed.

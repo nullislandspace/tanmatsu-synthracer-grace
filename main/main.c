@@ -39,6 +39,7 @@
 #include "scene.h"
 #include "sfx/sfx_crash.h"
 #include "sfx/sfx_engine_hum.h"
+#include "sfx/sfx_gong.h"
 #include "sfx/sfx_pickup_ding.h"
 #include "sfx/sfx_pickup_plink.h"
 #include "sfx/sfx_scrape.h"
@@ -160,6 +161,7 @@ typedef enum {
     APP_STATE_CRASHING,         // post-crash: ship → spark shower, world still flows
     APP_STATE_STALL_OUT,        // post-stall: frozen scene held a beat before GAME_OVER
     APP_STATE_GAME_OVER,
+    APP_STATE_CHECKPOINT_REDO,  // post-crash with a checkpoint: run rewound, "Re-Do" dialog
 } app_state_t;
 
 // Pause-menu entries (STATE_PAUSED).
@@ -831,6 +833,31 @@ static void draw_shield_inventory(game_state_t const* g) {
     }
 }
 
+// Bottom-right checkpoint readout (Phase 9.3): a single black/white
+// 3×3 checkerboard square — the held checkpoint — two rows above the
+// jump-charge diamonds. The player holds at most one. Nothing is
+// drawn when no checkpoint is held.
+static void draw_checkpoint_inventory(game_state_t const* g) {
+    if (!g->checkpoint_held) return;
+    float const margin  = 12.0f;
+    float const r       = (18.0f * 3.0f) * 0.5f;   // 27 px — matches the other symbols
+    float const spacing = 2.0f * r + 6.0f;
+    float const fb_w    = pax_buf_get_widthf(fb);
+    float const fb_h    = pax_buf_get_heightf(fb);
+    float const cx      = fb_w - margin - r;                  // corner column
+    float const cy      = fb_h - margin - r - 2.0f * spacing; // two rows up
+    float const cell    = (2.0f * r) / 3.0f;
+    float const x0      = cx - r;
+    float const y0      = cy - r;
+    for (int gy = 0; gy < 3; gy++) {
+        for (int gx = 0; gx < 3; gx++) {
+            uint32_t const col = ((gx + gy) & 1) ? 0xFFF0F0F0u : 0xFF101010u;
+            pax_simple_rect(fb, col, x0 + (float)gx * cell, y0 + (float)gy * cell,
+                            cell, cell);
+        }
+    }
+}
+
 // Phase 6 multiplier-HUD layout. Constants live up here so the
 // F1 / F4 hint y baselines (which sit *below* the panel across
 // every state) can reference them. The draw helper itself
@@ -986,6 +1013,29 @@ static void draw_game_over_overlay(void) {
     draw_left(lx, fbh * 0.30f, 64.0f, 0xFFF71FF1u, "GAME OVER");
     draw_left(lx, fbh * 0.46f, 22.0f, 0xFF31FBFBu, gameover_flavours[s_gameover_flavour_idx]);
     draw_left(lx, fbh * 0.58f, 22.0f, MENU_COL_NORMAL, "press space to retry");
+}
+
+// "Re-Do from checkpoint" dialog (Phase 9.3). Drawn over the
+// restored, frozen run scene — pause-like, the run has not ended.
+// Wider panel than GAME OVER so the two-line quote fits.
+static void draw_checkpoint_redo_overlay(void) {
+    float const fbw = pax_buf_get_widthf(fb);
+    float const fbh = pax_buf_get_heightf(fb);
+    int   const pw  = (int)(fbw * 0.78f);
+    int   const ph  = (int)(fbh * 0.50f);
+    int   const px  = (int)((fbw - (float)pw) * 0.5f);
+    int   const py  = (int)(fbh * 0.21f);
+    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
+    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
+
+    float const lx = menu_left_x(0.78f);
+    draw_left(lx, fbh * 0.29f, 44.0f, 0xFF31FBFBu, "Re-Do from checkpoint");
+    // Churchill — split across two lines to fit the panel width.
+    draw_left(lx, fbh * 0.44f, 21.0f, MENU_COL_NORMAL,
+              "Success is not final, failure is not fatal:");
+    draw_left(lx, fbh * 0.51f, 21.0f, MENU_COL_NORMAL,
+              "it is the courage to continue that counts.");
+    draw_left(lx, fbh * 0.63f, 22.0f, 0xFFFFFFFFu, "press space to continue");
 }
 
 // Format an int64 Unix time as "YYYY-MM-DD HH:MM" into out. Empty
@@ -1904,6 +1954,22 @@ void app_main(void) {
     // default stack budget.
     static game_state_t  game;
     static world_state_t world;
+
+    // Checkpoint run-state snapshot (Phase 9.3). Collecting a
+    // checkpoint copies the whole world + game state here; a later
+    // head-on crash restores it. In-memory only — not persisted
+    // across power-off. world_state_t carries the obstacle pool, the
+    // area + stage + RNG state and the wall cursors; game_state_t the
+    // ship, scores, stats, sun and inventory — so the pair is a
+    // complete, deterministic resume point.
+    static world_state_t s_checkpoint_world;
+    static game_state_t  s_checkpoint_game;
+    static bool          s_checkpoint_valid = false;
+    // Swallows the use-button press-edge on the frame the Re-Do
+    // dialog opens, so crashing mid-jump (space held) can't instantly
+    // dismiss it.
+    static bool          s_redo_ignore_pickup = false;
+
     game_init(&game);
 
     // Daily seed. Derived from today's calendar date so every run
@@ -2072,6 +2138,24 @@ void app_main(void) {
             game_crash_tick(&game, (float)dt);
 
             world_advance(&world, dt, game.ship_speed_z, game.cam_x);
+
+            // Phase 9.3 checkpoint rewind. If a head-on crash got
+            // here unabsorbed (no shield) and a checkpoint snapshot
+            // exists, restore the whole run state to that snapshot
+            // and open the Re-Do dialog instead of ending the run.
+            // Done after world_advance so the restored state is the
+            // final word for the frame; `crashed` is consumed so the
+            // render switch routes to the dialog, not CRASHING.
+            if (crashed && s_checkpoint_valid) {
+                sfx_crash_play();
+                world = s_checkpoint_world;
+                game  = s_checkpoint_game;
+                s_checkpoint_valid   = false;
+                s_redo_ignore_pickup = true;
+                app_state = APP_STATE_CHECKPOINT_REDO;
+                input_set_mode(INPUT_MODE_GAME_OVER);
+                crashed = false;
+            }
             // Accumulate active play time (excludes paused frames).
             // Used by save_commit_run_end so the duration_s stat
             // doesn't count F4 pauses as gameplay time.
@@ -2116,6 +2200,19 @@ void app_main(void) {
             // frame, so this fires exactly once per pickup.
             if (game.just_picked_up_booster) {
                 sfx_pickup_ding_play();
+            }
+
+            // Checkpoint pickup (Phase 9.3): snapshot the whole run
+            // state — this frame, post-advance — so a later head-on
+            // crash can rewind here, and play the gong. The edge
+            // flag is cleared before the copy so the snapshot itself
+            // records it false (otherwise a restore would re-fire).
+            if (game.just_picked_up_checkpoint) {
+                game.just_picked_up_checkpoint = false;
+                s_checkpoint_world = world;
+                s_checkpoint_game  = game;
+                s_checkpoint_valid = true;
+                sfx_gong_play();
             }
 
             // Tri plink — pitch steps with the in-cycle slot index
@@ -2529,6 +2626,7 @@ void app_main(void) {
                 draw_boost_indicator(&game);
                 draw_jump_inventory(&game);
                 draw_shield_inventory(&game);
+                draw_checkpoint_inventory(&game);
 
                 // Track peak stage reached this run.
                 if ((int)world.stage > s_peak_stage) s_peak_stage = (int)world.stage;
@@ -2703,6 +2801,36 @@ void app_main(void) {
                     app_state = APP_STATE_MENU;
                     input_set_mode(INPUT_MODE_TITLE);
                 }
+                break;
+            }
+
+            case APP_STATE_CHECKPOINT_REDO: {
+                // The run has been rewound to the checkpoint snapshot
+                // (done in the physics pass). This is a pause-like
+                // hold — the restored scene is frozen behind the
+                // dialog (physics is gated on PLAYING), music keeps
+                // playing, the run is NOT committed. Space resumes.
+                render_run_scene(&world, &game, true);
+                t_after_obs = esp_timer_get_time();
+                if (stage_banner_visible(&world)) {
+                    draw_stage_banner((int)world.stage + 1);
+                }
+                draw_multiplier_panel(&game);
+                draw_score_readout(&game);
+                draw_stage_readout(&world);
+                draw_sun_readout(game.sun_y);
+                draw_checkpoint_redo_overlay();
+
+                if (pickup_pressed && !s_redo_ignore_pickup) {
+                    // Resume: spend the checkpoint and grant the
+                    // shield's invulnerability window so the player
+                    // gets a moment of grace on the way back in.
+                    game.checkpoint_held = false;
+                    game.shield_timer    = GAME_SHIELD_DURATION;
+                    app_state = APP_STATE_PLAYING;
+                    input_set_mode(INPUT_MODE_PLAYING);
+                }
+                s_redo_ignore_pickup = false;
                 break;
             }
         }

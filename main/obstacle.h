@@ -20,9 +20,10 @@ typedef enum {
     OBSTACLE_KIND_WALL,            // side walls — scrape-only
     OBSTACLE_KIND_PICKUP_TRI,      // Phase 6: collected, bumps multiplier
     OBSTACLE_KIND_PICKUP_BOOST,    // Phase 5: collected, fires the boost state machine
-    OBSTACLE_KIND_PICKUP_JUMP,     // Phase 9
-    OBSTACLE_KIND_PICKUP_SHIELD,   // Phase 9
-    OBSTACLE_KIND_RAMP,            // future: contact triggers a jump
+    OBSTACLE_KIND_PICKUP_JUMP,     // Phase 9.1: collected, grants a jump charge
+    OBSTACLE_KIND_PICKUP_SHIELD,   // Phase 9.2: collected, banks a shield charge
+    OBSTACLE_KIND_PICKUP_CHECKPOINT, // Phase 9.3: collected, snapshots the run state
+    OBSTACLE_KIND_RAMP,            // ridden, not collided with — emergent jump launch
 } obstacle_kind_t;
 
 // Collision response classification. Returned by the per-object

@@ -3319,3 +3319,51 @@
       `draw_shield_inventory`.
     - **Phase 9.2 is complete.** Remaining in Phase 9: 9.3 checkpoint,
       9.4 attachment slots + magnet, 9.5 battery.
+
+- 2026-05-19 — **Phase 9.3 — checkpoint pickup.** A collectible that
+  snapshots the run; a later crash rewinds to it. Built in three
+  milestones (9.3a object + spawn, 9.3b snapshot + collection + gong +
+  HUD, 9.3c crash → restore → dialog).
+    - **Object** — `objects/checkpoint.{c,h}`: a black-and-white
+      icosahedron, a soccer-ball reskin of the speed booster's
+      geometry. Per-face black (`#181818`) / white (`#E8E8E8`) in a
+      checkered pattern, per-face lighting kept so it reads as a 3D
+      faceted ball, grey wireframe, same Y-spin cadence. New
+      `OBSTACLE_KIND_PICKUP_CHECKPOINT`.
+    - **Spawn** — flows through the 9.2 owed-pickup API: one
+      checkpoint per stage from `GAME_CHECKPOINT_FIRST_STAGE` (= 5),
+      `checkpoint_due_at_progress` scheduled in `start_stage` and
+      flagged owed in `world_advance`, placed by `world_place_pickup`.
+      The pre-stage-1 lead-in spawns a checkpoint (for testing — it
+      replaced the 9.2 test shield there).
+    - **Snapshot** — collecting a checkpoint copies the entire
+      `world_state_t` + `game_state_t` into main.c statics
+      (`s_checkpoint_world` / `s_checkpoint_game`). Both structs are
+      flat — the obstacle pool is inline, callbacks are code
+      pointers, no external pointers — so a struct assignment is a
+      complete, deterministic resume point (obstacle pool, area,
+      stage, RNG, wall cursors, ship, scores, stats, sun, inventory).
+      In-memory only, not persisted across power-off. Cost: ~108 KB
+      of `bss` for the snapshot buffer. The collection edge flag is
+      cleared before the copy so a restore can't re-fire it.
+    - **Gong SFX** — `sfx/sfx_gong.{c,h}`: a procedurally-synthesized
+      struck gong — a 196 Hz fundamental + 5 harmonic/inharmonic
+      partials (two a hair apart, beating into the gong "bloom"),
+      ~2 s decay, higher partials fading faster.
+    - **Crash → redo.** Crash priority is shield → checkpoint → real
+      crash. After `world_advance`, if an unabsorbed head-on crash
+      meets a valid snapshot, the snapshot is restored and the new
+      `APP_STATE_CHECKPOINT_REDO` state opens — a pause-like dialog
+      ("Re-Do from checkpoint" + the Churchill quote) over the
+      restored, frozen scene; music keeps playing, the run is *not*
+      committed. Space resumes: the checkpoint is spent
+      (`checkpoint_held = false`), the shield's 4 s invuln window is
+      granted for a grace re-entry, play resumes. An entry-frame
+      guard (`s_redo_ignore_pickup`) swallows the use-button edge so
+      crashing mid-jump can't instantly dismiss the dialog. Stalls
+      are unaffected — the checkpoint only catches crashes.
+    - **HUD** — `draw_checkpoint_inventory`: a black/white 3×3
+      checkerboard square, two rows above the jump diamonds. Cap of
+      one checkpoint; a new pickup overwrites the snapshot.
+    - **Phase 9.3 is complete.** Remaining in Phase 9: 9.4 attachment
+      slots + magnet, 9.5 battery.

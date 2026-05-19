@@ -10,6 +10,7 @@
 #include "areas/simple_platform.h"
 #include "magicnumbers.h"
 #include "objects/booster.h"
+#include "objects/checkpoint.h"
 #include "objects/jump_booster.h"
 #include "objects/shield.h"
 #include "objects/tri.h"
@@ -112,7 +113,10 @@ obstacle_t* world_place_pickup(world_state_t* w, area_state_t* a, float x, float
         a->owed_pickups[AREA_OWED_SHIELD]--;
         return shield_spawn_at(w, x, z);
     }
-    // if (a->owed_pickups[AREA_OWED_CHECKPOINT] > 0) { ... }  // Phase 9.3
+    if (a->owed_pickups[AREA_OWED_CHECKPOINT] > 0) {
+        a->owed_pickups[AREA_OWED_CHECKPOINT]--;
+        return checkpoint_spawn_at(w, x, z);
+    }
     return tri_spawn_at(w, x, z);
 }
 
@@ -283,6 +287,15 @@ static void start_stage(world_state_t* w, uint16_t stage) {
         w->shield_due_at_progress = -1.0f;
     }
 
+    // Same for the once-per-stage checkpoint (Phase 9.3), from
+    // GAME_CHECKPOINT_FIRST_STAGE onward.
+    if (stage >= GAME_CHECKPOINT_FIRST_STAGE) {
+        w->checkpoint_due_at_progress = world_frand(&w->stage_prng)
+                                      * (WORLD_STAGE_LENGTH_Z * 0.70f);
+    } else {
+        w->checkpoint_due_at_progress = -1.0f;
+    }
+
     start_next_area(w);
 }
 
@@ -323,7 +336,8 @@ void world_init(world_state_t* w, uint32_t seed) {
     w->stage_prng        = mix_stage_seed(w->level_seed, 0);
     w->area.boosters_owed = 0;
     for (int i = 0; i < AREA_OWED_COUNT; i++) w->area.owed_pickups[i] = 0;
-    w->shield_due_at_progress = -1.0f;          // nothing scheduled yet
+    w->shield_due_at_progress     = -1.0f;      // nothing scheduled yet
+    w->checkpoint_due_at_progress = -1.0f;
     for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
         w->booster_due_at_progress[i] = -1.0f;  // nothing scheduled yet
     }
@@ -331,11 +345,11 @@ void world_init(world_state_t* w, uint32_t seed) {
     for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
         booster_spawn(w);
     }
-    // One shield in the pre-stage-1 lead-in (Phase 9.2) so the player
-    // starts each run with a shield to collect. In-run, shields are
-    // scheduled once per stage from stage 3 onward; jump boosters
-    // spawn from the stage-3 rest onward (see the rest-area handler).
-    shield_spawn(w);
+    // One checkpoint in the pre-stage-1 lead-in (Phase 9.3, for
+    // testing) so the player can collect a checkpoint straight away.
+    // In-run, checkpoints are scheduled once per stage from stage 5;
+    // shields once per stage from stage 3.
+    checkpoint_spawn(w);
 }
 
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
@@ -389,6 +403,12 @@ void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
             && stage_progress >= w->shield_due_at_progress) {
             w->area.owed_pickups[AREA_OWED_SHIELD]++;
             w->shield_due_at_progress = -1.0f;
+        }
+        // Once-per-stage checkpoint (Phase 9.3), same mechanism.
+        if (w->checkpoint_due_at_progress >= 0.0f
+            && stage_progress >= w->checkpoint_due_at_progress) {
+            w->area.owed_pickups[AREA_OWED_CHECKPOINT]++;
+            w->checkpoint_due_at_progress = -1.0f;
         }
     }
 

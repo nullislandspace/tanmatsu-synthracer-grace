@@ -514,6 +514,17 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
                     g->just_picked_up_booster = true;
                     hit = OBSTACLE_HIT_IGNORE;
                     break;
+                case OBSTACLE_KIND_PICKUP_CHECKPOINT:
+                    // Phase 9.3 checkpoint. Hold it (cap of one —
+                    // replacing any previously-held one), count the
+                    // pickup, and raise the edge flag main.c reads to
+                    // snapshot the run state and play the gong.
+                    obstacle_despawn(o);
+                    g->pickups_checkpoint += 1;
+                    g->checkpoint_held = true;
+                    g->just_picked_up_checkpoint = true;
+                    hit = OBSTACLE_HIT_IGNORE;
+                    break;
                 case OBSTACLE_KIND_RAMP:
                     // Ramps are ridden, not collided with — the
                     // vertical system's support scan handles them.

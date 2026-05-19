@@ -24,6 +24,7 @@ set(APP_SOURCES
     main/objects/wall.c
     main/objects/booster.c
     main/objects/bridge.c
+    main/objects/checkpoint.c
     main/objects/flipping_cube.c
     main/objects/jump_booster.c
     main/objects/ramp.c
@@ -53,6 +54,7 @@ set(APP_SOURCES
     main/sfx/sfx_crash.c
     main/sfx/sfx_scrape.c
     main/sfx/sfx_cube_bump.c
+    main/sfx/sfx_gong.c
 )
 
 # Include directories — add paths to your headers here
