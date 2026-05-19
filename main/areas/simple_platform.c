@@ -112,7 +112,7 @@ bool area_simple_platform_tick(world_state_t* w, area_state_t* a, float dz) {
             if (b) b->y_base = block_top;
             a->boosters_owed--;
         } else {
-            obstacle_t* const t = tri_spawn_at(w, x, spawn_z);
+            obstacle_t* const t = world_place_pickup(w, a, x, spawn_z);
             if (t) t->y_base = block_top;
         }
 

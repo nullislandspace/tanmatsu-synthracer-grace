@@ -11,6 +11,7 @@
 #include "magicnumbers.h"
 #include "objects/booster.h"
 #include "objects/jump_booster.h"
+#include "objects/shield.h"
 #include "objects/tri.h"
 #include "objects/wall.h"
 
@@ -100,6 +101,19 @@ bool world_find_free_x(world_state_t const* w, uint32_t* prng,
         }
     }
     return false;
+}
+
+obstacle_t* world_place_pickup(world_state_t* w, area_state_t* a, float x, float z) {
+    // One owed special pickup per Tri slot, in priority order. Only
+    // shield is scheduled today; checkpoint (Phase 9.3) gets its
+    // branch when the object exists — the owed slot already carries
+    // the request so the scheduler API is ready.
+    if (a->owed_pickups[AREA_OWED_SHIELD] > 0) {
+        a->owed_pickups[AREA_OWED_SHIELD]--;
+        return shield_spawn_at(w, x, z);
+    }
+    // if (a->owed_pickups[AREA_OWED_CHECKPOINT] > 0) { ... }  // Phase 9.3
+    return tri_spawn_at(w, x, z);
 }
 
 // --- Area state machine --------------------------------------------
@@ -242,10 +256,11 @@ static void start_stage(world_state_t* w, uint16_t stage) {
     w->stage             = stage;
     w->stage_z_remaining = WORLD_STAGE_LENGTH_Z;
     w->stage_prng        = mix_stage_seed(w->level_seed, stage);
-    // Clear any unspent owed-counter from the previous stage. The
-    // rest-entry handler should already have drained it, but reset
-    // defensively so a logic bug doesn't accumulate across runs.
+    // Clear any unspent owed counters from the previous stage. The
+    // rest-entry handler should already have drained boosters, but
+    // reset defensively so a logic bug doesn't accumulate across runs.
     w->area.boosters_owed = 0;
+    for (int i = 0; i < AREA_OWED_COUNT; i++) w->area.owed_pickups[i] = 0;
 
     // Schedule the stage's boosters: divide the stage length into N
     // equal segments and place one booster in each segment at a
@@ -255,6 +270,17 @@ static void start_stage(world_state_t* w, uint16_t stage) {
     for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
         float const jitter = 0.25f + 0.5f * world_frand(&w->stage_prng);
         w->booster_due_at_progress[i] = ((float)i + jitter) * segment;
+    }
+
+    // Schedule the once-per-stage shield (Phase 9.2): from
+    // GAME_SHIELD_FIRST_STAGE onward, due at a random point in the
+    // first 70% of the stage so plenty of Tri slots follow it to
+    // host the pickup. Earlier stages get no shield.
+    if (stage >= GAME_SHIELD_FIRST_STAGE) {
+        w->shield_due_at_progress = world_frand(&w->stage_prng)
+                                  * (WORLD_STAGE_LENGTH_Z * 0.70f);
+    } else {
+        w->shield_due_at_progress = -1.0f;
     }
 
     start_next_area(w);
@@ -296,6 +322,8 @@ void world_init(world_state_t* w, uint32_t seed) {
     w->stage_z_remaining = 0.0f;          // already "at stage end" — rest end will fire start_stage(1)
     w->stage_prng        = mix_stage_seed(w->level_seed, 0);
     w->area.boosters_owed = 0;
+    for (int i = 0; i < AREA_OWED_COUNT; i++) w->area.owed_pickups[i] = 0;
+    w->shield_due_at_progress = -1.0f;          // nothing scheduled yet
     for (int i = 0; i < GAME_BOOSTERS_PER_STAGE; i++) {
         w->booster_due_at_progress[i] = -1.0f;  // nothing scheduled yet
     }
@@ -303,10 +331,11 @@ void world_init(world_state_t* w, uint32_t seed) {
     for (int i = 0; i < GAME_BOOSTERS_PER_REST; i++) {
         booster_spawn(w);
     }
-    // One jump booster in the pre-stage-1 lead-in so the jump can be
-    // tested straight away (Phase 9.1f). In-run, jump boosters spawn
-    // from the stage-3 rest onward (see the rest-area handler).
-    jump_booster_spawn(w);
+    // One shield in the pre-stage-1 lead-in (Phase 9.2) so the player
+    // starts each run with a shield to collect. In-run, shields are
+    // scheduled once per stage from stage 3 onward; jump boosters
+    // spawn from the stage-3 rest onward (see the rest-area handler).
+    shield_spawn(w);
 }
 
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
@@ -352,6 +381,14 @@ void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
                 w->area.boosters_owed++;
                 w->booster_due_at_progress[i] = -1.0f;
             }
+        }
+        // Once-per-stage shield (Phase 9.2). When its due mark is
+        // crossed, owe the active area a shield; the area's next Tri
+        // slot hosts it via world_place_pickup.
+        if (w->shield_due_at_progress >= 0.0f
+            && stage_progress >= w->shield_due_at_progress) {
+            w->area.owed_pickups[AREA_OWED_SHIELD]++;
+            w->shield_due_at_progress = -1.0f;
         }
     }
 

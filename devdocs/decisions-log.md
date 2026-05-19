@@ -3275,3 +3275,47 @@
 
 ---
 
+
+- 2026-05-19 — **Phase 9.2 — shield pickup.** Single-use shield that
+  absorbs a head-on crash. Built on branch `z_buffer`'s successor work
+  (committed to `main`).
+    - **Shield object** — `objects/shield.{c,h}`: a violet hexagonal
+      plate (`#B060FF` caps, `#6028A0` rim, `#D8B0FF` wireframe),
+      slowly spinning around Y on the shared booster cadence,
+      emit-based so it is depth-tested in the scene. Shape + colour
+      picked to stay distinct from the blue Tri pyramid, green speed
+      icosahedron and red jump octahedron.
+    - **Generalised owed-pickup API.** `area_state_t` gained an
+      `owed_pickups[AREA_OWED_COUNT]` array (enum `AREA_OWED_SHIELD`,
+      `AREA_OWED_CHECKPOINT` reserved for 9.3) and a shared helper
+      `world_place_pickup(w, a, x, z)` that every area's Tri-spawn
+      site now routes through — it upgrades a Tri slot to one owed
+      special pickup (consumed once per slot) or spawns a plain Tri.
+      The speed booster was deliberately **left as-is** on its own
+      `boosters_owed` field and per-area placement (it displaces a
+      big cube in pixel_field/big_blocks, rides the gate gap in
+      gateways — routing it through the Tri helper would have moved
+      it). `gateways`' `spawn_gate` and `dynamic_passage`'s `emit_tri`
+      had the `area_state_t*` threaded in to reach the helper.
+    - **Spawn schedule.** One shield per stage from
+      `GAME_SHIELD_FIRST_STAGE` (= 3), due at a random point in the
+      first 70% of the stage so Tri slots follow it to host it
+      (`world_state_t.shield_due_at_progress`, checked in
+      `world_advance` alongside the booster scheduler). The
+      pre-stage-1 lead-in spawns a shield instead of a jump booster.
+    - **Effect.** Collection banks a charge (`game_state.shield_-
+      charges`, cap `GAME_SHIELD_CHARGE_MAX` = **1**; checkpoint will
+      also cap at 1, jump stays at 3). A head-on crash spends the
+      charge and opens a `GAME_SHIELD_DURATION` (4 s) invulnerability
+      window (`shield_timer`): crashes are survivable during it, but
+      the crash SFX + spark shower still fire on each hit, debounced
+      by `GAME_SHIELD_HIT_COOLDOWN` (0.35 s). Auto-activates on the
+      crash (absorbs the hit) rather than being a button press.
+    - **Feedback.** `game_draw_shield` paints a spinning, gently
+      pulsing violet hexagonal ring (`SHIELD_AURA_RADIUS` 90 px)
+      around the ship's projected position while the window is open,
+      blinking through the final second. HUD: a violet hexagon
+      bottom-right, one row above the jump diamonds, via
+      `draw_shield_inventory`.
+    - **Phase 9.2 is complete.** Remaining in Phase 9: 9.3 checkpoint,
+      9.4 attachment slots + magnet, 9.5 battery.

@@ -28,6 +28,7 @@ set(APP_SOURCES
     main/objects/jump_booster.c
     main/objects/ramp.c
     main/objects/rest_pillar.c
+    main/objects/shield.c
     main/objects/tri.c
     main/areas/pixel_field.c
     main/areas/big_blocks.c

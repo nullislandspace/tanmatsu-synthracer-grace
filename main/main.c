@@ -802,6 +802,35 @@ static void draw_jump_inventory(game_state_t const* g) {
     }
 }
 
+// Bottom-right shield-charge readout (Phase 9.2): one violet hexagon
+// per banked shield charge, in a row directly above the jump-charge
+// diamonds. Same symbol size so the two HUD inventories read as a
+// set. Nothing is drawn at zero charges.
+#define SHIELD_HUD_COLOR  0xFFB060FFu
+static void draw_shield_inventory(game_state_t const* g) {
+    if (g->shield_charges <= 0) return;
+    float const margin  = 12.0f;
+    float const r       = (18.0f * 3.0f) * 0.5f;   // 27 px — matches the diamonds
+    float const spacing = 2.0f * r + 6.0f;
+    float const fb_w    = pax_buf_get_widthf(fb);
+    float const fb_h    = pax_buf_get_heightf(fb);
+    float const cy      = fb_h - margin - r - spacing;   // one row up from jumps
+    // Pointy-top unit hexagon corners (corner k at 90 + 60*k degrees).
+    static float const HX[6] = { 0.0f, -0.866025f, -0.866025f, 0.0f, 0.866025f, 0.866025f };
+    static float const HY[6] = { 1.0f,  0.5f,      -0.5f,     -1.0f, -0.5f,      0.5f      };
+    for (int i = 0; i < g->shield_charges; i++) {
+        float const cx = fb_w - margin - r - (float)i * spacing;
+        // Filled hexagon — a 6-triangle fan from the centre.
+        for (int k = 0; k < 6; k++) {
+            int const j = (k + 1) % 6;
+            pax_simple_tri(fb, SHIELD_HUD_COLOR,
+                           cx, cy,
+                           cx + HX[k] * r, cy - HY[k] * r,
+                           cx + HX[j] * r, cy - HY[j] * r);
+        }
+    }
+}
+
 // Phase 6 multiplier-HUD layout. Constants live up here so the
 // F1 / F4 hint y baselines (which sit *below* the panel across
 // every state) can reference them. The draw helper itself
@@ -2007,6 +2036,41 @@ void app_main(void) {
                 crashed = false;
                 stalled = false;
             }
+
+            // Phase 9.2 shield. Tick the invuln window + the SFX/
+            // spark debounce, then let a shield turn a head-on crash
+            // into a survivable hit.
+            if (game.shield_timer > 0.0f) {
+                game.shield_timer -= (float)dt;
+                if (game.shield_timer < 0.0f) game.shield_timer = 0.0f;
+            }
+            if (game.shield_hit_cooldown > 0.0f) {
+                game.shield_hit_cooldown -= (float)dt;
+                if (game.shield_hit_cooldown < 0.0f) game.shield_hit_cooldown = 0.0f;
+            }
+            if (crashed) {
+                // A banked charge opens the invuln window on the
+                // crashing frame.
+                if (game.shield_timer <= 0.0f && game.shield_charges > 0) {
+                    game.shield_charges--;
+                    game.shield_timer = GAME_SHIELD_DURATION;
+                }
+                // While the window is open the run survives; the
+                // crash SFX + spark shower still fire (debounced) so
+                // each hit reads.
+                if (game.shield_timer > 0.0f) {
+                    if (game.shield_hit_cooldown <= 0.0f) {
+                        sfx_crash_play();
+                        game_crash_burst(&game);
+                        game.shield_hit_cooldown = GAME_SHIELD_HIT_COOLDOWN;
+                    }
+                    crashed = false;
+                }
+            }
+            // Age any shielded-hit spark shower (harmless no-op when
+            // the pool is empty).
+            game_crash_tick(&game, (float)dt);
+
             world_advance(&world, dt, game.ship_speed_z, game.cam_x);
             // Accumulate active play time (excludes paused frames).
             // Used by save_commit_run_end so the duration_s stat
@@ -2440,6 +2504,13 @@ void app_main(void) {
                 render_run_scene(&world, &game, true);
                 t_after_obs = esp_timer_get_time();
                 game_draw_sparks(fb, &game);
+                // Spark shower from a shield-absorbed hit (Phase 9.2)
+                // — only live during the invuln window; a no-op
+                // otherwise.
+                game_draw_crash_sparks(fb, &game);
+                // Violet ring around the ship while the shield's
+                // invuln window is open.
+                game_draw_shield(fb, &game);
                 if (stage_banner_visible(&world)) {
                     // Rest areas (pre-stage-1 lead-in + between-stage
                     // breathers) announce the upcoming stage number
@@ -2457,6 +2528,7 @@ void app_main(void) {
                 draw_debug_readout(&game);
                 draw_boost_indicator(&game);
                 draw_jump_inventory(&game);
+                draw_shield_inventory(&game);
 
                 // Track peak stage reached this run.
                 if ((int)world.stage > s_peak_stage) s_peak_stage = (int)world.stage;

@@ -26,7 +26,8 @@
 // a booster centred in the gap at the same z; otherwise drops a
 // Tri there instead (Phase 6: every gateway hole holds *something*
 // pickup-able — booster takes priority, Tri fills the rest).
-static void spawn_gate(world_state_t* w, float half_gap, bool with_booster) {
+static void spawn_gate(world_state_t* w, area_state_t* a,
+                       float half_gap, bool with_booster) {
     float const gap_centre_extent = TRACK_HALF_WIDTH - half_gap;
     float       gap_x             = 0.0f;
     if (gap_centre_extent > 0.0f) {
@@ -45,7 +46,7 @@ static void spawn_gate(world_state_t* w, float half_gap, bool with_booster) {
     if (with_booster) {
         booster_spawn_at(w, gap_x, WORLD_Z_FAR_SPAWN);
     } else {
-        tri_spawn_at(w, gap_x, WORLD_Z_FAR_SPAWN);
+        world_place_pickup(w, a, gap_x, WORLD_Z_FAR_SPAWN);
     }
 }
 
@@ -85,7 +86,7 @@ bool area_gateways_tick(world_state_t* w, area_state_t* a, float dz) {
     float const thick = 2.0f * CUBE_GATE_HALF_D;
     while (a->next_event_z <= 0.0f && a->gates_remaining > 0) {
         bool const with_booster = a->boosters_owed > 0;
-        spawn_gate(w, a->gate_gap_half_w, with_booster);
+        spawn_gate(w, a, a->gate_gap_half_w, with_booster);
         if (with_booster) a->boosters_owed--;
         a->gates_remaining--;
         a->next_event_z += a->gate_pad_z + thick;

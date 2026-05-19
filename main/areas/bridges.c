@@ -88,7 +88,7 @@ bool area_bridges_tick(world_state_t* w, area_state_t* a, float dz) {
             t = (float)bridge_index / (float)(n_total - 1);
         }
         float const tri_x = a->tri_line_x0 + (a->tri_line_x1 - a->tri_line_x0) * t;
-        tri_spawn_at(w, tri_x, spawn_z);
+        world_place_pickup(w, a, tri_x, spawn_z);
 
         a->gates_remaining--;
         a->next_event_z += a->gate_pad_z + thick;

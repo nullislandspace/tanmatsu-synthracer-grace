@@ -65,6 +65,18 @@ typedef enum {
     AREA_TYPE_REST,                // empty stretch between stages
 } area_type_t;
 
+// Special pickups the stage scheduler can ask an area to host in
+// place of one of its generated Tris (Phase 9.2+). The speed booster
+// is deliberately NOT here — it keeps its own per-area placement via
+// `boosters_owed`. An area passes each Tri slot through
+// world_place_pickup(), which upgrades it to one owed special pickup
+// if any is owed (each Tri slot consumed at most once).
+typedef enum {
+    AREA_OWED_SHIELD = 0,     // Phase 9.2 — violet hexagonal-plate pickup
+    AREA_OWED_CHECKPOINT,     // Phase 9.3 — API reserved, not yet scheduled
+    AREA_OWED_COUNT,
+} area_owed_t;
+
 // Per-area sub-state. The world owns one of these at a time; the
 // active type drives how `length_remaining_z` and `next_event_z` are
 // interpreted by each area's tick function. The gateway-only fields
@@ -77,6 +89,11 @@ typedef struct area_state_s {
     float       gate_gap_half_w;     // GATEWAYS only: half-width of the opening
     float       gate_pad_z;          // GATEWAYS only: empty z between gates (and lead-in / trailing)
     int         boosters_owed;       // count of boosters the top-level scheduler has flagged but not placed
+    // Special pickups (shield, checkpoint) the scheduler owes this
+    // area, consumed at Tri slots by world_place_pickup(). Like
+    // boosters_owed, left untouched on area-init so an unplaced
+    // request carries into the next area; reset only at stage start.
+    int         owed_pickups[AREA_OWED_COUNT];
 
     // Overloaded int slot — semantics depend on area type:
     //   DYNAMIC_PASSAGE: 0 = non-mirrored (cubes against right wall,
@@ -140,6 +157,11 @@ typedef struct world_state_s {
     // overwritten with -1 once its scheduled point fires.
     float      booster_due_at_progress[GAME_BOOSTERS_PER_STAGE];
 
+    // Stage-progress position at which the once-per-stage shield is
+    // flagged-due (Phase 9.2). Set at stage start for stages >=
+    // GAME_SHIELD_FIRST_STAGE, -1 otherwise (and once it has fired).
+    float      shield_due_at_progress;
+
     // Debug-only override: when ≥ 0, the next `start_next_area` call
     // uses this area type instead of the picker (bypassing all
     // min-stage gating). Cleared as soon as it's consumed.
@@ -194,3 +216,16 @@ float    world_stage_interval_scale(uint16_t stage);
 bool world_find_free_x(struct world_state_s const* w, uint32_t* prng,
                        float z_target, float half_w, float pad,
                        int max_tries, float* out_x);
+
+// Spawn the pickup that belongs at a Tri slot at `(x, z)`. If the
+// stage scheduler owes the area a special pickup (a shield, and in
+// future a checkpoint), that is spawned here and the request is
+// consumed — one per call, so each Tri slot is upgraded at most once.
+// Otherwise a plain Tri is spawned. Areas call this wherever they
+// would otherwise call tri_spawn_at(). The speed booster is not
+// routed here — it keeps its own per-area placement.
+//
+// Returns the spawned obstacle (so the caller can adjust e.g.
+// y_base), or NULL if the pool is full.
+obstacle_t* world_place_pickup(struct world_state_s* w, struct area_state_s* a,
+                               float x, float z);

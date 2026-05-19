@@ -69,7 +69,7 @@ bool area_big_blocks_tick(world_state_t* w, area_state_t* a, float dz) {
         if (world_find_free_x(w, &w->stage_prng,
                               WORLD_Z_FAR_SPAWN, GAME_TRI_HALF_W,
                               TRI_REJECT_PAD, 8, &tri_x)) {
-            tri_spawn_at(w, tri_x, WORLD_Z_FAR_SPAWN);
+            world_place_pickup(w, a, tri_x, WORLD_Z_FAR_SPAWN);
         }
         float const tri_interval = (BIG_INTERVAL_MIN
                                    + world_frand(&w->stage_prng)

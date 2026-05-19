@@ -116,11 +116,11 @@ bool area_dynamic_gateway_tick(world_state_t* w, area_state_t* a, float dz) {
                 booster_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
                 a->boosters_owed--;
             } else {
-                tri_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
+                world_place_pickup(w, a, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
             }
             a->passage_mirror = 1;
         } else {
-            tri_spawn_at(w, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
+            world_place_pickup(w, a, a->gate_hole_x, WORLD_Z_FAR_SPAWN);
         }
 
         a->gates_remaining--;

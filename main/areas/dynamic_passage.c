@@ -91,7 +91,7 @@ void area_dynamic_passage_init(area_state_t* a, uint16_t stage, uint32_t* prng) 
 // the clutter side, not the bait lane) and not overlapping any
 // existing obstacle at WORLD_Z_FAR_SPAWN. Skip silently if every
 // candidate clashes — Tris are bonus pickups, not mandatory path.
-static void emit_tri(world_state_t* w, area_state_t const* a) {
+static void emit_tri(world_state_t* w, area_state_t* a) {
     float const flip_x       = passage_flip_x(a->passage_mirror);
     float const safe_radius  = FLIPPING_CUBE_HALF_W + GAME_TRI_HALF_W;
     float const x_extent     = TRACK_HALF_WIDTH - GAME_TRI_HALF_W - 0.5f;
@@ -125,7 +125,7 @@ static void emit_tri(world_state_t* w, area_state_t const* a) {
             }
         }
         if (!clash) {
-            tri_spawn_at(w, cand_x, z_target);
+            world_place_pickup(w, a, cand_x, z_target);
             return;
         }
     }

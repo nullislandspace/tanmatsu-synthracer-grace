@@ -503,10 +503,20 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
                     hit = OBSTACLE_HIT_IGNORE;
                     break;
                 case OBSTACLE_KIND_PICKUP_SHIELD:
+                    // Phase 9.2 shield. Bank one charge (capped),
+                    // count the pickup for run stats, and reuse the
+                    // booster-pickup audio edge flag for the ding.
+                    obstacle_despawn(o);
+                    g->pickups_shield += 1;
+                    if (g->shield_charges < GAME_SHIELD_CHARGE_MAX) {
+                        g->shield_charges += 1;
+                    }
+                    g->just_picked_up_booster = true;
+                    hit = OBSTACLE_HIT_IGNORE;
+                    break;
                 case OBSTACLE_KIND_RAMP:
-                    // Not implemented yet — ignore so collision
-                    // doesn't kill the ship on contact with a future
-                    // pickup. Phase 9 / future will fill these in.
+                    // Ramps are ridden, not collided with — the
+                    // vertical system's support scan handles them.
                     hit = OBSTACLE_HIT_IGNORE;
                     break;
                 default:
@@ -853,5 +863,47 @@ void game_draw_crash_sparks(pax_buf_t* fb, game_state_t const* g) {
         uint32_t const col = 0xFFFF0000u
                            | ((uint32_t)gc << 8) | (uint32_t)bc;
         pax_simple_line(fb, col, p->x, p->y, ex, ey);
+    }
+}
+
+// --- Shield aura (Phase 9.2) --------------------------------------------------
+
+// Violet ring drawn around the ship while the shield's invuln window
+// is open, so the otherwise-invisible effect reads on screen.
+#define SHIELD_AURA_COLOR      0xFFB060FFu   // matches the shield pickup
+#define SHIELD_AURA_RADIUS     90.0f         // inner radius, screen px
+#define SHIELD_AURA_THICKNESS  7.0f          // ring band width, screen px
+
+void game_draw_shield(pax_buf_t* fb, game_state_t const* g) {
+    if (g->shield_timer <= 0.0f) return;
+    // Blink through the final second so the player sees it expiring.
+    if (g->shield_timer < 1.0f && fmodf(g->shield_timer, 0.30f) < 0.15f) return;
+
+    // The ship's projected screen centre — same point game_crash_burst
+    // uses for the spark origin.
+    float sx, sy;
+    render_project(g->ship_x_world, SHIP_BASE_Y + g->ship_y, SHIP_Z_PLANE, &sx, &sy);
+
+    // Gentle size pulse + slow spin, both driven off the countdown so
+    // no extra time source is needed.
+    float const pulse = 1.0f + 0.08f * sinf(g->shield_timer * 8.0f);
+    float const r_in  = SHIELD_AURA_RADIUS * pulse;
+    float const r_out = r_in + SHIELD_AURA_THICKNESS;
+    float const spin  = g->shield_timer * 1.3f;
+
+    // Hexagon ring — inner and outer rings, banded into 6 quads.
+    pax_vec2f in[6], out[6];
+    for (int i = 0; i < 6; i++) {
+        float const a = spin + (float)i * (float)(M_PI / 3.0);
+        float const c = cosf(a), s = sinf(a);
+        in[i].x  = sx + r_in  * c;  in[i].y  = sy + r_in  * s;
+        out[i].x = sx + r_out * c;  out[i].y = sy + r_out * s;
+    }
+    for (int i = 0; i < 6; i++) {
+        int const j = (i + 1) % 6;
+        pax_simple_tri(fb, SHIELD_AURA_COLOR,
+                       in[i].x, in[i].y, in[j].x, in[j].y, out[j].x, out[j].y);
+        pax_simple_tri(fb, SHIELD_AURA_COLOR,
+                       in[i].x, in[i].y, out[j].x, out[j].y, out[i].x, out[i].y);
     }
 }

@@ -90,6 +90,16 @@ typedef struct game_state_s {
     // one per jump. The HUD renders the count as red diamonds.
     int   jump_charges;
 
+    // Shield inventory + effect (Phase 9.2). `shield_charges` is the
+    // banked count, rendered in the HUD as violet hexagons. On a
+    // head-on crash one charge is spent to open a `shield_timer`-
+    // second invulnerability window; while it is open crashes are
+    // survivable (the crash SFX + spark burst still fire, debounced
+    // by `shield_hit_cooldown`, but the run continues).
+    int   shield_charges;
+    float shield_timer;
+    float shield_hit_cooldown;
+
     // Phase 6 scoring. `multiplier` defaults to 1 and is bumped by
     // Tri pickups (not yet wired). `multiplier_max` tracks the peak
     // value reached this run for the per-run stat. Score and
@@ -224,6 +234,11 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt);
 // so it is depth-tested against obstacle geometry. Call between
 // scene_begin() and scene_flush().
 void game_submit_ship(game_state_t const* g);
+
+// Draw the shield aura — a spinning violet hexagonal ring around the
+// ship — while the shield invulnerability window is open. A no-op
+// when no shield is active.
+void game_draw_shield(pax_buf_t* fb, game_state_t const* g);
 
 // Draw a radial burst of red lines from each scraping wingtip.
 // No persistence — each call paints a fresh random pattern, so

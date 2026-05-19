@@ -224,6 +224,20 @@
 // jitter from the stage PRNG).
 #define GAME_BOOSTERS_PER_STAGE            4
 
+// First stage on which a shield pickup appears. One shield is
+// scheduled per stage from this stage onward (Phase 9.2).
+#define GAME_SHIELD_FIRST_STAGE            3
+
+// Shield inventory cap (HUD: violet hexagon) and effect tuning
+// (Phase 9.2). The player holds at most one shield. On a head-on
+// crash that charge opens a GAME_SHIELD_DURATION-second
+// invulnerability window; crashes are survivable during it.
+// GAME_SHIELD_HIT_COOLDOWN debounces the crash SFX / spark burst so
+// a sustained smash doesn't retrigger them every frame.
+#define GAME_SHIELD_CHARGE_MAX             1
+#define GAME_SHIELD_DURATION               4.0f
+#define GAME_SHIELD_HIT_COOLDOWN           0.35f
+
 // Number of boosters in each inter-stage rest area.
 #define GAME_BOOSTERS_PER_REST             1
 
