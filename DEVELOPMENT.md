@@ -3801,9 +3801,9 @@ the function makes it explicit and lets us animate the sun.
   at run end and the existing `run_stats_merge_into_all_time`
   sums it into the all-time total.
 
-### `render.c` — projection and scene draw
+### `render.c` — projection, scene submission, shadows
 
-- Frame entry, **explicit per-frame draw order** (matters for occlusion):
+- Frame entry, **explicit per-frame layer order** (matters for occlusion):
   1. `synthwave_draw_sky(fb)` — purple background fill
   2. `synthwave_draw_sun(fb, sun_dy)` — pre-triangulated sun bands, shifted
      downward as the sun-timer drains. Drawn **before** mountains so the
@@ -3813,20 +3813,39 @@ the function makes it explicit and lets us animate the sun.
   4. `synthwave_draw_wireframe(fb)` — cyan mountain lines
   5. `synthwave_draw_top_grid(fb)` — single magenta horizon line
   6. `synthwave_step(fb)` — animated grid floor; scroll speed modulated by
-     ship speed (caller advances the internal `j` counter by a variable
-     amount so faster ship = faster lines).
-  7. 3D scene (obstacles, pickups, painter-sorted by z, back-to-front)
-  8. Ship sprite (with shadow tint applied if `game.in_shadow`)
-  9. HUD (score, multiplier, region, pickup inventory, optional volume bar)
-- 3D projection: pinhole camera at `(0, 1.0, 0)` looking down +Z. World
-  coordinates: x = lateral, y = vertical, z = depth (positive = forward).
-  Project: `sx = HALF_W + (x - cam_x) * f / z`, `sy = HALF_H - (y - cam_y)
-  * f / z`. `f` chosen so 800px-wide screen frames a comfortable lateral
-  FOV. Render obstacles as 4–8 triangles each (front face + sides),
-  back-to-front sorted by z (no z-buffer). Use `pax_simple_tri()` from
-  `include/shapes/pax_tris.h`.
-- Ship: rendered as 3 triangles in screen space (no projection — fixed at
-  bottom of screen, only its `x` moves).
+     ship speed.
+  7. `render_shadows(fb)` — flat floor-shadow trapezoids (2D decals on the
+     floor — *not* depth-buffered).
+  8. **3D scene** — `scene_begin` → `render_submit_obstacles` →
+     `game_submit_ship` → `scene_flush`. Visibility is a per-pixel
+     z-buffer (see `scene.c`), not a painter's sort; obstacles and the
+     ship are all geometry in the same depth-tested pass.
+  9. HUD (score, multiplier, stage, pickup inventory, optional volume bar)
+- 3D projection: pinhole camera at `(cam_x, cam_y, 0)` looking down +Z.
+  World coordinates: x = lateral, y = vertical, z = depth (positive =
+  forward). `render_project` does `sx = HALF_W + f*(x-cam_x)/z`,
+  `sy = HORIZON_Y - f*(y-cam_y)/z` for the 2D floor-shadow quads;
+  `scene.c` carries its own copy of the same projection that also yields
+  1/z depth. The camera is a render-module global — `render_set_camera`
+  / `render_camera`, set once per frame.
+- **Geometry-emitter model.** `render_submit_obstacles` walks the
+  obstacle pool in pool order (no sort) and dispatches each obstacle to
+  an emitter: its per-object `obstacle_t.emit` callback if set, else the
+  default cube / pyramid / icosahedron emitter chosen by `kind`. An
+  emitter computes geometry in **world space** and hands it to
+  `scene_tri` / `scene_line` — it never projects or rasterizes itself.
+  Per-face camera-side culls are kept only as a speed optimisation.
+- **Adding a custom-shaped object:** the object module writes a
+  `static void <obj>_emit(obstacle_t const* o)` that submits world-space
+  triangles + wireframe edges via `scene_tri`/`scene_line` (reading
+  `render_camera()` for any back-face culling), and assigns it to
+  `o->emit` at spawn. No projection, no draw order, no rasterization in
+  the object — the z-buffer resolves visibility. `objects/ramp.c`,
+  `objects/jump_booster.c` and `objects/flipping_cube.c` are the worked
+  examples; the bridge span needs no emitter at all (the default
+  `y_base`-aware cube emitter renders it).
+- The ship is emitted by `game_submit_ship` (see `game.c`) into the same
+  scene, so it is depth-tested against obstacles like any other object.
 - HUD: top-right score + multiplier; top-left region indicator and
   challenge progress; bottom-left pickup inventory icons. Use
   `pax_font_saira_condensed` (faster) and `pax_clip()` so HUD doesn't fight
@@ -3843,6 +3862,38 @@ the function makes it explicit and lets us animate the sun.
   - "Stats" — show level, points to next, all-time highscore, today's
     challenges + their progress.
   - "Exit" — `bsp_device_restart_to_launcher()` (also bound to F1).
+
+### `scene.c` — depth-buffered 3D rasterizer
+
+The per-pixel z-buffer that replaced the per-object painter's algorithm
+(landed 2026-05-19; see that date's decisions-log entries for the full
+rationale). Not in the original plan.
+
+- Owns three PSRAM buffers, allocated once by `scene_init()`: a
+  `uint16_t` depth buffer (scaled 1/z; larger = nearer), an 8-bit
+  per-pixel **frame-stamp** plane, and a deferred wireframe-edge buffer.
+- `scene_begin(fb)` — binds the framebuffer and advances the frame
+  stamp. **No depth memset:** a depth value counts only if its stamp
+  equals the current frame, so a stale pixel reads as infinitely far.
+  This is what makes the frame start cost a counter increment instead
+  of a 768 KB clear.
+- `scene_tri(world ×3, argb)` — projects (per-vertex near-clip clamp),
+  then rasterizes **immediately** with a per-pixel 1/z depth test +
+  write. Triangle submission order is irrelevant, so there is no sort
+  and no triangle buffer.
+- `scene_line(world ×2, argb)` — projects and **defers** the edge into
+  the edge buffer.
+- `scene_flush()` — rasterizes every deferred edge last, depth-tested
+  with a ×1.02 nearer bias (an edge beats the coplanar face it outlines
+  but still loses to genuinely nearer geometry) and **no** depth write.
+- Visibility is per-pixel correct: stacked, straddling and
+  interpenetrating geometry all resolve with no draw-order reasoning.
+  Objects just emit world-space geometry (see the `render.c`
+  geometry-emitter model); `scene.c` does projection, depth and
+  rasterization centrally.
+- Cost: `obs` ≈ 21 ms (vs ≈ 6 ms for the old painter's renderer) — the
+  price of the per-pixel depth test. See the 2026-05-19 optimisation
+  entry; further `obs` gains are diminishing returns.
 
 ### `save.c` — persistence + slot management + stats (replaces planned `meta.c` persistence)
 
