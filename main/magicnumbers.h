@@ -271,6 +271,19 @@
 #define GAME_MAGNET_PULL_RATE_X            8.0f
 #define GAME_MAGNET_PULL_RATE_Z            8.0f
 
+// Battery upgrade (Phase 9.5). The battery is a shadow buffer: while it
+// holds charge, being in shadow (obstacle/terrain shadow OR a fully-set
+// sun) does not stall the ship — instead the battery discharges. In the
+// light it recharges. Charge is a 0..GAME_BATTERY_MAX scalar; each
+// GAME_BATTERY_PER_INDICATOR slice lights one of the ship's four
+// charge-indicator cells (the cell mid-discharge fades white→black over
+// its slice). The run cap (meta.battery_max_charge) is set per level in
+// Phase 11; for now it defaults to GAME_BATTERY_MAX so the battery is
+// testable. Discharge and recharge share GAME_BATTERY_RATE.
+#define GAME_BATTERY_MAX                   100.0f
+#define GAME_BATTERY_PER_INDICATOR         25.0f
+#define GAME_BATTERY_RATE                  25.0f   // charge units / s (both ways)
+
 // Number of boosters in each inter-stage rest area.
 #define GAME_BOOSTERS_PER_REST             1
 

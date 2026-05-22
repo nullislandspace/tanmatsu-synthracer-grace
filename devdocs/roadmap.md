@@ -177,18 +177,28 @@ Done in this order so each phase produces a runnable build:
      The ship-region render gating was generalised to the user's rule:
      `ship_region_visible()` hides **any** part whose attachment/upgrade
      isn't fitted. The two magnet-pole regions (`SHIP_REGION_MAGNET_0`
-     red / `_1` blue) draw only with the magnet equipped; the battery
-     panel + indicators are now hidden until 9.5 gives the battery an
-     install state. Built ungated (unlock gating is Phase 11); equipping
-     takes effect on the next run.
-   - **9.5 — Battery upgrade.** Needs a short design pass; likely
-     extends the sun/power budget. The ship model already carries the
-     hardware readout: a battery panel + four charge-indicator regions
-     (`SHIP_REGION_BATTERY_PANEL`, `SHIP_REGION_INDICATOR_0..3` in
-     `objects/ship_model.h`). This phase drives each indicator's colour
-     individually from charge state and skips drawing the panel +
-     indicators when no battery is installed (the hook is already in
-     `game_submit_ship`).
+     red / `_1` blue) draw only with the magnet equipped; likewise the
+     battery panel + indicators draw only with the battery equipped (the
+     battery became an equippable attachment in 9.5). Built ungated
+     (unlock gating is Phase 11); equipping takes effect on the next run.
+   - **9.5 — Battery upgrade.** ✅ done 2026-05-22. The battery is a
+     **shadow buffer**: a 0–100 charge (capacity `meta.battery_max_charge`,
+     a multiple of 25, default 100 now; meta-gated in Phase 11) that, while
+     > 0, suppresses the shadow speed-stall and drains at `GAME_BATTERY_RATE`
+     (25/s); recharges at the same rate in the light; starts each run full.
+     Because the sun penalty is mediated by the speed stall, buffering the
+     stall removes it for free — and post-sunset (which forces `in_shadow`)
+     is buffered too, giving ~max/25 s of extra cruise. A speed booster
+     pins it full for the boost's RAMPING/HOLDING phases. The four
+     `SHIP_REGION_INDICATOR_0..3` cells are driven from charge (cell k =
+     band [k·25,(k+1)·25], fades white→black mid-discharge), not
+     shadow-dimmed. The battery is an **equippable attachment**
+     (`ATTACH_BATTERY` in the Upgrade Ship picker); `battery_max_charge`
+     is its capacity. Active only when equipped AND capacity > 0
+     (`has_battery`), so an un-equipped battery hides the panel +
+     indicators via the existing `ship_region_visible` gate. Built ungated
+     (both the equip and the capacity are wide open for testing; Phase 11
+     gates them).
 10. **Regions**: ✅ dissolved 2026-05-13. Content variation now
     rides on stages + area types rather than a discrete 7-region
     overlay — new areas (e.g. bridges, dynamic_passage,

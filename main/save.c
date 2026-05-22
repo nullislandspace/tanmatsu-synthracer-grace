@@ -26,6 +26,9 @@ void save_init_defaults(save_data_t* s) {
     // Phase 9.4: two open equip slots by default (meta-progression will
     // gate this to 0/1/2 later). attach1/attach2 stay ATTACH_NONE (0).
     s->meta.attach_slots = 2;
+    // Phase 9.5: full battery by default (meta-progression will gate the
+    // capacity 0/25/50/75/100 later).
+    s->meta.battery_max_charge = (int32_t)GAME_BATTERY_MAX;
 }
 
 void save_init(void) {

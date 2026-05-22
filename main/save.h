@@ -95,6 +95,11 @@ typedef struct {
         // per slot (ATTACH_NONE = empty).
         int32_t attach_slots;
         int32_t attach1, attach2;
+        // Battery upgrade capacity (Phase 9.5). Max achievable charge,
+        // a multiple of GAME_BATTERY_PER_INDICATOR (0/25/50/75/100);
+        // 0 = no battery fitted. Set per level by meta-progression in
+        // Phase 11; defaults to 100 for now so the battery is testable.
+        int32_t battery_max_charge;
         int64_t last_custom_seed;
         int64_t last_seen_date;     // yyyymmdd
     } meta;

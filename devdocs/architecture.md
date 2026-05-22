@@ -249,6 +249,18 @@ the function makes it explicit and lets us animate the sun.
   pool. Same dimensions / colour fields, kind-dispatched
   collision response.
 
+- **Magnet (Phase 9.4)** — `world_magnet_pull(w, ship_x, ship_y, dt)`
+  pulls every active `OBSTACLE_KIND_PICKUP_*` toward the ship while it
+  sits inside the capture volume (forward `GAME_MAGNET_RADIUS_Z`, lateral
+  `_RADIUS_X`, and within `_RADIUS_Y` of the ship's belly so it ignores
+  pickups on a platform the ship passes under or ground pickups it flies
+  over). It slides the pickup's `x_world` toward the ship's lane (eased,
+  clamped — no overshoot) and reels `z_world` in (`_PULL_RATE_Z` on top of
+  the world scroll, clamped at the ship plane). Cubes/walls/ramps are
+  untouched. Called from the playing loop (main.c) after `world_advance`,
+  only when `game.has_magnet` — kept out of the const `game_step` /
+  `world_advance` so the equip state stays in `game_state`.
+
 - **Regions** (Phase 10) — **dissolved 2026-05-13.** The
   original plan was a discrete 7-region table cut-in on top
   of stages, with per-region palette / density / area-weight
@@ -358,6 +370,27 @@ the function makes it explicit and lets us animate the sun.
   Persistence is free — `last_run.pickups_tri = pickups_tri`
   at run end and the existing `run_stats_merge_into_all_time`
   sums it into the all-time total.
+- **Equipped attachments (Phase 9.4)**. `start_run` snapshots the
+  player's equipped attachments (from `save_data.meta.attach1/attach2`,
+  see `attachments.c`) into `game_state` once per run — `has_magnet` and
+  `has_battery` — so gameplay never reads the save mid-run. The magnet
+  itself lives in `world_magnet_pull` (see `world.c`); the render gating
+  for un-fitted parts lives in `game_submit_ship` (see the ship section
+  of `render.c` above).
+- **Battery (Phase 9.5) — shadow buffer**. When `has_battery`, the
+  battery is a charge reservoir (`battery_charge` in `[0, battery_max]`,
+  capacity from `meta.battery_max_charge`, starting full). In
+  `game_after_collide`, a derived `shadow_penalty` flag (= `in_shadow`
+  minus battery buffering) replaces `in_shadow` in the speed-stall
+  branch: while charge > 0 and shadowed, the ship does **not** stall and
+  the battery drains at `GAME_BATTERY_RATE` (25/s); in the light it
+  recharges at the same rate. Because the sun's sink rate is a function
+  of ship speed (not a direct shadow term), suppressing the stall also
+  removes the sun penalty — and post-sunset (which forces `in_shadow`)
+  is buffered too. A speed booster pins the battery full for the boost's
+  RAMPING/HOLDING phases (the pickup frame is the first RAMPING frame, so
+  the instant top-up is free; only the speed booster drives
+  `boost_phase`). See the 2026-05-22 Phase 9.5 decisions-log entries.
 
 ### `render.c` — projection, scene submission, shadows
 
@@ -405,21 +438,28 @@ the function makes it explicit and lets us animate the sun.
 - **The ship is an imported mesh.** `objects/ship_model.h` holds the ship
   geometry — generated from `openscad/ship.3mf` by
   `tools/ship_3mf_to_header.py`. The model is partitioned into regions
-  (`ship_region_t`: hull body, battery panel, four charge indicators) by
-  the OpenSCAD `color()` of each part (used as a part tag, not final
-  colour); each part is its own `<object>`/`<mesh>` in the 3MF, so the
-  converter concatenates them with per-mesh vertex-index offsets.
-  `game_submit_ship` (in `game.c`) transforms the vertices (scale +
-  placement macros from the header → bank roll about +z → world
+  (`ship_region_t`: hull body, battery panel, four charge indicators, two
+  magnet poles) by the OpenSCAD `color()` of each part (used as a part
+  tag, not final colour); each part is its own `<object>`/`<mesh>` in the
+  3MF, so the converter concatenates them with per-mesh vertex-index
+  offsets. `game_submit_ship` (in `game.c`) transforms the vertices (scale
+  + placement macros from the header → bank roll about +z → world
   placement), back-face culls, lights the **body** per-face while drawing
-  the panel + indicators **flat**, and emits triangles + the **body-only**
-  outline via `scene_tri`/`scene_line` into the same depth-tested scene as
-  the obstacles. To update the ship, re-export the 3MF and re-run the
-  converter — no code changes. The panel + four indicators are wired for
-  the Phase 9.5 battery module: each indicator is a distinct region with
-  its own `region_col[]` slot (individual on/off), and the submit loop has
-  a hook to skip the panel + indicators when no battery is fitted. See the
-  2026-05-22 ship decisions-log entries.
+  the other parts **flat**, and emits triangles + the **body-only** outline
+  via `scene_tri`/`scene_line` into the same depth-tested scene as the
+  obstacles. To update the ship, re-export the 3MF and re-run the converter
+  — no code changes.
+- **Attachment render gating + battery indicators (Phase 9.4 / 9.5).**
+  `ship_region_visible(region, g)` hides any part whose attachment isn't
+  fitted: the magnet poles need `g->has_magnet`, the battery panel + four
+  indicators need `g->has_battery` (both snapshotted into `game_state` at
+  `start_run` from the equipped attachments — see `game.c` and
+  `attachments.c`). When the battery is fitted, `game_submit_ship` drives
+  the four indicator regions from `g->battery_charge`: indicator k covers
+  charge band `[k·25,(k+1)·25]`, its brightness is the fraction of that
+  band filled (lerp black→white), and these cells are **not** shadow-dimmed
+  so brightness reads as charge, not lighting. See the 2026-05-22 ship and
+  Phase 9.4 / 9.5 decisions-log entries.
 - **Imported world objects.** Ordinary world objects can be imported the
   same way via the general converter `tools/object_3mf_to_header.py`
   (config-driven registry). Beyond the ship tool it emits region-tagged
@@ -580,7 +620,9 @@ typedef struct {
         int32_t unlock_starting_mult_4x;     // lv23
         int32_t unlock_starting_mult_max;    // lv24
         int32_t unlock_labyrinth;            // lv25
-        int32_t attach1, attach2;            // equipped attachment IDs (0 = none)
+        int32_t attach_slots;                // equip slots available (0/1/2; default 2)
+        int32_t attach1, attach2;            // equipped attachment_id_t per slot (0 = none)
+        int32_t battery_max_charge;          // battery capacity 0/25/50/75/100 (default 100)
         int64_t last_custom_seed;            // most recently entered seed
         int64_t last_seen_date;              // yyyymmdd; day-rollover detection
     } meta;
@@ -596,7 +638,9 @@ typedef struct {
 } save_data_t;
 ```
 
-`save_init_defaults(&s)` zeros the struct and sets `meta.level = 1`.
+`save_init_defaults(&s)` zeros the struct and sets `meta.level = 1`,
+`meta.attach_slots = 2`, and `meta.battery_max_charge = 100` — the latter
+two open for testing now; Phase 11 meta-progression gates them.
 
 **API:**
 - `void save_init(void);` — `mkdir /int/synthracer` if absent.
@@ -628,6 +672,24 @@ the player that day's world again; nothing is gated on it.
 user starts a seeded run; the seed-input screen prefills its
 buffer from this field. Phase 11 will add the per-seed best
 ring; today only the most-recent value is persisted.
+
+### `attachments.c` — ship attachment catalog (Phase 9.4 / 9.5)
+
+- Tiny catalog: `attachment_id_t` (`ATTACH_NONE=0`, `ATTACH_MAGNET`,
+  `ATTACH_BATTERY`, `ATTACH_ID_COUNT`) and `attachment_name(id)` for the
+  equip UI. **IDs are persisted to disk, so they're append-only** — never
+  renumber or remove one; an out-of-range id reads as `[empty]` so a save
+  from a newer build degrades gracefully on an older one.
+- `meta.attach1` / `attach2` hold the equipped id per slot;
+  `meta.attach_slots` (0/1/2) is how many slots exist. The **Upgrade Ship**
+  screen in `main.c` (`APP_STATE_UPGRADE` slot list →
+  `APP_STATE_UPGRADE_PICK` picker) writes them and persists immediately;
+  the picker offers every catalogued attachment (ungated for now — Phase
+  11 adds the `unlock_*` gating) and blocks equipping the one already in
+  the other slot. The battery additionally has a capacity
+  (`meta.battery_max_charge`); the **battery is active only when
+  `ATTACH_BATTERY` is in a slot AND capacity > 0** — `start_run` derives
+  `has_battery` / `has_magnet` from the equipped ids (see `game.c`).
 
 ### Audio subsystem — mixer + procedural music + procedural SFX
 

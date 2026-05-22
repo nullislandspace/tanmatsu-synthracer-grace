@@ -1706,7 +1706,15 @@ static void start_run(game_state_t* game, world_state_t* world, uint32_t seed, b
     // off until Phase 9.5 gives the battery an install state.
     game->has_magnet = (s_save.meta.attach1 == ATTACH_MAGNET
                         || s_save.meta.attach2 == ATTACH_MAGNET);
-    game->has_battery = false;
+    // Battery (Phase 9.5): an equippable attachment whose capacity is the
+    // meta.battery_max_charge upgrade (0 = no capacity). The battery is
+    // active only when it occupies a slot AND has capacity; it starts
+    // each run full.
+    bool const battery_equipped = (s_save.meta.attach1 == ATTACH_BATTERY
+                                   || s_save.meta.attach2 == ATTACH_BATTERY);
+    game->battery_max    = battery_equipped ? (float)s_save.meta.battery_max_charge : 0.0f;
+    game->has_battery    = (game->battery_max > 0.0f);
+    game->battery_charge = game->battery_max;
 
     input_set_mode(INPUT_MODE_PLAYING);
     s_run_started_us   = esp_timer_get_time();

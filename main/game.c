@@ -637,6 +637,31 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
     // pool again; the loop is gone today.
     (void)w;
 
+    // --- Battery (Phase 9.5) ---------------------------------------------
+    // The battery is a shadow buffer. `shadow_penalty` is what the speed
+    // dynamics below actually react to: normally it equals `in_shadow`,
+    // but while the battery holds charge it is forced false so the ship
+    // does not stall — the charge drains instead. In the light the
+    // battery recharges. A speed booster pins it at full for the boost's
+    // RAMPING/HOLDING phases (the instant top-up on pickup falls out of
+    // this — the pickup frame is the first RAMPING frame); once the boost
+    // starts COASTING (speed decay) normal charge/discharge resumes.
+    bool shadow_penalty = g->in_shadow;
+    if (g->has_battery) {
+        if (g->boost_phase == BOOST_RAMPING || g->boost_phase == BOOST_HOLDING) {
+            g->battery_charge = g->battery_max;
+        } else if (g->in_shadow) {
+            if (g->battery_charge > 0.0f) {
+                g->battery_charge -= GAME_BATTERY_RATE * dt;
+                if (g->battery_charge < 0.0f) g->battery_charge = 0.0f;
+                shadow_penalty = false;   // buffered — no stall this frame
+            }
+        } else {
+            g->battery_charge += GAME_BATTERY_RATE * dt;
+            if (g->battery_charge > g->battery_max) g->battery_charge = g->battery_max;
+        }
+    }
+
     // --- Speed dynamics --------------------------------------------------
     // Priority order (top wins):
     //   1. Active boost RAMP/HOLD — overrides everything, ship is
@@ -666,10 +691,11 @@ bool game_after_collide(game_state_t* g, world_state_t const* w, float dt) {
         if (g->boost_phase_time <= 0.0f) {
             g->boost_phase = BOOST_COASTING;
         }
-    } else if (g->in_shadow) {
+    } else if (shadow_penalty) {
         // Shadow stall — wins over the boost COAST (a player who
         // re-enters shadow during the coast still pays the stall
-        // cost). Linear decel toward zero.
+        // cost). Linear decel toward zero. `shadow_penalty` is
+        // `in_shadow` minus any battery buffering (Phase 9.5).
         float const decel = GAMEPLAY_CRUISE_SPEED / GAME_SHADOW_STALL_SECONDS;
         g->ship_speed_z -= decel * dt;
         if (g->ship_speed_z < 0.0f) g->ship_speed_z = 0.0f;
@@ -804,6 +830,26 @@ void game_submit_ship(game_state_t const* g) {
             ? dim_argb(SHIP_REGION_COLOR[r], GAME_SHIP_SHADOW_TINT)
             : (pax_col_t)SHIP_REGION_COLOR[r];
     }
+
+    // Phase 9.5: drive the four charge-indicator cells from the battery
+    // level (only drawn at all when has_battery — see ship_region_visible).
+    // Indicator k covers charge band [k·PER, (k+1)·PER]; its brightness is
+    // the fraction of that band filled, so the cell mid-discharge fades
+    // white→black. Deliberately NOT shadow-dimmed: the brightness must
+    // read as charge, not as lighting (a dimmed full cell would look like
+    // a partial charge). SHIP_REGION_INDICATOR_0..3 are contiguous.
+    if (g->has_battery) {
+        for (int k = 0; k < 4; k++) {
+            float f = (g->battery_charge - (float)k * GAME_BATTERY_PER_INDICATOR)
+                      / GAME_BATTERY_PER_INDICATOR;
+            if (f < 0.0f) f = 0.0f;
+            if (f > 1.0f) f = 1.0f;
+            uint32_t const v = (uint32_t)(f * 255.0f + 0.5f);
+            region_col[SHIP_REGION_INDICATOR_0 + k] =
+                0xFF000000u | (v << 16) | (v << 8) | v;
+        }
+    }
+
     pax_col_t const outline = g->in_shadow
         ? dim_argb(SHIP_MODEL_OUTLINE_COLOR, GAME_SHIP_SHADOW_TINT)
         : (pax_col_t)SHIP_MODEL_OUTLINE_COLOR;

@@ -13,6 +13,7 @@
 typedef enum {
     ATTACH_NONE = 0,   // empty slot
     ATTACH_MAGNET,     // pulls nearby pickups toward the ship's path
+    ATTACH_BATTERY,    // shadow buffer; capacity from meta.battery_max_charge
     ATTACH_ID_COUNT,   // sentinel — also the picker's row count
 } attachment_id_t;
 

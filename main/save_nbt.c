@@ -75,6 +75,7 @@ static void write_meta(NbtWriter* w, save_data_t const* s) {
     nbt_write_int32(w, "attach_slots",                s->meta.attach_slots);
     nbt_write_int32(w, "attach1",                     s->meta.attach1);
     nbt_write_int32(w, "attach2",                     s->meta.attach2);
+    nbt_write_int32(w, "battery_max_charge",          s->meta.battery_max_charge);
     nbt_write_int64(w, "last_custom_seed",            s->meta.last_custom_seed);
     nbt_write_int64(w, "last_seen_date",              s->meta.last_seen_date);
     nbt_write_end(w);
@@ -178,6 +179,7 @@ static void read_meta(NbtReader* r, save_data_t* s) {
         else if (type == NBT_INT32 && !strcmp(name, "attach_slots"))                s->meta.attach_slots                = nbt_read_int32(r);
         else if (type == NBT_INT32 && !strcmp(name, "attach1"))                     s->meta.attach1                     = nbt_read_int32(r);
         else if (type == NBT_INT32 && !strcmp(name, "attach2"))                     s->meta.attach2                     = nbt_read_int32(r);
+        else if (type == NBT_INT32 && !strcmp(name, "battery_max_charge"))          s->meta.battery_max_charge          = nbt_read_int32(r);
         else if (type == NBT_INT64 && !strcmp(name, "last_custom_seed"))            s->meta.last_custom_seed            = nbt_read_int64(r);
         else if (type == NBT_INT64 && !strcmp(name, "last_seen_date"))              s->meta.last_seen_date              = nbt_read_int64(r);
         else nbt_skip_payload(r, type);

@@ -3686,3 +3686,63 @@
       applied — the gate only decides eligibility; x and z pulls do the
       moving.
     - Builds clean, all symbols satisfied (text 93452 → 93516).
+
+- 2026-05-22 — Phase 9.5: battery upgrade (shadow buffer).
+    - **Concept.** The battery is a shadow buffer. Charge is a 0..100
+      scalar; while it holds charge, being in shadow (obstacle/terrain
+      shadow OR a fully-set sun) does **not** stall the ship — the charge
+      drains instead at GAME_BATTERY_RATE (25/s). In the light it
+      recharges at the same rate. When flat, the existing shadow stall
+      resumes. Capacity (`meta.battery_max_charge`, a multiple of 25,
+      0=none) is meta-gated in Phase 11; defaults to 100 now so it's
+      testable. The battery starts each run full.
+    - **Key realisation.** `in_shadow` has no *direct* sun penalty — it
+      drives a speed stall, and the sun only sinks faster *because* the
+      ship slowed (sun rate is a function of speed differential). So a
+      battery that suppresses the speed stall removes the sun penalty for
+      free. Implemented by deriving `shadow_penalty` in
+      `game_after_collide` (= `in_shadow` minus battery buffering) and
+      swapping the shadow speed branch from `in_shadow` to
+      `shadow_penalty`. Sun integration, scoring, Tri logic untouched.
+    - **Sunset buffering (confirmed with user).** Post-sunset forces
+      `in_shadow` true, so the battery buffers it too: past sunset the
+      ship keeps cruising (draining, no recharge) until the reserve is
+      gone, then stalls — a full battery buys ~max/25 s (4 s at 100).
+    - **Speed-booster interaction (user request).** Picking up a speed
+      booster instantly tops the battery to full and pins it there for
+      the boost's RAMPING/HOLDING phases; once it starts COASTING (speed
+      decay) normal charge/discharge resumes. Implemented by pinning
+      `battery_charge = battery_max` while `boost_phase` is RAMPING or
+      HOLDING — only the speed booster drives `boost_phase` (the jump
+      booster doesn't), and the pickup frame is the first RAMPING frame,
+      so the instant top-up falls out for free.
+    - **Indicators.** `game_submit_ship` drives the four
+      `SHIP_REGION_INDICATOR_0..3` cells from charge: cell k covers band
+      [k·25,(k+1)·25], brightness = fraction filled, lerp black→white, so
+      the cell mid-discharge fades. Charge 62 → cells 0,1 white, cell 2
+      ~half, cell 3 black. Deliberately **not** shadow-dimmed (a dimmed
+      full cell would misread as a partial charge). Band k → indicator k;
+      the physical fill order is to be eyeballed on-device.
+    - `has_battery` is now `battery_max > 0` (was hardcoded false in 9.4),
+      so the panel + indicators render again via the existing
+      `ship_region_visible` gate. Builds clean, all symbols satisfied
+      (text 93516 → 93846).
+
+- 2026-05-22 — Phase 9.5 fix: the battery is an equippable attachment.
+    - Bug: 9.5 shipped the battery as a standalone always-on field
+      (`meta.battery_max_charge` defaulted to 100 → `has_battery` true for
+      everyone), so it was active without being attached and there was no
+      way to attach it. That contradicted the user's model ("the battery
+      attachment ... attach it to the ship").
+    - Fix: added `ATTACH_BATTERY` to the `attachment_id_t` catalog (so it
+      appears in the Upgrade Ship picker alongside Magnet, ungated for
+      now). `meta.battery_max_charge` is now purely the **capacity** of
+      the battery upgrade; the battery is active only when `ATTACH_BATTERY`
+      occupies a slot AND capacity > 0. `start_run` sets `battery_max =
+      equipped ? battery_max_charge : 0`, `has_battery = battery_max > 0`.
+    - So two independent meta knobs, both ungated for testing now, gated
+      in Phase 11: whether the battery attachment is owned/equipped (slot),
+      and its capacity (`battery_max_charge`, default 100). Not equipped →
+      panel + indicators hidden and no shadow buffering, via the existing
+      `ship_region_visible` / `has_battery` paths (no change there).
+    - Builds clean, all symbols satisfied (text 93846 → 93900).

@@ -102,6 +102,18 @@ typedef struct game_state_s {
     bool  has_magnet;
     bool  has_battery;
 
+    // Battery state (Phase 9.5). Only meaningful when has_battery.
+    // `battery_max` is this run's capacity (a multiple of
+    // GAME_BATTERY_PER_INDICATOR, copied from meta.battery_max_charge by
+    // start_run); `battery_charge` is the live charge in [0, battery_max],
+    // starting full. While charge > 0 the battery buffers shadow (the
+    // ship doesn't stall — the charge drains instead at GAME_BATTERY_RATE);
+    // in the light it recharges at the same rate. A speed booster pins it
+    // at full for the boost's RAMPING/HOLDING phases. game_submit_ship
+    // drives the four indicator cells from this value.
+    float battery_charge;
+    float battery_max;
+
     // Vertical motion (Phase 9.1). `ship_y` is altitude above the
     // ship's rest height (SHIP_BASE_Y); 0 = grounded on the floor,
     // positive = airborne or standing on an obstacle top. `ship_vy`
