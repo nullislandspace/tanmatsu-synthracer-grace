@@ -37,6 +37,29 @@ module body() {
     }
 }
 
+module magnet() {
+    translate([1.5, 0.5, 0.5]) {
+        union() {
+            color("#A00C0C") {
+                union() {
+                    cube([0.5, 2, 0.25]);
+                    cube([1, 0.5, 0.25]);
+                }
+            }
+            color("#0C0CA0") {
+                union() {
+                    translate([1.5, 0, 0]) {
+                        cube([0.5, 2, 0.25]);
+                    }
+                    translate([1, 0, 0]) {
+                        cube([1, 0.5, 0.25]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // battery panel
 module batterypanel() {
     color("#0c0c0c") {
@@ -60,3 +83,8 @@ chargeindicator(0, "#fffffa");
 chargeindicator(1, "#fffffb");
 chargeindicator(2, "#fffffc");
 chargeindicator(3, "#fffffd");
+
+magnet();
+mirror(v=[1, 0, 0]) {
+    magnet();
+}
