@@ -44,6 +44,18 @@ its own `<object>`/`<mesh>`, which the converter relies on.
 Keep it **low-poly** — every triangle costs a transform + cull + fill each
 frame, and every kept feature edge is a line. Use low `$fn`.
 
+**Do NOT extrude text in the model.** OpenSCAD `text()` + `linear_extrude`
+generates *hundreds to thousands* of triangles per string (font glyph
+outlines, not curve subdivision — so `$fn` barely helps; only a blocky
+font does). Instead, leave the text out of the mesh and draw it at runtime
+as **Hershey vector strokes** (`extern int simplex[95][112];` from
+`hershey.h`, drawn as `scene_line` segments) — a whole word is ~100-150
+cheap lines, and the string becomes a runtime parameter (data-driven,
+recolourable). `objects/synthengine_sign.{c,h}` is the worked example: it
+draws an arbitrary `text` + `text_color` on the sign's panel face; the
+mesh is just the gantry. Hershey Y is already up, so glyph coords map
+straight into world-up with no flip.
+
 Example (`openscad/restarea_markers.scad`): a grey tapered hex post plus a
 green sphere on top:
 
@@ -51,6 +63,11 @@ green sphere on top:
 color("#A0A0A0") cylinder(h=20, d1=4, d2=1.5, $fn=6);   // post
 color("#00FF00") translate([0,0,22.3]) sphere(d=5, $fn=7); // beacon
 ```
+
+A second worked model is `openscad/synthengine3d.scad` (the SynthEngine Ad
+gantry sign): pillars + sign panel + holders, with the wordmark
+deliberately **omitted** from the model and drawn at runtime per the note
+above.
 
 ## 2. Export to 3MF
 
