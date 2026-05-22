@@ -3471,3 +3471,61 @@
       its original rationale was wrong. Outline is now 168 edges.
     - Mis-diagnosed once as a stale/mismatched 3MF export before the
       multi-object structure was spotted; the file was correct all along.
+
+- 2026-05-22 — Ship indicators: body-only outline + white flat cells.
+    - **Outline scope is configurable; default body-only.** The converter
+      gained an `OUTLINE_REGIONS` set (default `{SHIP_REGION_BODY}`) and
+      only emits feature edges whose faces are in those regions. The
+      four charge indicators are tiny, so their cyan outlines obscured
+      the cell colour — outlining just the hull fixes it. Outline 84
+      edges, none on the panel/indicators.
+    - **Indicators default white, drawn flat.** Their first colour
+      (`#202428`, a dark "off" cell) was invisible on the `#0C0C0C`
+      panel — they rendered fine, just black-on-black. Default is now
+      `0xFFFFFFFF` (white, "on"). `game_submit_ship` now lights only the
+      `SHIP_REGION_BODY` region per-face; the panel + indicators are
+      drawn flat so the cells read as uniform lights, not shaded
+      surfaces.
+    - **Battery-module forward hooks (Phase 9.5).** The four indicators
+      are distinct regions, each with its own `region_col[]` slot, so the
+      module can drive them on/off individually. A comment hook sits at
+      the cull point in `game_submit_ship` where "skip panel + indicators
+      when no battery fitted" will go (a one-line guard). When that lands,
+      `region_col[]` likely becomes a runtime value rather than the static
+      header default.
+    - Note for later: indicators sit only ~0.005 world-units above the
+      panel; if they z-fight while banking, raise the indicator height in
+      the model or add a small depth bias.
+
+- 2026-05-22 — Rest-area markers: imported beacon replaces green posts.
+    - Replaced the green cube rest-area posts (`objects/rest_pillar.c`,
+      now deleted) with an imported OpenSCAD model: a grey tapered hex
+      post topped by a green beacon sphere. Source
+      `openscad/restarea_markers.3mf` → `objects/restarea_marker_model.h`
+      via the new general converter `tools/object_3mf_to_header.py`.
+      Spawned by `objects/restarea_marker.c` (`restarea_marker_pair_spawn`,
+      called from `areas/rest.c` at the same wall-segment cadence as
+      before — one marker per side wall, base on the wall top via
+      `y_base = WALL_HEIGHT`, scaled to ~2.0 u tall).
+    - **General converter (vs the ship's).** `object_3mf_to_header.py` is
+      a config-driven generalisation of `ship_3mf_to_header.py` for
+      ordinary world objects placed by an obstacle emit callback. It adds
+      what the ship didn't need: region-TAGGED triangles AND edges, a
+      per-region fill table + a per-region outline table, a vertical
+      anchor option (centre vs base — markers use **base** so they stand
+      up from the wall top), and a scale anchor option (wingspan vs total
+      height — markers use **height** = 2.0 u). The ship keeps its own
+      tool untouched; the two could be merged later. Marker regions:
+      `RESTMARK_REGION_POST` (grey `#A0A0A0`, lit per-face, white
+      outline) and `RESTMARK_REGION_BEACON` (green `#00FF00`, flat, green
+      outline).
+    - **Pulsing beacon.** `restarea_marker_emit` pulses the beacon FILL
+      between full green and grey (`MARKER_BEACON_GREY` `#808080`) on a
+      cosine, `MARKER_PULSE_PERIOD_S = 1.0` s (full → grey → full). The
+      beacon OUTLINE stays full green (does not pulse); the post outline
+      is white. Same geometry-emitter + back-face-cull pattern as the
+      checkpoint/ship.
+    - Note: each marker is ~72 tris + 67 outline edges, and a rest
+      stretch can have several pairs in view at once — heavier than the
+      old 1-cube posts. Watch FPS in long rest areas; if needed, lower
+      the beacon `$fn` in the SCAD or thin the outline.

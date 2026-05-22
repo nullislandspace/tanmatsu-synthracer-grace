@@ -28,7 +28,7 @@ set(APP_SOURCES
     main/objects/flipping_cube.c
     main/objects/jump_booster.c
     main/objects/ramp.c
-    main/objects/rest_pillar.c
+    main/objects/restarea_marker.c
     main/objects/shield.c
     main/objects/tri.c
     main/areas/pixel_field.c

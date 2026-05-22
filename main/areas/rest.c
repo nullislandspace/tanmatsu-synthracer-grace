@@ -2,15 +2,15 @@
 
 #include <math.h>
 
-#include "objects/rest_pillar.h"
+#include "objects/restarea_marker.h"
 #include "objects/wall.h"   // WALL_SEGMENT_LEN / WALL_SEGMENT_HALF_D
 #include "world.h"
 
-// Centre-to-centre spacing of the green border-wall posts that flag
+// Centre-to-centre spacing of the green border-wall markers that flag
 // the rest stretch. Three wall segments (= 9 u) apart, matching the
 // bridges area's pillar cadence so the rest area reads as the same
 // visual family.
-#define REST_PILLAR_PAD_Z   (WALL_SEGMENT_LEN * 3.0f)
+#define REST_MARKER_PAD_Z   (WALL_SEGMENT_LEN * 3.0f)
 
 // Snap a target spawn z down to the nearest wall-segment centre at
 // or below `target`, so the posts land cleanly on the wall grid
@@ -42,8 +42,8 @@ bool area_rest_tick(world_state_t* w, area_state_t* a, float dz) {
     // outside the ship's reachable x, so they never collide.
     float const spawn_z = snap_to_wall_segment(WORLD_Z_FAR_SPAWN);
     while (a->next_event_z <= 0.0f) {
-        rest_pillar_pair_spawn(w, spawn_z);
-        a->next_event_z += REST_PILLAR_PAD_Z;
+        restarea_marker_pair_spawn(w, spawn_z);
+        a->next_event_z += REST_MARKER_PAD_Z;
     }
 
     return a->length_remaining_z <= 0.0f;

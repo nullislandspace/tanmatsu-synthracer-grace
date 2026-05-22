@@ -170,7 +170,13 @@ Done in this order so each phase produces a runnable build:
      screen) plus the Magnet attachment — pulls nearby pickups
      toward the ship within a radius.
    - **9.5 — Battery upgrade.** Needs a short design pass; likely
-     extends the sun/power budget.
+     extends the sun/power budget. The ship model already carries the
+     hardware readout: a battery panel + four charge-indicator regions
+     (`SHIP_REGION_BATTERY_PANEL`, `SHIP_REGION_INDICATOR_0..3` in
+     `objects/ship_model.h`). This phase drives each indicator's colour
+     individually from charge state and skips drawing the panel +
+     indicators when no battery is installed (the hook is already in
+     `game_submit_ship`).
 10. **Regions**: ✅ dissolved 2026-05-13. Content variation now
     rides on stages + area types rather than a discrete 7-region
     overlay — new areas (e.g. bridges, dynamic_passage,

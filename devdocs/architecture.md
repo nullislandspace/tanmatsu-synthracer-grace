@@ -402,8 +402,24 @@ the function makes it explicit and lets us animate the sun.
   `objects/jump_booster.c` and `objects/flipping_cube.c` are the worked
   examples; the bridge span needs no emitter at all (the default
   `y_base`-aware cube emitter renders it).
-- The ship is emitted by `game_submit_ship` (see `game.c`) into the same
-  scene, so it is depth-tested against obstacles like any other object.
+- **The ship is an imported mesh.** `objects/ship_model.h` holds the ship
+  geometry — generated from `openscad/ship.3mf` by
+  `tools/ship_3mf_to_header.py`. The model is partitioned into regions
+  (`ship_region_t`: hull body, battery panel, four charge indicators) by
+  the OpenSCAD `color()` of each part (used as a part tag, not final
+  colour); each part is its own `<object>`/`<mesh>` in the 3MF, so the
+  converter concatenates them with per-mesh vertex-index offsets.
+  `game_submit_ship` (in `game.c`) transforms the vertices (scale +
+  placement macros from the header → bank roll about +z → world
+  placement), back-face culls, lights the **body** per-face while drawing
+  the panel + indicators **flat**, and emits triangles + the **body-only**
+  outline via `scene_tri`/`scene_line` into the same depth-tested scene as
+  the obstacles. To update the ship, re-export the 3MF and re-run the
+  converter — no code changes. The panel + four indicators are wired for
+  the Phase 9.5 battery module: each indicator is a distinct region with
+  its own `region_col[]` slot (individual on/off), and the submit loop has
+  a hook to skip the panel + indicators when no battery is fitted. See the
+  2026-05-22 ship decisions-log entries.
 - HUD: top-right score + multiplier; top-left region indicator and
   challenge progress; bottom-left pickup inventory icons. Use
   `pax_font_saira_condensed` (faster) and `pax_clip()` so HUD doesn't fight
