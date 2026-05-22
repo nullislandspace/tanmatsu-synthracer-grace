@@ -3597,3 +3597,25 @@
       i-frames — it's a flourish + a fast bank reversal (the ship also
       drifts laterally L→R as the bank flips, a natural reposition).
       Tunables: `GAME_BARREL_DURATION`, `GAME_BARREL_TRIGGER_BANK`.
+
+- 2026-05-22 — Ship model: magnet-pole regions added.
+    - `openscad/ship.3mf` gained two more tagged parts — magnet poles
+      coloured `#A00C0C` (red) and `#0C0CA0` (blue), the conventional
+      N/S two-tone. They prep the Phase 9.4 magnet attachment the same
+      way the battery panel + 4 indicators prep 9.5: a hardware readout
+      baked into the hull, drawn now, gated later.
+    - **Converter only — no C changes.** `tools/ship_3mf_to_header.py`
+      learned the two colours: added them to `COLOR_REGION` and appended
+      `SHIP_REGION_MAGNET_0`/`_1` to `REGION_ORDER`, with flat fill
+      colours `0xFFA00C0Cu` / `0xFF0C0CA0u` in `SHIP_REGION_COLOR`. Left
+      out of `OUTLINE_REGIONS` (body-only outline stays), so the poles
+      render flat and un-outlined like the panel/indicators. The render
+      path in `game_submit_ship` is fully data-driven off
+      `SHIP_REGION_COUNT` + the per-face-light-only-on-BODY rule, so it
+      picked up the new regions with no edit.
+    - Regenerated header: 169 verts / 306 tris (was 117 / 210) — the two
+      poles are 48 tris each; body unchanged at 118, edges unchanged at
+      84. Builds clean, all symbols satisfied.
+    - **Future (9.4):** skip drawing `SHIP_REGION_MAGNET_*` when the
+      magnet attachment isn't equipped — same hook shape as the planned
+      battery skip for the panel + indicators in `game_submit_ship`.

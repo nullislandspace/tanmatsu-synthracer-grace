@@ -37,6 +37,8 @@ COLOR_REGION = {
     '#FFFFFB': 'SHIP_REGION_INDICATOR_1',
     '#FFFFFC': 'SHIP_REGION_INDICATOR_2',
     '#FFFFFD': 'SHIP_REGION_INDICATOR_3',
+    '#A00C0C': 'SHIP_REGION_MAGNET_0',
+    '#0C0CA0': 'SHIP_REGION_MAGNET_1',
 }
 DEFAULT_REGION = 'SHIP_REGION_BODY'
 
@@ -47,6 +49,8 @@ REGION_ORDER = [
     'SHIP_REGION_INDICATOR_1',
     'SHIP_REGION_INDICATOR_2',
     'SHIP_REGION_INDICATOR_3',
+    'SHIP_REGION_MAGNET_0',
+    'SHIP_REGION_MAGNET_1',
 ]
 
 # Target full wingspan in world units. The model's lateral extent is
@@ -57,10 +61,10 @@ TARGET_WINGSPAN = 0.56
 # this angle. Filters coplanar triangulation diagonals; keeps real
 # facet ridges.
 FEATURE_ANGLE_DEG = 18.0
-# Only these regions get a wireframe outline. The battery panel and the
-# four charge indicators are small, so outlining them just obscures the
-# flat colour those parts carry (and which the battery plugin will drive),
-# so only the hull body is outlined.
+# Only these regions get a wireframe outline. The battery panel, the four
+# charge indicators and the two magnet poles are small, so outlining them
+# just obscures the flat colour those parts carry (and which the battery /
+# magnet plugins will drive), so only the hull body is outlined.
 OUTLINE_REGIONS = {'SHIP_REGION_BODY'}
 
 
@@ -241,10 +245,12 @@ def main():
     w("#define SHIP_MODEL_ROLL_PIVOT_Y %sf" % ("%.6f" % roll_pivot_y))
     w("")
     w("// ---- region colours (ARGB) ----")
-    w("// Body is shaded per-face by the submit code; panel + indicators are")
-    w("// drawn flat. Indicators default to white ('on'); a later battery")
-    w("// module will drive each indicator's colour individually (and skip")
-    w("// drawing the panel + indicators entirely when no battery is fitted).")
+    w("// Body is shaded per-face by the submit code; the panel, indicators")
+    w("// and magnet poles are drawn flat. Indicators default to white")
+    w("// ('on'); a later battery module will drive each indicator's colour")
+    w("// individually (and skip drawing the panel + indicators entirely when")
+    w("// no battery is fitted). The two magnet poles likewise render only")
+    w("// when the magnet attachment is equipped (gating wired in Phase 9.4).")
     w("static const uint32_t SHIP_REGION_COLOR[SHIP_REGION_COUNT] = {")
     w("    [SHIP_REGION_BODY]          = 0xFFD8AA38u,  // gold hull")
     w("    [SHIP_REGION_BATTERY_PANEL] = 0xFF0C0C0Cu,  // near-black panel")
@@ -252,6 +258,8 @@ def main():
     w("    [SHIP_REGION_INDICATOR_1]   = 0xFFFFFFFFu,")
     w("    [SHIP_REGION_INDICATOR_2]   = 0xFFFFFFFFu,")
     w("    [SHIP_REGION_INDICATOR_3]   = 0xFFFFFFFFu,")
+    w("    [SHIP_REGION_MAGNET_0]      = 0xFFA00C0Cu,  // magnet pole (red)")
+    w("    [SHIP_REGION_MAGNET_1]      = 0xFF0C0CA0u,  // magnet pole (blue)")
     w("};")
     w("#define SHIP_MODEL_OUTLINE_COLOR  0xFF31FBFBu  // cyan ridge")
     w("")
