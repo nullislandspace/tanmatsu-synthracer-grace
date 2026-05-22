@@ -1394,7 +1394,7 @@ static void draw_upgrade_picker(void) {
             rows[i].value = annot[i];
         }
     }
-    char title[16];
+    char title[24];   // "Slot " + worst-case int + NUL (value is only 1-2)
     snprintf(title, sizeof(title), "Slot %d", s_upgrade_slot + 1);
     menu_view_t const m = {
         .title = title, .title_h = 36.0f, .subtitle = NULL,
