@@ -767,17 +767,25 @@ void game_submit_ship(game_state_t const* g) {
             continue;
         }
 
-        // Directional lighting tint from the normalised face normal.
-        float const nlen = sqrtf(nx * nx + ny * ny + nz * nz);
-        float const inv  = (nlen > 1e-6f) ? (1.0f / nlen) : 0.0f;
-        float       d    = (nx * inv) * light_x + (ny * inv) * light_y + (nz * inv) * light_z;
-        if (d < 0.0f) d = 0.0f;
-        float const tint = 0.55f + 0.45f * d;
+        // Future (battery module): when no battery is fitted, skip the
+        // panel + indicator regions here; the battery plugin will also
+        // drive each indicator's colour individually via region_col[].
+        pax_col_t col = region_col[t->region];
+        if (t->region == SHIP_REGION_BODY) {
+            // Per-face directional lighting on the hull only. The panel
+            // and indicators stay flat so the charge cells read as
+            // uniform lights, not shaded surfaces.
+            float const nlen = sqrtf(nx * nx + ny * ny + nz * nz);
+            float const inv  = (nlen > 1e-6f) ? (1.0f / nlen) : 0.0f;
+            float       d    = (nx * inv) * light_x + (ny * inv) * light_y + (nz * inv) * light_z;
+            if (d < 0.0f) d = 0.0f;
+            col = dim_argb(col, 0.55f + 0.45f * d);
+        }
 
         scene_tri(wx[a], wy[a], wz[a],
                   wx[b], wy[b], wz[b],
                   wx[cc], wy[cc], wz[cc],
-                  dim_argb(region_col[t->region], tint));
+                  col);
     }
 
     for (size_t i = 0; i < SHIP_MODEL_EDGE_COUNT; i++) {

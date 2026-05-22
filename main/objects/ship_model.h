@@ -36,15 +36,16 @@ typedef struct { uint8_t a, b, c; uint8_t region; } ship_model_tri_t;
 
 // ---- region colours (ARGB) ----
 // Body is shaded per-face by the submit code; panel + indicators are
-// flat. The battery plugin will later override the indicator colours
-// from charge state.
+// drawn flat. Indicators default to white ('on'); a later battery
+// module will drive each indicator's colour individually (and skip
+// drawing the panel + indicators entirely when no battery is fitted).
 static const uint32_t SHIP_REGION_COLOR[SHIP_REGION_COUNT] = {
     [SHIP_REGION_BODY]          = 0xFFD8AA38u,  // gold hull
     [SHIP_REGION_BATTERY_PANEL] = 0xFF0C0C0Cu,  // near-black panel
-    [SHIP_REGION_INDICATOR_0]   = 0xFF202428u,  // 'off' charge cell
-    [SHIP_REGION_INDICATOR_1]   = 0xFF202428u,
-    [SHIP_REGION_INDICATOR_2]   = 0xFF202428u,
-    [SHIP_REGION_INDICATOR_3]   = 0xFF202428u,
+    [SHIP_REGION_INDICATOR_0]   = 0xFFFFFFFFu,  // white ('on')
+    [SHIP_REGION_INDICATOR_1]   = 0xFFFFFFFFu,
+    [SHIP_REGION_INDICATOR_2]   = 0xFFFFFFFFu,
+    [SHIP_REGION_INDICATOR_3]   = 0xFFFFFFFFu,
 };
 #define SHIP_MODEL_OUTLINE_COLOR  0xFF31FBFBu  // cyan ridge
 
