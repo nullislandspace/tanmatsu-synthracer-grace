@@ -67,32 +67,42 @@ void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float su
     for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
         obstacle_t const* o = &w->obstacles[i];
         if (!o->active) continue;
-        // Per-object shadow callback wins when set. Otherwise default
-        // dispatch: only cubes get the trapezoid shadow; walls run
-        // along z outside the playfield and pickups / ramps are too
-        // short for a meaningful shadow.
+        // Per-object shadow callback wins when set (none use it today —
+        // the default below is elevation-aware, so the bridge span no
+        // longer needs its own). Otherwise default dispatch: only cubes
+        // cast a floor shadow; walls run along z outside the playfield
+        // and pickups / ramps are too short to matter.
         if (o->shadow) {
             o->shadow(fb, o, cam_x, sun_y);
             continue;
         }
         if (o->kind != OBSTACLE_KIND_CUBE) continue;
 
-        float const xL          = o->x_world - o->half_w;
-        float const xR          = o->x_world + o->half_w;
-        float const z_far       = o->z_world - o->half_d;            // obstacle's near face
-        float const shadow_len  = o->height * factor;
-        float const z_near_raw  = z_far - shadow_len;                // toward camera
+        float const xL = o->x_world - o->half_w;
+        float const xR = o->x_world + o->half_w;
+        // Optimisation: an occluder sitting entirely over a border wall
+        // (bridge pillars, sign pillars) throws its shadow onto the wall
+        // strip, off the visible playfield floor — skip it.
+        if (xR <= -TRACK_HALF_WIDTH || xL >= TRACK_HALF_WIDTH) continue;
 
-        // Same near-plane clipping rule as the emitters: drop the
-        // whole shadow if its far edge is already past the near
-        // clip; otherwise clip the near edge of the quad to
-        // RENDER_NEAR_CLIP_Z so the projection doesn't blow up.
+        // The floor shadow is the exact dual of the ship's in_shadow ray
+        // (game.c): the sun direction is (0, 1, factor), so a floor point
+        // z0 at this obstacle's x-span is shadowed iff
+        //   z0 in [zN - factor*yTop,  zF - factor*yBase]
+        // with zN/zF the obstacle's near/far faces and yBase/yTop its
+        // bottom/top. Same `factor` as the gameplay test, so the two
+        // never disagree, and the y_base term makes it elevation-aware
+        // for free (a raised box's shadow detaches toward the camera).
+        float const z_far      = (o->z_world + o->half_d) - factor * o->y_base;
+        float const z_near_raw = (o->z_world - o->half_d) - factor * (o->y_base + o->height);
+
+        // Drop the whole shadow if its far edge is already past the near
+        // clip; otherwise clamp the near edge so the projection is sane.
         if (z_far < RENDER_NEAR_CLIP_Z) continue;
         float const z_near = (z_near_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : z_near_raw;
 
         // Project the four corners of the shadow rectangle on the
-        // y = 0 ground plane. The result on screen is a trapezoid
-        // (narrow at the obstacle base, wider toward the camera).
+        // y = 0 ground plane. The result on screen is a trapezoid.
         float sx_NL, sy_NL, sx_NR, sy_NR;
         float sx_FL, sy_FL, sx_FR, sy_FR;
         render_project(xL, 0.0f, z_near, &sx_NL, &sy_NL);

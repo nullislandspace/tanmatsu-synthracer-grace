@@ -28,42 +28,13 @@
 // beneath), front and any visible side correctly, and the depth
 // buffer occludes it against everything else.
 
-// --- Span shadow callback ------------------------------------------
-// The span is elevated, so the default "shadow length = height ×
-// factor projected from y=0 near face" doesn't model the actual
-// shadow geometry. We use (y_base + height) × factor — the top of
-// the span as seen from a sun moving down — which produces a long
-// shadow as the sun sets and a short one when it's high. Shadow
-// shape is a rectangle on the ground spanning the same x range as
-// the span, extending toward the camera from the span's near face.
-static void span_shadow(pax_buf_t* fb, obstacle_t const* o, float cam_x, float sun_y) {
-    (void)cam_x;  // render_project reads the camera global
-    if (sun_y >= GAME_SUN_SINK_RANGE_PX) return;
-
-    float const sun_norm  = sun_y / GAME_SUN_SINK_RANGE_PX;
-    float const factor    = GAME_SHADOW_LEN_FACTOR_MIN
-                          + (GAME_SHADOW_LEN_FACTOR_MAX - GAME_SHADOW_LEN_FACTOR_MIN) * sun_norm;
-    float const shadow_h  = BRIDGE_SPAN_Y_BASE + o->height;
-    float const shadow_len = shadow_h * factor;
-
-    float const xL = o->x_world - o->half_w;
-    float const xR = o->x_world + o->half_w;
-    float const z_far = o->z_world - o->half_d;
-    if (z_far < RENDER_NEAR_CLIP_Z) return;
-    float const z_near_raw = z_far - shadow_len;
-    float const z_near = (z_near_raw < RENDER_NEAR_CLIP_Z) ? RENDER_NEAR_CLIP_Z : z_near_raw;
-
-    float sx_NL, sy_NL, sx_NR, sy_NR, sx_FL, sy_FL, sx_FR, sy_FR;
-    render_project(xL, 0.0f, z_near, &sx_NL, &sy_NL);
-    render_project(xR, 0.0f, z_near, &sx_NR, &sy_NR);
-    render_project(xL, 0.0f, z_far,  &sx_FL, &sy_FL);
-    render_project(xR, 0.0f, z_far,  &sx_FR, &sy_FR);
-
-    uint16_t* const fb_pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    uint16_t  const sh_packed = direct_565_pack(GAME_SHADOW_FLOOR_COLOR, fb->reverse_endianness);
-    direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_NR, sy_NR, sx_FR, sy_FR, sh_packed);
-    direct_565_tri(fb_pixels, sx_NL, sy_NL, sx_FR, sy_FR, sx_FL, sy_FL, sh_packed);
-}
+// --- Span shadow ---------------------------------------------------
+// The span is elevated, but render_shadows' default floor-shadow is now
+// elevation-aware (it uses y_base, matching the ship's in_shadow ray),
+// so the span no longer needs a custom shadow callback — the generic
+// path renders its detached, sun-angle-correct shadow. (The bespoke
+// span_shadow callback was removed 2026-05-22 when the two shadow paths
+// were unified.)
 
 // (Phase 9.1b retired the span_collide IGNORE hack. Collision is
 // now Y-aware, so the elevated span — sitting at y ≥ 3 u — simply
@@ -112,6 +83,5 @@ void bridge_spawn(world_state_t* w, float z) {
         // flies under (and can land on) it. Pre-9.1b a span_collide
         // IGNORE hack masked a y_base of 0; that is long gone.
         span->y_base = BRIDGE_SPAN_Y_BASE;
-        span->shadow = span_shadow;
     }
 }

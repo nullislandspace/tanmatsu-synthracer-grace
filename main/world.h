@@ -62,6 +62,7 @@ typedef enum {
     AREA_TYPE_DYNAMIC_PASSAGE,     // flipping cubes along one wall + heavy pixel-field clutter
     AREA_TYPE_DYNAMIC_GATEWAY,     // gateway walls with a per-area fixed hole, each blocked by a flipping cube
     AREA_TYPE_SIMPLE_PLATFORM,     // elevated multi-block platform with Tris on top; fly under or jump onto it
+    AREA_TYPE_SYNTHENGINE_AD,      // very short: one gantry sign spanning the track + one pickup under it
     AREA_TYPE_REST,                // empty stretch between stages
 } area_type_t;
 

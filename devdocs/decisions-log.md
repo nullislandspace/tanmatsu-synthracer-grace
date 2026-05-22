@@ -3746,3 +3746,75 @@
       panel + indicators hidden and no shadow buffering, via the existing
       `ship_region_visible` / `has_battery` paths (no change there).
     - Builds clean, all symbols satisfied (text 93846 → 93900).
+
+- 2026-05-22 — "SynthEngine Ad" area + generic gantry sign + shadow unification.
+    - **New area `AREA_TYPE_SYNTHENGINE_AD`** (`main/areas/synthengine_ad.{c,h}`):
+      a very short area (3 × WALL_SEGMENT_LEN = 9 u) that can occur in any
+      level (added to the picker candidates, min_stage 1). It spawns ONE
+      gantry sign spanning the track plus ONE pickup under it, chosen
+      uniformly at random from the five kinds (Tri / booster / jump /
+      shield / checkpoint) via the `*_spawn_at` helpers. Tab (the debug
+      force-next-area key in main.c) now forces this area (was
+      SIMPLE_PLATFORM).
+    - **Generic sign object** (`main/objects/synthengine_sign.{c,h}`,
+      imported from `openscad/synthengine3d.3mf` via the general converter
+      — config `synthsign`, `wingspan 12` → scale 1.0). The mesh is just
+      the gantry: two grey pillars (hex/oct cylinders, hence the mesh),
+      a white sign panel, blue corner holders — 68 verts / 108 tris. The
+      object is generic: `synthengine_sign_spawn(w, z, text)` takes the
+      text to show, copied into the obstacle's scratch.
+    - **Text via Hershey strokes, not geometry.** The original model's 3D
+      `text()` was ~1700 triangles; we dropped it from the model and draw
+      the ad string at runtime as Hershey vector strokes (~130 cheap
+      `scene_line`s) on the panel's camera-facing face — auto-fitted to the
+      panel width, centred, red. `simplex[]` (defined in rendertext.c's TU
+      via hershey.h) is referenced `extern`; Hershey Y is already up, so it
+      maps straight into world-up. This makes the sign text data-driven.
+    - **Round-robin ad list** lives in the AREA (`AD_TEXTS[]` in
+      synthengine_ad.c — easy to edit): "Race The Synth", "SynthEngine 3D",
+      "(C) 2026 cavac", "Your AD here?", "[CENSORED]", "16 16 16", "Vote El
+      Presidente". A file-static cursor advances per spawned sign; each
+      sign captures its text at spawn (scratch), so it's fixed for that
+      instance. `synthengine_ad_reset()` (called from world_init) resets
+      the cursor to the first entry each run.
+    - **Collision = crash on the panel only.** The obstacle's box IS the
+      elevated panel slab (x ±5, model-y 7-10 above the wall top, thin z),
+      so default cube head-on dispatch crashes the ship if it ever reaches
+      it; the pillars (on the walls) and the open gap below are outside the
+      box, so flying under is free. The emit anchors the *visual* at
+      WALL_HEIGHT independently of this box. (As modelled the panel sits
+      at y ~ 7.7-10.7, above a ~1.5 jump, so the crash is correct but
+      rarely triggers — a model change would be needed to make it a real
+      hazard.)
+    - **Shadow unification (the bigger change).** Per the user's call, the
+      rendered floor shadow must use the *same* geometry as the ship's
+      `in_shadow` ray so they never disagree. `render_shadows` (render.c)
+      now computes a box's floor shadow as the exact dual of that ray
+      (sun direction (0, 1, factor), same `factor`):
+        z_near = (z_world - half_d) - factor*(y_base + height)
+        z_far  = (z_world + half_d) - factor*(y_base)
+      This is **elevation-aware for free** (y_base term) and, for ground
+      cubes, matches the old near edge but correctly extends the shadow
+      under the full box footprint. Consequences:
+        * The **bridge's bespoke `span_shadow` callback was deleted** — the
+          unified default renders its elevated span correctly now.
+        * The sign panel (an elevated cube) casts a correct shadow with no
+          custom code.
+        * **Optimisation:** occluders sitting entirely over a border wall
+          (bridge pillars, rest-area markers) are skipped — their shadow
+          falls on the wall strip, off the visible floor.
+      The per-object `o->shadow` callback hook is kept (no users now). NB:
+      this lengthens/displaces the rendered shadows of all elevated cubes
+      (platform blocks especially) — more physically correct; worth an
+      on-device glance.
+    - Builds clean, all symbols satisfied (text 93516 → 96530; the sign +
+      area added ~3 KB, the removed custom collide + span_shadow clawed
+      some back).
+
+- 2026-05-22 — Sign text colour is per-spawn (sign re-use).
+    `synthengine_sign_spawn` gained a `uint32_t text_color` arg (stored in
+    the obstacle scratch alongside the text, read by the emit), instead of
+    a hardcoded red in the object. The area passes it — the SynthEngine Ad
+    area defines `AD_TEXT_COLOR` (red) and hands it in. Lets the same sign
+    object render different signage in different colours; a per-ad-text
+    colour array would slot into the area trivially if wanted later.

@@ -216,6 +216,20 @@ the function makes it explicit and lets us animate the sun.
     WORLD_Z_FAR_SPAWN` (= 100 u) prefix guarantees any
     previous-area obstacle has crossed the camera before the
     first gate's alignment lead-in begins counting.
+  * `AREA_TYPE_SYNTHENGINE_AD` — a very short area (3 ×
+    `WALL_SEGMENT_LEN`), pickable in any level. Spawns one
+    gantry sign spanning the track (`objects/synthengine_sign`)
+    plus one randomly-chosen pickup under it. The sign is an
+    imported mesh (pillars + panel + holders) whose ad TEXT is
+    drawn at runtime as Hershey vector strokes on the panel face
+    (cheap — no text geometry in the mesh); the area owns a
+    round-robin list of ad strings (`AD_TEXTS[]` in
+    synthengine_ad.c) and a cursor reset each run by
+    `synthengine_ad_reset()` (called from `world_init`). The sign's
+    collision/shadow box is just the elevated panel slab, so flying
+    under it is free and only the panel casts a shadow; hitting the
+    panel is a head-on crash. Tab (debug force-next-area) forces
+    this area.
   * `AREA_TYPE_REST` — internal-only, not pickable by
     `pick_area_type`; inserted only on stage rollover. Today
     empty; Phase 5 will sprinkle bonus pickups here on a
@@ -406,7 +420,17 @@ the function makes it explicit and lets us animate the sun.
   6. `synthwave_step(fb)` — animated grid floor; scroll speed modulated by
      ship speed.
   7. `render_shadows(fb)` — flat floor-shadow trapezoids (2D decals on the
-     floor — *not* depth-buffered).
+     floor — *not* depth-buffered). Each cube's floor shadow is the exact
+     **dual of the ship's `in_shadow` ray** (game.c): same sun direction
+     `(0, 1, factor)` and `factor`, so the rendered shadow and the
+     gameplay shadow never disagree. The shadowed floor z-range is
+     `[zN - factor·(y_base+height), zF - factor·y_base]` — elevation-aware
+     via the `y_base` term (a raised box's shadow detaches toward the
+     camera), which is why the bridge span no longer needs a custom shadow
+     callback. Occluders sitting entirely over a border wall (bridge
+     pillars, rest markers) are skipped (their shadow lands off the
+     visible floor). The per-object `o->shadow` override hook remains but
+     is currently unused.
   8. **3D scene** — `scene_begin` → `render_submit_obstacles` →
      `game_submit_ship` → `scene_flush`. Visibility is a per-pixel
      z-buffer (see `scene.c`), not a painter's sort; obstacles and the

@@ -8,6 +8,7 @@
 #include "areas/pixel_field.h"
 #include "areas/rest.h"
 #include "areas/simple_platform.h"
+#include "areas/synthengine_ad.h"
 #include "magicnumbers.h"
 #include "objects/booster.h"
 #include "objects/checkpoint.h"
@@ -141,6 +142,7 @@ static bool area_is_applicable(area_type_t t, uint16_t stage) {
         case AREA_TYPE_DYNAMIC_PASSAGE: min_stage = 2; max_stage = 5;      break;
         case AREA_TYPE_DYNAMIC_GATEWAY: min_stage = 3; max_stage = 6;      break;
         case AREA_TYPE_SIMPLE_PLATFORM: min_stage = 2; max_stage = 0xFFFF; break;
+        case AREA_TYPE_SYNTHENGINE_AD:  min_stage = 1; max_stage = 0xFFFF; break;  // any level
         case AREA_TYPE_REST:            min_stage = 1; max_stage = 0xFFFF; break;  // never picked anyway
         default:                        min_stage = 1; max_stage = 0xFFFF; break;
     }
@@ -163,6 +165,7 @@ static area_type_t pick_area_type(uint16_t stage, uint32_t* prng) {
         AREA_TYPE_DYNAMIC_PASSAGE,
         AREA_TYPE_DYNAMIC_GATEWAY,
         AREA_TYPE_SIMPLE_PLATFORM,
+        AREA_TYPE_SYNTHENGINE_AD,
     };
     int const n = (int)(sizeof(candidates) / sizeof(candidates[0]));
 
@@ -190,6 +193,7 @@ static void start_next_area(world_state_t* w) {
         case AREA_TYPE_DYNAMIC_PASSAGE: area_dynamic_passage_init(&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_DYNAMIC_GATEWAY: area_dynamic_gateway_init(&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_SIMPLE_PLATFORM: area_simple_platform_init(&w->area, w->stage, &w->stage_prng); break;
+        case AREA_TYPE_SYNTHENGINE_AD:  area_synthengine_ad_init (&w->area, w->stage, &w->stage_prng); break;
         case AREA_TYPE_REST:            area_rest_init           (&w->area, WORLD_REST_LENGTH_Z);       break;
     }
 }
@@ -204,6 +208,7 @@ static bool area_tick(world_state_t* w, float dz) {
         case AREA_TYPE_DYNAMIC_PASSAGE: return area_dynamic_passage_tick(w, a, dz);
         case AREA_TYPE_DYNAMIC_GATEWAY: return area_dynamic_gateway_tick(w, a, dz);
         case AREA_TYPE_SIMPLE_PLATFORM: return area_simple_platform_tick(w, a, dz);
+        case AREA_TYPE_SYNTHENGINE_AD:  return area_synthengine_ad_tick (w, a, dz);
         case AREA_TYPE_REST:            return area_rest_tick           (w, a, dz);
     }
     return false;
@@ -315,6 +320,8 @@ void world_init(world_state_t* w, uint32_t seed) {
     }
     w->forced_next_area_type = -1;
     w->level_seed = seed ? seed : 1u;
+    // Every run opens on the first ad text (round-robin cursor reset).
+    synthengine_ad_reset();
     // Start each wall's far cursor at half a segment so the first
     // segment is centred at z = WALL_SEGMENT_HALF_D (= 1.5), running
     // from z=0 to z=3 — between the first two drawn grid stripes.

@@ -60,6 +60,42 @@ OBJECTS = {
         'scale': ('height', 2.0),   # total world-units height standing up
         'vanchor': 'base',          # min-y sits at the origin (on the wall)
     },
+    'synthsign': {
+        'src': 'openscad/synthengine3d.3mf',
+        'dst': 'main/objects/synthengine_sign_model.h',
+        'prefix': 'SYNTHSIGN',
+        'enum': 'synthsign_region_t',
+        'vert_type': 'synthsign_vert_t',
+        'tri_type': 'synthsign_tri_t',
+        'edge_type': 'synthsign_edge_t',
+        # The ad text is NOT in the model — it's drawn at runtime as
+        # Hershey vector strokes (cheap), so the mesh is just the gantry:
+        # two pillars, the white sign panel, and the blue corner holders.
+        'color_region': {
+            '#A0A0A0': 'SYNTHSIGN_REGION_PILLAR',
+            '#FFFFFF': 'SYNTHSIGN_REGION_PANEL',
+            '#0C0CFF': 'SYNTHSIGN_REGION_HOLDER',
+        },
+        'default_region': 'SYNTHSIGN_REGION_PILLAR',
+        'region_order': ['SYNTHSIGN_REGION_PILLAR', 'SYNTHSIGN_REGION_PANEL',
+                         'SYNTHSIGN_REGION_HOLDER'],
+        'region_fill': {
+            'SYNTHSIGN_REGION_PILLAR': '0xFFA0A0A0u',  # grey posts
+            'SYNTHSIGN_REGION_PANEL':  '0xFFFFFFFFu',  # white sign face
+            'SYNTHSIGN_REGION_HOLDER': '0xFF0C0CFFu',  # blue corner clamps
+        },
+        'region_outline': {
+            'SYNTHSIGN_REGION_PILLAR': '0xFFFFFFFFu',  # white
+            'SYNTHSIGN_REGION_PANEL':  '0xFFC0C0C0u',  # light grey
+            'SYNTHSIGN_REGION_HOLDER': '0xFF6060FFu',  # lighter blue
+        },
+        'outline_regions': {'SYNTHSIGN_REGION_PILLAR', 'SYNTHSIGN_REGION_PANEL',
+                            'SYNTHSIGN_REGION_HOLDER'},
+        # Model is built at world scale (lateral extent 12 = wall outer
+        # edge to outer edge), so wingspan 12 -> scale 1.0 (1:1, all axes).
+        'scale': ('wingspan', 12.0),
+        'vanchor': 'base',          # min-y sits on the wall top (y_base)
+    },
 }
 
 

@@ -2158,7 +2158,7 @@ void app_main(void) {
         // a stray TAB on a menu doesn't strand the world in an odd
         // state.
         if (input_consume_force_next_area() && app_state == APP_STATE_PLAYING) {
-            world_force_next_area(&world, AREA_TYPE_SIMPLE_PLATFORM);
+            world_force_next_area(&world, AREA_TYPE_SYNTHENGINE_AD);
         }
         // Debug: G toggles godmode (crash / stall suppressed below).
         if (input_consume_godmode_toggle()) {

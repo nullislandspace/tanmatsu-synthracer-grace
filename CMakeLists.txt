@@ -30,6 +30,7 @@ set(APP_SOURCES
     main/objects/ramp.c
     main/objects/restarea_marker.c
     main/objects/shield.c
+    main/objects/synthengine_sign.c
     main/objects/tri.c
     main/areas/pixel_field.c
     main/areas/big_blocks.c
@@ -38,6 +39,7 @@ set(APP_SOURCES
     main/areas/dynamic_passage.c
     main/areas/dynamic_gateway.c
     main/areas/simple_platform.c
+    main/areas/synthengine_ad.c
     main/areas/rest.c
     main/nbt.c
     main/save.c
