@@ -255,7 +255,7 @@ static float gyro_steering(void) {
     return (a < 0.0f) ? -v : v;
 }
 
-float input_steering(void) {
+void input_steer_held(bool* out_left, bool* out_right) {
     bool left  = poll_nav(BSP_INPUT_NAVIGATION_KEY_LEFT);
     bool right = poll_nav(BSP_INPUT_NAVIGATION_KEY_RIGHT);
 
@@ -269,6 +269,13 @@ float input_steering(void) {
         right = right || poll_scancode(
                     (bsp_input_scancode_t)controls_settings_key(CONTROL_KEY_RIGHT));
     }
+    *out_left  = left;
+    *out_right = right;
+}
+
+float input_steering(void) {
+    bool left, right;
+    input_steer_held(&left, &right);
 
     int const key_steer = (right ? 1 : 0) - (left ? 1 : 0);
 

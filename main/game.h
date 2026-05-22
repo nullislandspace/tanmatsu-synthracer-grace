@@ -80,6 +80,18 @@ typedef struct game_state_s {
     float bank;               // -1..+1 signed banking factor
     float cam_x;              // camera follows ship laterally
 
+    // Barrel roll (corkscrew). When the ship is fully banked one way
+    // (|bank| >= GAME_BARREL_TRIGGER_BANK) with that side held and the
+    // player also presses the opposite side, the ship rolls a full turn
+    // and snaps to the opposite max bank. `roll_spin` is the decaying
+    // extra roll (radians) added to the visual bank during the move —
+    // 0 = idle; it's visual only (the collision box is axis-aligned).
+    // `spin_dir` is the target side (+1 right / -1 left). `barrel_locked`
+    // blocks re-triggering until both steer buttons are released together.
+    float roll_spin;
+    int   spin_dir;
+    bool  barrel_locked;
+
     // Vertical motion (Phase 9.1). `ship_y` is altitude above the
     // ship's rest height (SHIP_BASE_Y); 0 = grounded on the floor,
     // positive = airborne or standing on an obstacle top. `ship_vy`
@@ -191,7 +203,11 @@ void game_init(game_state_t* g);
 // the support scan needs). Call *before* game_collide so the
 // position passed to collision is where the player is trying to be.
 // `steer` is a signed deflection in [-1.0, +1.0].
-void game_step(game_state_t* g, world_state_t const* w, float dt, float steer);
+// `steer` is the combined steering value in [-1, +1] (keys + gyro);
+// `left_held` / `right_held` are the raw digital steer-button states,
+// needed for the barrel-roll gesture (both held while fully banked).
+void game_step(game_state_t* g, world_state_t const* w, float dt, float steer,
+               bool left_held, bool right_held);
 
 // Trigger a jump: inject GAME_JUMP_SPEED into `ship_vy` if the ship
 // is grounded. A no-op while airborne (no double-jump). game_step's

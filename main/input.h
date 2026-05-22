@@ -32,6 +32,12 @@ bool input_drain_events(void);
 // gives proportional tilt steering. A held key overrides tilt.
 float input_steering(void);
 
+// Raw digital steer-button states (LEFT/RIGHT D-pad plus, during
+// PLAYING, the configurable steering scancodes). Unlike input_steering()
+// these are not collapsed — both can be true at once — so callers can
+// detect the both-held barrel-roll gesture. Gyro tilt is not included.
+void input_steer_held(bool* out_left, bool* out_right);
+
 // True for the frame where the "use pickup" button (Space or Gamepad-A)
 // was just pressed. Self-clears after one read.
 bool input_consume_pickup(void);

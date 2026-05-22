@@ -25,6 +25,15 @@
 #define BANK_ACTIVE_RATE      3.5f
 #define BANK_PASSIVE_RATE     1.0f
 
+// Barrel roll (corkscrew). GAME_BARREL_DURATION is how long the full
+// turn takes; the bank is driven the full -1..+1 over the same window.
+// GAME_BARREL_TRIGGER_BANK is the |bank| the ship must already be at for
+// the gesture (both buttons held) to fire — high enough that it only
+// triggers from a committed full bank, not mid-roll.
+#define GAME_BARREL_DURATION      0.45f
+#define GAME_BARREL_TRIGGER_BANK  0.9f
+#define GAME_BARREL_TURN          (2.0f * 3.14159265358979f)
+
 // Lateral world-units travelled per second at full bank.
 #define SHIP_TURN_RATE        3.5f
 
@@ -103,7 +112,7 @@ static void draw_wingtip_burst(pax_buf_t* fb, game_state_t const* g, int side) {
     // mesh vertices. Without it, sparks emit from the level-
     // flight position and visibly drift away from the wing when
     // the ship is banking.
-    float const bank_angle = g->bank * MAX_BANK_RAD;
+    float const bank_angle = g->bank * MAX_BANK_RAD + g->roll_spin;
     float const c          = cosf(bank_angle);
     float const s          = sinf(bank_angle);
     float const local_x    = (float)side * SPARK_WING_HALF_W;
@@ -138,15 +147,44 @@ void game_init(game_state_t* g) {
     g->multiplier_max    = 1;
 }
 
-void game_step(game_state_t* g, world_state_t const* w, float dt, float steer) {
+void game_step(game_state_t* g, world_state_t const* w, float dt, float steer,
+               bool left_held, bool right_held) {
     if (dt <= 0.0f) return;
 
+    // --- Barrel roll (corkscrew) ------------------------------------------
+    // The re-trigger lock clears only when BOTH steer buttons are released
+    // together. Trigger: not locked, both buttons now held, and the ship
+    // is already fully banked one way — roll a full turn to the opposite
+    // max. spin_dir is opposite the current bank.
+    if (!left_held && !right_held) g->barrel_locked = false;
+    if (g->roll_spin == 0.0f && !g->barrel_locked
+        && left_held && right_held
+        && fabsf(g->bank) >= GAME_BARREL_TRIGGER_BANK) {
+        g->spin_dir      = (g->bank < 0.0f) ? +1 : -1;
+        g->roll_spin     = -(float)g->spin_dir * GAME_BARREL_TURN;
+        g->barrel_locked = true;
+    }
+
     // --- Bank dynamics ----------------------------------------------------
-    // `steer` is a proportional deflection in [-1, +1]; the bank
-    // chases it. "Active" (faster) ramp whenever the player is
-    // asking for any deflection at all, "passive" recentre otherwise.
-    float const bank_target   = steer;
-    float const bank_rate     = (steer != 0.0f) ? BANK_ACTIVE_RATE : BANK_PASSIVE_RATE;
+    // `steer` is a proportional deflection in [-1, +1]; the bank chases
+    // it. "Active" (faster) ramp whenever the player is asking for any
+    // deflection at all, "passive" recentre otherwise. While a barrel
+    // roll is in flight the bank is instead forced to the spin's target
+    // max over the same window, and the extra visual roll decays a full
+    // turn back to zero.
+    float bank_target, bank_rate;
+    if (g->roll_spin != 0.0f) {
+        g->roll_spin += (float)g->spin_dir * (GAME_BARREL_TURN / GAME_BARREL_DURATION) * dt;
+        if ((g->spin_dir > 0 && g->roll_spin >= 0.0f) ||
+            (g->spin_dir < 0 && g->roll_spin <= 0.0f)) {
+            g->roll_spin = 0.0f;  // corkscrew complete
+        }
+        bank_target = (float)g->spin_dir;
+        bank_rate   = 2.0f / GAME_BARREL_DURATION;
+    } else {
+        bank_target = steer;
+        bank_rate   = (steer != 0.0f) ? BANK_ACTIVE_RATE : BANK_PASSIVE_RATE;
+    }
     float const bank_max_step = bank_rate * dt;
     float       bank_delta    = bank_target - g->bank;
     if (bank_delta >  bank_max_step) bank_delta =  bank_max_step;
@@ -710,7 +748,8 @@ static inline pax_col_t dim_argb(pax_col_t col, float scale) {
 }
 
 void game_submit_ship(game_state_t const* g) {
-    float const angle = g->bank * MAX_BANK_RAD;
+    // Bank roll + the barrel-roll corkscrew flourish (roll_spin), if any.
+    float const angle = g->bank * MAX_BANK_RAD + g->roll_spin;
     float const c     = cosf(angle);
     float const s     = sinf(angle);
 

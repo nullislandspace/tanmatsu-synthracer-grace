@@ -3570,3 +3570,30 @@
       rendered wing tip while banking.
     - Pure visual: the collision AABB is axis-aligned and unaffected by
       bank, so the roll pivot doesn't touch the hitbox.
+
+- 2026-05-22 — Barrel-roll (corkscrew) manoeuvre.
+    - New gameplay move (the long-deferred "barrel roll"): hold one
+      steer direction until fully banked, then also press the opposite
+      direction — the ship rolls a full 360° and snaps to the opposite
+      max bank. Re-arms only when BOTH steer buttons are released
+      together (prevents spin-spamming by alternating).
+    - **Input:** needs the per-side held states, but `input_steering()`
+      collapses both-held to 0. Added `input_steer_held(&l, &r)` (raw
+      digital LEFT/RIGHT incl. the modal scancodes, gyro excluded);
+      `input_steering()` now delegates to it. `main.c` reads the pair and
+      passes it to `game_step(g, w, dt, steer, left_held, right_held)`.
+    - **Mechanic (game_step):** lock clears on `!left && !right`. Trigger
+      when not locked, both held, and `|bank| >= GAME_BARREL_TRIGGER_BANK`
+      (0.9): set `spin_dir` opposite the current bank, kick
+      `roll_spin = -spin_dir * 2π`, lock. While `roll_spin != 0` the bank
+      target is forced to `spin_dir` (rate `2/GAME_BARREL_DURATION`, 0.45 s)
+      and `roll_spin` decays a full turn back to 0. Seeding at ∓2π means
+      the visual angle `bank*MAX_BANK_RAD + roll_spin` is continuous at
+      the trigger (a 2π seed is invisible) and sweeps one monotonic
+      corkscrew + the bank flip.
+    - **Visual only.** `roll_spin` is added to the rendered roll in
+      `game_submit_ship` and `draw_wingtip_burst`; the collision AABB is
+      axis-aligned and bank-independent, so the move grants no
+      i-frames — it's a flourish + a fast bank reversal (the ship also
+      drifts laterally L→R as the bank flips, a natural reposition).
+      Tunables: `GAME_BARREL_DURATION`, `GAME_BARREL_TRIGGER_BANK`.

@@ -2051,6 +2051,8 @@ void app_main(void) {
 
         bool  const pickup_pressed = input_consume_pickup();
         float const steer          = input_steering();
+        bool        steer_left = false, steer_right = false;
+        input_steer_held(&steer_left, &steer_right);
 
         // Debug: TAB cuts the current area short and forces the
         // next one to a specific type. Currently hard-wired to the
@@ -2088,7 +2090,7 @@ void app_main(void) {
             if (pickup_pressed) {
                 game_jump(&game);
             }
-            game_step(&game, &world, dt, steer);
+            game_step(&game, &world, dt, steer, steer_left, steer_right);
             crashed = game_collide(&game, &world, dt);
             // game_after_collide runs sun integration, shadow
             // detection, and speed dynamics. Returns true when the
