@@ -38,9 +38,9 @@ module signtext() {
     color("#FF0000") {
         translate([-4, -0.3, 8]) {
             rotate([90, 0, 0]) {
-                scale([1, 1, 0.25]) {
+                scale([0.85, 1.5, 0.25]) {
                     linear_extrude(height=0.25) {
-                        text(text = "SynthEngine 3D", size=0.8);
+                        text(text = "SynthEngine 3D", size=0.8, font="Liberation Mono", $fn=4);
                     }
                 }
             }
