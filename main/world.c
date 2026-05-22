@@ -455,3 +455,56 @@ void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {
         }
     }
 }
+
+void world_magnet_pull(world_state_t* w, float ship_x, float ship_y, float dt) {
+    for (int i = 0; i < WORLD_OBSTACLE_POOL_SIZE; i++) {
+        obstacle_t* o = &w->obstacles[i];
+        if (!o->active) continue;
+
+        // Only collectable pickups are magnetised — never walls,
+        // cubes or ramps.
+        switch (o->kind) {
+            case OBSTACLE_KIND_PICKUP_TRI:
+            case OBSTACLE_KIND_PICKUP_BOOST:
+            case OBSTACLE_KIND_PICKUP_JUMP:
+            case OBSTACLE_KIND_PICKUP_SHIELD:
+            case OBSTACLE_KIND_PICKUP_CHECKPOINT:
+                break;
+            default:
+                continue;
+        }
+
+        // In reach? Pull only pickups ahead of the ship (z > 0) inside
+        // the forward window and the lateral capture band.
+        if (o->z_world <= 0.0f || o->z_world > GAME_MAGNET_RADIUS_Z) continue;
+        float const dx  = ship_x - o->x_world;          // signed: toward ship
+        float const adx = (dx < 0.0f) ? -dx : dx;
+        if (adx > GAME_MAGNET_RADIUS_X) continue;
+
+        // Elevation gate: the pickup's base (y_base) must sit within
+        // GAME_MAGNET_RADIUS_Y of the ship's belly. Skips pickups on a
+        // platform the ship passes under, and ground pickups it flies /
+        // jumps over.
+        float const dy  = ship_y - o->y_base;
+        float const ady = (dy < 0.0f) ? -dy : dy;
+        if (ady > GAME_MAGNET_RADIUS_Y) continue;
+
+        // Lateral pull: closing speed eases linearly to zero as the
+        // pickup nears the ship's x (full GAME_MAGNET_PULL_RATE_X at the
+        // band edge), so it settles on the path instead of jittering
+        // across it. Clamp the step so it can never overshoot ship_x.
+        float const step_x = GAME_MAGNET_PULL_RATE_X * (adx / GAME_MAGNET_RADIUS_X) * dt;
+        if (step_x >= adx) {
+            o->x_world = ship_x;
+        } else {
+            o->x_world += (dx < 0.0f) ? -step_x : step_x;
+        }
+
+        // Forward pull: reel the pickup toward the ship along z, on top
+        // of the world scroll world_advance already applied this frame.
+        // Clamp at the ship's z plane (z = 0) so it is never dragged
+        // behind the ship.
+        o->z_world -= GAME_MAGNET_PULL_RATE_Z * dt;
+        if (o->z_world < 0.0f) o->z_world = 0.0f;
+    }
+}

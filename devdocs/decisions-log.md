@@ -3619,3 +3619,70 @@
     - **Future (9.4):** skip drawing `SHIP_REGION_MAGNET_*` when the
       magnet attachment isn't equipped — same hook shape as the planned
       battery skip for the panel + indicators in `game_submit_ship`.
+
+- 2026-05-22 — Phase 9.4: attachment slots + Magnet.
+    - **Attachment model.** New `main/attachments.{c,h}`: `attachment_id_t`
+      (`ATTACH_NONE=0`, `ATTACH_MAGNET`, `ATTACH_ID_COUNT`) — IDs are
+      persisted, so append-only, never renumber. `attachment_name()` maps
+      id → UI label ("[empty]" for NONE / out-of-range, so a newer save
+      degrades gracefully on an older build). The picker iterates the
+      whole enum range, so adding a future attachment makes it appear
+      automatically.
+    - **Save.** Added `meta.attach_slots` (available slot count, 0/1/2;
+      `save_init_defaults` sets **2** for now — meta-progression will gate
+      it in Phase 11). `attach1`/`attach2` already existed; they hold the
+      per-slot `attachment_id_t`. NBT read/write wired in `save_nbt.c`.
+      Equipping persists immediately via `save_write_slot(s_active_slot)`.
+    - **Equip UI (two-screen).** `APP_STATE_UPGRADE_STUB` ("coming soon")
+      replaced by `APP_STATE_UPGRADE` (slot list — one `MENU_VAL_TEXT` row
+      per slot showing the fitted attachment) + new `APP_STATE_UPGRADE_PICK`
+      (attachment picker for the chosen slot). The picker tags the
+      attachment already in the *other* slot "(in slot N)" and blocks
+      selecting it — no duplicates. Added a `MENU_VAL_TEXT` row kind
+      (label + free string) to the shared `menu_view_t` framework.
+    - **Equip snapshot.** `game_state` gained `has_magnet` / `has_battery`;
+      `start_run` sets them from `s_save.meta` (magnet = in either slot;
+      battery = false until 9.5). Read from the save once per run so
+      gameplay never touches the save mid-run; equipping takes effect on
+      the next run start, not live.
+    - **Render gating (generalised from the magnet special-case).** New
+      `ship_region_visible(region, g)` in `game.c`: a ship-model region is
+      drawn only when its attachment/upgrade is fitted — magnet poles iff
+      `has_magnet`, battery panel + 4 indicators iff `has_battery`, body
+      always. Per the user's rule, **un-fitted parts disappear**: with no
+      battery yet, the panel + indicators are now hidden until 9.5 gives
+      the battery an install state. Fully data-driven off the region enum;
+      `game_submit_ship` just `continue`s past hidden regions.
+    - **Magnet physics.** `world_magnet_pull(w, ship_x, dt)` (world.c)
+      slides every active PICKUP-kind obstacle's `x_world` toward the
+      ship's lateral path; obstacles/walls/ramps untouched. Eligible when
+      ahead of the ship (z>0), within `GAME_MAGNET_RADIUS_Z` forward and
+      `GAME_MAGNET_RADIUS_X` laterally; closing speed eases linearly to 0
+      as it nears the ship's x (full `GAME_MAGNET_PULL_RATE` at the band
+      edge), clamped so it never overshoots. Kept out of the const
+      `game_step`/`world_advance` — called from the playing loop after
+      `world_advance`, only when `game.has_magnet`. First-cut tunables
+      (9.0 / 2.2 / 4.0) in `magicnumbers.h`, to be tuned on-device.
+    - Builds clean, all symbols satisfied (text 92030 → 93452).
+
+- 2026-05-22 — Phase 9.4 magnet tuning: forward pull + elevation gate.
+    - On-device feedback: lateral-only pull was weak and grabbed pickups
+      at the wrong height. Radii were doubled (`_RADIUS_Z` 9→18,
+      `_RADIUS_X` 2.2→4.4) and the lateral rate doubled (`_PULL_RATE`
+      4→8), then two behaviours added:
+    - **Forward (z) pull.** `world_magnet_pull` now also reels in-range
+      pickups toward the ship along the track (`o->z_world -=
+      GAME_MAGNET_PULL_RATE_Z * dt`, 8.0 u/s, on top of the normal world
+      scroll), clamped at the ship's z plane (z=0) so a pickup is never
+      dragged behind. (`GAME_MAGNET_PULL_RATE` was renamed
+      `GAME_MAGNET_PULL_RATE_X` now that there's a Z counterpart.)
+    - **Elevation gate.** Only pickups at roughly the ship's height are
+      pulled: the pickup's base (`y_base`) must be within
+      `GAME_MAGNET_RADIUS_Y` (1.0) of the ship's belly
+      (`SHIP_BASE_Y + ship_y`, passed in as a new `ship_y` arg). Ground
+      pickups sit at y_base 0, platform-top pickups at 2.0, so this stops
+      the magnet grabbing pickups on a platform the ship passes *under*,
+      or ground pickups it jumps / flies *over*. No vertical motion is
+      applied — the gate only decides eligibility; x and z pulls do the
+      moving.
+    - Builds clean, all symbols satisfied (text 93452 → 93516).

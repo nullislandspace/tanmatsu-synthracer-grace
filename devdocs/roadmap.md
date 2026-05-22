@@ -165,14 +165,22 @@ Done in this order so each phase produces a runnable build:
      distance, multiplier+peak, pickup tallies carry forward), so a
      Re-Do never costs accumulated progress or meta-progression
      credit.
-   - **9.4 — Attachment slots + Magnet.** The equip framework
-     (`attach1`/`attach2`, fills the `APP_STATE_UPGRADE_STUB`
-     screen) plus the Magnet attachment — pulls nearby pickups
-     toward the ship within a radius. The ship model already carries the
-     hardware readout: two magnet-pole regions (`SHIP_REGION_MAGNET_0`
-     red / `_1` blue in `objects/ship_model.h`), currently always drawn.
-     This phase skips drawing them when the magnet isn't equipped (same
-     hook shape as the battery skip in `game_submit_ship`).
+   - **9.4 — Attachment slots + Magnet.** ✅ done 2026-05-22. The equip
+     framework (`attachment_id_t` catalog in `main/attachments.{c,h}`;
+     `meta.attach_slots` 0/1/2 + `attach1`/`attach2` equipped IDs, all
+     persisted; two-screen equip UI — slot list → picker, duplicates
+     blocked — replacing the old `APP_STATE_UPGRADE_STUB`) plus the Magnet
+     attachment, which pulls nearby pickups toward the ship — laterally
+     onto its lane and forward along the track, gated to roughly the
+     ship's elevation (`world_magnet_pull`, tunables
+     `GAME_MAGNET_RADIUS_Z/_X/_Y`, `GAME_MAGNET_PULL_RATE_X/_Z`).
+     The ship-region render gating was generalised to the user's rule:
+     `ship_region_visible()` hides **any** part whose attachment/upgrade
+     isn't fitted. The two magnet-pole regions (`SHIP_REGION_MAGNET_0`
+     red / `_1` blue) draw only with the magnet equipped; the battery
+     panel + indicators are now hidden until 9.5 gives the battery an
+     install state. Built ungated (unlock gating is Phase 11); equipping
+     takes effect on the next run.
    - **9.5 — Battery upgrade.** Needs a short design pass; likely
      extends the sun/power budget. The ship model already carries the
      hardware readout: a battery panel + four charge-indicator regions

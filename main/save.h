@@ -89,6 +89,11 @@ typedef struct {
         int32_t unlock_starting_mult_4x;
         int32_t unlock_starting_mult_max;
         int32_t unlock_labyrinth;
+        // Equip slots (Phase 9.4). `attach_slots` is how many slots are
+        // available (0/1/2 — unlocked via meta-progression; defaults to 2
+        // for now). `attach1`/`attach2` hold the equipped attachment_id_t
+        // per slot (ATTACH_NONE = empty).
+        int32_t attach_slots;
         int32_t attach1, attach2;
         int64_t last_custom_seed;
         int64_t last_seen_date;     // yyyymmdd

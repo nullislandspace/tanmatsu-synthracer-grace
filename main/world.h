@@ -190,6 +190,20 @@ void world_init(world_state_t* w, uint32_t seed);
 // up so the track edges stay continuous.
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x);
 
+// Magnet attachment (Phase 9.4). Pull every active pickup toward the
+// ship — laterally onto `ship_x` and forward along the track — while it
+// sits inside the magnet's capture volume and at roughly the ship's
+// elevation (see the GAME_MAGNET_* tunables). `ship_y` is the ship's
+// belly in world units (SHIP_BASE_Y + ship_y); pickups whose base is
+// more than GAME_MAGNET_RADIUS_Y from it are ignored, so the magnet
+// skips pickups on a platform the ship passes under and ground pickups
+// it is flying over. Mutates only `x_world` / `z_world` of PICKUP-kind
+// obstacles; cubes, walls and ramps are untouched. Call once per frame
+// from the playing loop, only when the magnet is equipped. Kept separate
+// from world_advance (rather than gated inside it) so the const-correct
+// game_step never has to know about the equip state.
+void world_magnet_pull(world_state_t* w, float ship_x, float ship_y, float dt);
+
 // Debug: force the next `start_next_area` call to use `t`, bypassing
 // the area picker (and any min-stage gating it might gain). Also
 // cuts the current area's length budget to zero so the override

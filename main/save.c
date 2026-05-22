@@ -23,6 +23,9 @@ static void slot_path(int slot, char* buf, size_t size) {
 void save_init_defaults(save_data_t* s) {
     memset(s, 0, sizeof(*s));
     s->meta.level = 1;
+    // Phase 9.4: two open equip slots by default (meta-progression will
+    // gate this to 0/1/2 later). attach1/attach2 stay ATTACH_NONE (0).
+    s->meta.attach_slots = 2;
 }
 
 void save_init(void) {

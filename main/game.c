@@ -747,6 +747,24 @@ static inline pax_col_t dim_argb(pax_col_t col, float scale) {
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
+// Phase 9.4 render gating: is this ship-model region drawn this frame?
+// Parts tied to an attachment / upgrade are hidden when it isn't fitted.
+static inline bool ship_region_visible(ship_region_t region, game_state_t const* g) {
+    switch (region) {
+        case SHIP_REGION_MAGNET_0:
+        case SHIP_REGION_MAGNET_1:
+            return g->has_magnet;
+        case SHIP_REGION_BATTERY_PANEL:
+        case SHIP_REGION_INDICATOR_0:
+        case SHIP_REGION_INDICATOR_1:
+        case SHIP_REGION_INDICATOR_2:
+        case SHIP_REGION_INDICATOR_3:
+            return g->has_battery;
+        default:                       // SHIP_REGION_BODY and anything new
+            return true;
+    }
+}
+
 void game_submit_ship(game_state_t const* g) {
     // Bank roll + the barrel-roll corkscrew flourish (roll_spin), if any.
     float const angle = g->bank * MAX_BANK_RAD + g->roll_spin;
@@ -814,9 +832,15 @@ void game_submit_ship(game_state_t const* g) {
             continue;
         }
 
-        // Future (battery module): when no battery is fitted, skip the
-        // panel + indicator regions here; the battery plugin will also
+        // Render gating (Phase 9.4): a ship part is drawn only when its
+        // attachment / upgrade is fitted. The magnet poles need the
+        // magnet equipped; the battery panel + indicators need a battery
+        // (always off until Phase 9.5 gives it an install state). The
+        // hull body is always drawn. A future battery module will also
         // drive each indicator's colour individually via region_col[].
+        if (!ship_region_visible((ship_region_t)t->region, g)) {
+            continue;
+        }
         pax_col_t col = region_col[t->region];
         if (t->region == SHIP_REGION_BODY) {
             // Per-face directional lighting on the hull only. The panel

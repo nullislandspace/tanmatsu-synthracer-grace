@@ -72,6 +72,7 @@ static void write_meta(NbtWriter* w, save_data_t const* s) {
     nbt_write_int32(w, "unlock_starting_mult_4x",     s->meta.unlock_starting_mult_4x);
     nbt_write_int32(w, "unlock_starting_mult_max",    s->meta.unlock_starting_mult_max);
     nbt_write_int32(w, "unlock_labyrinth",            s->meta.unlock_labyrinth);
+    nbt_write_int32(w, "attach_slots",                s->meta.attach_slots);
     nbt_write_int32(w, "attach1",                     s->meta.attach1);
     nbt_write_int32(w, "attach2",                     s->meta.attach2);
     nbt_write_int64(w, "last_custom_seed",            s->meta.last_custom_seed);
@@ -174,6 +175,7 @@ static void read_meta(NbtReader* r, save_data_t* s) {
         else if (type == NBT_INT32 && !strcmp(name, "unlock_starting_mult_4x"))     s->meta.unlock_starting_mult_4x     = nbt_read_int32(r);
         else if (type == NBT_INT32 && !strcmp(name, "unlock_starting_mult_max"))    s->meta.unlock_starting_mult_max    = nbt_read_int32(r);
         else if (type == NBT_INT32 && !strcmp(name, "unlock_labyrinth"))            s->meta.unlock_labyrinth            = nbt_read_int32(r);
+        else if (type == NBT_INT32 && !strcmp(name, "attach_slots"))                s->meta.attach_slots                = nbt_read_int32(r);
         else if (type == NBT_INT32 && !strcmp(name, "attach1"))                     s->meta.attach1                     = nbt_read_int32(r);
         else if (type == NBT_INT32 && !strcmp(name, "attach2"))                     s->meta.attach2                     = nbt_read_int32(r);
         else if (type == NBT_INT64 && !strcmp(name, "last_custom_seed"))            s->meta.last_custom_seed            = nbt_read_int64(r);

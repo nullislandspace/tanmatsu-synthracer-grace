@@ -21,6 +21,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "attachments.h"
 #include "audio_mixer.h"
 #include "audio_settings.h"
 #include "controls_settings.h"
@@ -150,7 +151,8 @@ typedef enum {
     APP_STATE_MENU,             // main menu: Daily/Seeded/Upgrade/Stats/Settings/Exit
     APP_STATE_SEED_INPUT,       // numeric entry for the custom seed
     APP_STATE_STATS_VIEW,       // text dump of the active slot's stats
-    APP_STATE_UPGRADE_STUB,     // placeholder "coming soon" screen
+    APP_STATE_UPGRADE,          // equip screen: slot list, shows what's fitted
+    APP_STATE_UPGRADE_PICK,     // attachment picker for the selected slot
     APP_STATE_CREDITS,          // auto-scrolling credits roll
     APP_STATE_SETTINGS,         // settings submenu: Controls / Audio
     APP_STATE_CONTROLS,         // controls list: gyro checkbox + 4 keybinds
@@ -236,6 +238,9 @@ static int         s_active_slot = -1;
 static int  s_slot_cursor  = 0;            // STATE_SLOT_SELECT cursor (0..2)
 static int  s_menu_cursor  = MENU_ENTRY_DAILY;
 static int  s_pause_cursor = PAUSE_ENTRY_RESUME;
+static int  s_upgrade_cursor      = 0;     // APP_STATE_UPGRADE: selected slot row
+static int  s_upgrade_slot        = 0;     // slot index (0/1) being edited in the picker
+static int  s_upgrade_pick_cursor = 0;     // APP_STATE_UPGRADE_PICK: selected attachment
 static char s_seed_buf[11] = {0};          // STATE_SEED_INPUT decimal seed (max 10 digits)
 static int  s_seed_len     = 0;
 
@@ -700,6 +705,7 @@ typedef enum {
     MENU_VAL_NONE = 0,   // plain label row
     MENU_VAL_CHECK,      // label + [X] / [ ]
     MENU_VAL_KEYBIND,    // label + function-key icon / key name
+    MENU_VAL_TEXT,       // label + free string in the value column
 } menu_val_kind_t;
 
 typedef struct {
@@ -707,6 +713,7 @@ typedef struct {
     menu_val_kind_t kind;
     bool            checked;   // MENU_VAL_CHECK
     uint16_t        scancode;  // MENU_VAL_KEYBIND
+    char const*     value;     // MENU_VAL_TEXT
 } menu_row_t;
 
 typedef struct {
@@ -960,6 +967,11 @@ static void menu_draw(menu_view_t const* m) {
                 break;
             case MENU_VAL_KEYBIND:
                 draw_keybind_value(value_x, ry, MENU_ROW_TEXT_H, col, r->scancode);
+                break;
+            case MENU_VAL_TEXT:
+                if (r->value) {
+                    draw_left(value_x, ry, MENU_ROW_TEXT_H, col, r->value);
+                }
                 break;
             case MENU_VAL_NONE:
             default:
@@ -1317,13 +1329,81 @@ static void draw_pause_overlay(void) {
     menu_draw(&m);
 }
 
-static void draw_upgrade_stub(void) {
-    draw_menu_panel_size(0.60f, 0.76f);
-    float const fbh = pax_buf_get_heightf(fb);
-    float const lx  = menu_left_x(0.60f);
-    draw_left(lx, fbh * 0.30f, 48.0f, MENU_COL_TITLE, "Upgrade Ship");
-    draw_left(lx, fbh * 0.50f, 22.0f, MENU_COL_NORMAL, "Coming soon!");
-    draw_left(lx, fbh * 0.92f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
+// Phase 9.4 equip UI. The ship has `attach_slots` (0/1/2) equip slots,
+// stored in the save as attach1 / attach2 (attachment_id_t, 0 = empty).
+// upgrade_slot_ptr maps a slot index to its save field.
+static int32_t* upgrade_slot_ptr(int slot) {
+    return (slot == 0) ? &s_save.meta.attach1 : &s_save.meta.attach2;
+}
+
+// Number of usable slots, clamped to the 2 the save struct provides.
+static int upgrade_slot_count(void) {
+    int n = s_save.meta.attach_slots;
+    if (n < 0) n = 0;
+    if (n > 2) n = 2;
+    return n;
+}
+
+// Slot list — one MENU_VAL_TEXT row per slot showing the fitted
+// attachment's name (or "[empty]").
+static void draw_upgrade_slots(void) {
+    int const slots = upgrade_slot_count();
+    if (slots == 0) {
+        draw_menu_panel_size(0.60f, 0.50f);
+        float const fbh = pax_buf_get_heightf(fb);
+        float const lx  = menu_left_x(0.60f);
+        draw_left(lx, fbh * 0.34f, 40.0f, MENU_COL_TITLE, "Upgrade Ship");
+        draw_left(lx, fbh * 0.52f, 20.0f, MENU_COL_NORMAL, "No attachment slots yet.");
+        draw_left(lx, fbh * 0.90f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
+        return;
+    }
+    char       labels[2][16];
+    menu_row_t rows[2] = {0};
+    for (int i = 0; i < slots; i++) {
+        snprintf(labels[i], sizeof(labels[i]), "Slot %d", i + 1);
+        rows[i].label = labels[i];
+        rows[i].kind  = MENU_VAL_TEXT;
+        rows[i].value = attachment_name((attachment_id_t)*upgrade_slot_ptr(i));
+    }
+    menu_view_t const m = {
+        .title = "Upgrade Ship", .title_h = 36.0f, .subtitle = NULL,
+        .rows = rows, .row_count = slots, .row_h = 46.0f,
+        .cursor = s_upgrade_cursor,
+        .hint = "up / down to choose a slot, enter to change, esc to leave",
+        .panel_w = 0.70f, .panel_h = 0.62f, .value_dx = 180.0f,
+    };
+    menu_draw(&m);
+}
+
+// Attachment picker for the slot being edited (s_upgrade_slot). Lists
+// every catalogued attachment plus "[empty]"; the one already fitted in
+// the other slot is tagged "(in slot N)" and blocked from selection.
+static void draw_upgrade_picker(void) {
+    int     const other_slot = (s_upgrade_slot == 0) ? 1 : 0;
+    bool    const other_used = (other_slot < upgrade_slot_count());
+    int32_t const other_val  = other_used ? *upgrade_slot_ptr(other_slot) : ATTACH_NONE;
+
+    char       annot[ATTACH_ID_COUNT][24];
+    menu_row_t rows[ATTACH_ID_COUNT] = {0};
+    for (int i = 0; i < ATTACH_ID_COUNT; i++) {
+        rows[i].label = attachment_name((attachment_id_t)i);
+        rows[i].kind  = MENU_VAL_NONE;
+        if (i != ATTACH_NONE && i == other_val) {
+            snprintf(annot[i], sizeof(annot[i]), "(in slot %d)", other_slot + 1);
+            rows[i].kind  = MENU_VAL_TEXT;
+            rows[i].value = annot[i];
+        }
+    }
+    char title[16];
+    snprintf(title, sizeof(title), "Slot %d", s_upgrade_slot + 1);
+    menu_view_t const m = {
+        .title = title, .title_h = 36.0f, .subtitle = NULL,
+        .rows = rows, .row_count = ATTACH_ID_COUNT, .row_h = 44.0f,
+        .cursor = s_upgrade_pick_cursor,
+        .hint = "up / down to choose, enter to equip, esc to cancel",
+        .panel_w = 0.66f, .panel_h = 0.66f, .value_dx = 170.0f,
+    };
+    menu_draw(&m);
 }
 
 // ---- Credits ------------------------------------------------------
@@ -1619,6 +1699,15 @@ static void save_apply_day_rollover(save_data_t* s) {
 static void start_run(game_state_t* game, world_state_t* world, uint32_t seed, bool is_custom) {
     game_init(game);
     world_init(world, seed);
+
+    // Phase 9.4: snapshot the equipped attachments for the run. Read
+    // from the save once here so gameplay (magnet pull + ship-region
+    // render gating) never touches the save mid-run. has_battery stays
+    // off until Phase 9.5 gives the battery an install state.
+    game->has_magnet = (s_save.meta.attach1 == ATTACH_MAGNET
+                        || s_save.meta.attach2 == ATTACH_MAGNET);
+    game->has_battery = false;
+
     input_set_mode(INPUT_MODE_PLAYING);
     s_run_started_us   = esp_timer_get_time();
     s_run_play_seconds = 0.0;
@@ -2141,6 +2230,14 @@ void app_main(void) {
 
             world_advance(&world, dt, game.ship_speed_z, game.cam_x);
 
+            // Phase 9.4 magnet: slide nearby pickups toward the ship's
+            // path. After world_advance so it acts on this frame's
+            // freshly-advanced positions, before collision sees them.
+            if (game.has_magnet) {
+                world_magnet_pull(&world, game.ship_x_world,
+                                  SHIP_BASE_Y + game.ship_y, (float)dt);
+            }
+
             // Phase 9.3 checkpoint rewind. If a head-on crash got
             // here unabsorbed (no shield) and a checkpoint snapshot
             // exists, rewind the *level* — world generation, RNG,
@@ -2329,7 +2426,8 @@ void app_main(void) {
                                     || app_state == APP_STATE_MENU
                                     || app_state == APP_STATE_SEED_INPUT
                                     || app_state == APP_STATE_STATS_VIEW
-                                    || app_state == APP_STATE_UPGRADE_STUB
+                                    || app_state == APP_STATE_UPGRADE
+                                    || app_state == APP_STATE_UPGRADE_PICK
                                     || app_state == APP_STATE_CREDITS
                                     || (in_settings_family
                                         && s_settings_origin != APP_STATE_PAUSED));
@@ -2449,7 +2547,8 @@ void app_main(void) {
                             app_state = APP_STATE_SEED_INPUT;
                             break;
                         case MENU_ENTRY_UPGRADE:
-                            app_state = APP_STATE_UPGRADE_STUB;
+                            s_upgrade_cursor = 0;
+                            app_state = APP_STATE_UPGRADE;
                             break;
                         case MENU_ENTRY_STATS:
                             app_state = APP_STATE_STATS_VIEW;
@@ -2605,11 +2704,55 @@ void app_main(void) {
                 break;
             }
 
-            case APP_STATE_UPGRADE_STUB: {
+            case APP_STATE_UPGRADE: {
                 t_after_obs = esp_timer_get_time();
-                draw_upgrade_stub();
-                if (pickup_pressed || menu_esc) {
+                draw_upgrade_slots();
+                int const slots = upgrade_slot_count();
+                if (menu_nav != 0 && slots > 0) {
+                    s_upgrade_cursor -= menu_nav;
+                    if (s_upgrade_cursor < 0)        s_upgrade_cursor = 0;
+                    if (s_upgrade_cursor >= slots)   s_upgrade_cursor = slots - 1;
+                }
+                if (pickup_pressed && slots > 0) {
+                    // Open the picker for the selected slot, starting on
+                    // whatever it currently holds.
+                    s_upgrade_slot        = s_upgrade_cursor;
+                    s_upgrade_pick_cursor = *upgrade_slot_ptr(s_upgrade_slot);
+                    if (s_upgrade_pick_cursor < 0
+                        || s_upgrade_pick_cursor >= ATTACH_ID_COUNT) {
+                        s_upgrade_pick_cursor = 0;
+                    }
+                    app_state = APP_STATE_UPGRADE_PICK;
+                } else if (pickup_pressed || menu_esc) {
+                    // No slots, or esc — back to the main menu.
                     app_state = APP_STATE_MENU;
+                }
+                break;
+            }
+
+            case APP_STATE_UPGRADE_PICK: {
+                t_after_obs = esp_timer_get_time();
+                draw_upgrade_picker();
+                if (menu_nav != 0) {
+                    s_upgrade_pick_cursor -= menu_nav;
+                    if (s_upgrade_pick_cursor < 0)                 s_upgrade_pick_cursor = 0;
+                    if (s_upgrade_pick_cursor >= ATTACH_ID_COUNT)  s_upgrade_pick_cursor = ATTACH_ID_COUNT - 1;
+                }
+                if (pickup_pressed) {
+                    int     const other_slot = (s_upgrade_slot == 0) ? 1 : 0;
+                    bool    const other_used = (other_slot < upgrade_slot_count());
+                    int32_t const other_val  = other_used ? *upgrade_slot_ptr(other_slot) : ATTACH_NONE;
+                    // Block equipping a (non-empty) attachment already in
+                    // the other slot — no duplicates. Ignore the press.
+                    if (s_upgrade_pick_cursor != ATTACH_NONE
+                        && s_upgrade_pick_cursor == other_val) {
+                        break;
+                    }
+                    *upgrade_slot_ptr(s_upgrade_slot) = s_upgrade_pick_cursor;
+                    save_write_slot(s_active_slot, &s_save);
+                    app_state = APP_STATE_UPGRADE;
+                } else if (menu_esc) {
+                    app_state = APP_STATE_UPGRADE;
                 }
                 break;
             }

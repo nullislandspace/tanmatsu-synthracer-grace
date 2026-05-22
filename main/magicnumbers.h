@@ -242,6 +242,35 @@
 #define GAME_SHIELD_DURATION               4.0f
 #define GAME_SHIELD_HIT_COOLDOWN           0.35f
 
+// Magnet attachment (Phase 9.4). When the magnet is equipped,
+// world_magnet_pull pulls every active pickup toward the ship — sideways
+// onto its lane AND forward along the track — while the pickup sits
+// inside the capture volume (forward / lateral / vertical reach) and at
+// roughly the ship's elevation. ALL values are first-cut, tuned on-device.
+//   _RADIUS_Z    — how far ahead (world-z) the magnet reaches. Pickups
+//                  farther than this, or already behind the ship, are
+//                  ignored. Bigger = the magnet grabs earlier.
+//   _RADIUS_X    — lateral capture band (world-x, each side). A pickup
+//                  must be within this |Δx| of the ship to be pulled;
+//                  outside it the player still has to steer over.
+//   _RADIUS_Y    — vertical band (world-y). The pickup's base must be
+//                  within this |Δy| of the ship's belly, so the magnet
+//                  ignores pickups on a platform the ship passes under,
+//                  and ground pickups the ship is flying / jumping over.
+//   _PULL_RATE_X — lateral closing speed at the capture-band edge
+//                  (world-x / s). Eases off linearly as the pickup nears
+//                  the ship's x so it settles instead of jittering across
+//                  the centreline; clamped so it never overshoots.
+//   _PULL_RATE_Z — forward closing speed (world-z / s) added ON TOP of
+//                  the normal world scroll, reeling the pickup toward the
+//                  ship; clamped at the ship's z plane so it never drags
+//                  a pickup behind the ship.
+#define GAME_MAGNET_RADIUS_Z               18.0f
+#define GAME_MAGNET_RADIUS_X               4.4f
+#define GAME_MAGNET_RADIUS_Y               1.0f
+#define GAME_MAGNET_PULL_RATE_X            8.0f
+#define GAME_MAGNET_PULL_RATE_Z            8.0f
+
 // Number of boosters in each inter-stage rest area.
 #define GAME_BOOSTERS_PER_REST             1
 

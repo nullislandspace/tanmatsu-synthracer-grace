@@ -92,6 +92,16 @@ typedef struct game_state_s {
     int   spin_dir;
     bool  barrel_locked;
 
+    // Equipped-attachment snapshot (Phase 9.4). Copied from the save's
+    // meta.attach1/attach2 by start_run so gameplay never touches the
+    // save mid-run. Drive both the magnet pull (world_magnet_pull) and
+    // the ship-region render gating in game_submit_ship — un-fitted
+    // parts (magnet poles, battery panel + indicators) are not drawn.
+    // `has_battery` is always false until Phase 9.5 gives it an install
+    // state.
+    bool  has_magnet;
+    bool  has_battery;
+
     // Vertical motion (Phase 9.1). `ship_y` is altitude above the
     // ship's rest height (SHIP_BASE_Y); 0 = grounded on the floor,
     // positive = airborne or standing on an obstacle top. `ship_vy`
