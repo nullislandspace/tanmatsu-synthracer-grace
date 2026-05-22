@@ -17,16 +17,22 @@
 // game's default speed stay in sync.
 #define SHIP_BASE_SPEED_Z GAMEPLAY_CRUISE_SPEED
 
-// Ship collision AABB. The tetrahedron mesh runs from local
-// z = -0.36 (tail) to +0.32 (nose), so the AABB is centred at
-// SHIP_Z_PLANE + (-0.36 + 0.32)/2 = 1.98 with half-depth 0.34.
+// Ship collision AABB, sized to the imported hull (objects/ship_model.h,
+// body region). The model is centred laterally + front-back and
+// base-anchored vertically, so the box centres on SHIP_Z_PLANE and its
+// belly sits at SHIP_BASE_Y + ship_y — the exact height the
+// vertical/landing system treats as the ship's bottom (so the hull rests
+// cleanly on surfaces and the box lines up with what's drawn). Re-derive
+// these from the BODY extents printed by tools/ship_3mf_to_header.py if
+// the model or SHIP_MODEL_SCALE changes. (Body half-width 0.280,
+// half-depth 0.250, height 0.127 at the current scale.)
 #define SHIP_COLLISION_HALF_W 0.28f
-#define SHIP_COLLISION_HALF_D 0.34f
-#define SHIP_COLLISION_Z_C    1.98f
-// Vertical collision extent (Phase 9.1b). The mesh's local y runs
-// 0.0 (wings / tail) up to 0.30 (nose apex), so the collision box
-// is that tall, its base at SHIP_BASE_Y + ship_y.
-#define SHIP_COLLISION_HEIGHT 0.30f
+#define SHIP_COLLISION_HALF_D 0.25f
+#define SHIP_COLLISION_Z_C    SHIP_Z_PLANE
+// Vertical collision extent (Phase 9.1b). Box base at SHIP_BASE_Y +
+// ship_y, this tall — matches the hull height (panel/indicators poke a
+// hair above and are deliberately not in the hitbox).
+#define SHIP_COLLISION_HEIGHT 0.127f
 
 // Playfield lateral bounds. Ship can't move past these; obstacles
 // placed entirely outside this range are "boundary" obstacles

@@ -3530,3 +3530,43 @@
       stretch can have several pairs in view at once — heavier than the
       old 1-cube posts. Watch FPS in long rest areas; if needed, lower
       the beacon `$fn` in the SCAD or thin the outline.
+
+- 2026-05-22 — Ship hitbox retuned to the imported hull + base-anchored.
+    - The collision AABB was still the old tetrahedron's (half-depth
+      0.34, height 0.30, z-centre 1.98), much bigger than the imported
+      hull, so crashes registered before the ship visibly touched.
+    - **Root cause beyond size:** the ship converter centre-anchored the
+      model vertically, but the vertical/landing system and the head-on
+      collision treat `SHIP_BASE_Y + ship_y` as the ship's BELLY (e.g.
+      the "resting on top, not ramming" test `ship_yB >= obs_yT`). A
+      centred model put the visible belly ~0.07 u *below* that reference
+      — a hitbox mismatch AND a visible sink when riding platform tops.
+    - **Fix:** base-anchor the ship model (belly at y=0, like the old
+      mesh and the rest-marker), so the drawn belly == landing belly ==
+      box belly. `ship_3mf_to_header.py` now sets `cy = min(ys)` (x and z
+      still centred). Box re-derived from the BODY extents:
+      `SHIP_COLLISION_HALF_W 0.28` (unchanged — wings), `HALF_D 0.34→0.25`,
+      `Z_C 1.98→SHIP_Z_PLANE`, `HEIGHT 0.30→0.127`. Panel/indicators poke
+      a hair above the box on purpose (not crash surfaces).
+    - **Visible consequence:** the hull belly now rests at `SHIP_BASE_Y`
+      (0.22) instead of ~0.148, so the ship sits ~0.07 u higher (back to
+      the pre-import flight height) and no longer sinks into ridden
+      platforms. Tune overall height with `SHIP_BASE_Y`; re-derive the
+      four collision constants from the converter's printed BODY extents
+      if the model or `SHIP_MODEL_SCALE` changes.
+
+- 2026-05-22 — Ship bank rolls about the hull axis, not the belly.
+    - After base-anchoring the ship model (belly at model y=0), the bank
+      roll in `game_submit_ship` — which rotated (x, y) about (0, 0) —
+      pivoted about the belly, so the fuselage visibly swung about a
+      point below the ship.
+    - Fix: roll about the hull's central axis. The converter now emits
+      `SHIP_MODEL_ROLL_PIVOT_Y` (the BODY region's vertical bbox centre,
+      = the central cylinder's axis since the hull is symmetric about it;
+      1.299 model units ≈ 0.063 world above the belly). `game_submit_ship`
+      subtracts the scaled pivot before the roll and adds it back, so the
+      rotation centres on the axis. `draw_wingtip_burst` raises the spark
+      emit point by the same pivot so the scrape sparks stay glued to the
+      rendered wing tip while banking.
+    - Pure visual: the collision AABB is axis-aligned and unaffected by
+      bank, so the roll pivot doesn't touch the hitbox.

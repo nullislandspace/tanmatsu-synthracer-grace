@@ -113,12 +113,18 @@ def main():
     # y up, z forward): game = (sx, sz, sy).
     verts = [(x, z, y) for (x, y, z) in verts_scad]
 
-    # Centre on the bounding box.
+    # Centre laterally (x) and front-back (z); base-anchor vertically (y)
+    # so the hull's BELLY sits at the origin. game_submit_ship places that
+    # belly at SHIP_BASE_Y + ship_y, which is exactly the height the
+    # vertical/landing system and the collision box treat as the ship's
+    # bottom — so the ship rests cleanly on surfaces and the hitbox lines
+    # up with the visible hull. (Centring y instead sinks the lower half
+    # of the ship through any surface it lands on.)
     xs = [v[0] for v in verts]
     ys = [v[1] for v in verts]
     zs = [v[2] for v in verts]
     cx = (min(xs) + max(xs)) * 0.5
-    cy = (min(ys) + max(ys)) * 0.5
+    cy = min(ys)
     cz = (min(zs) + max(zs)) * 0.5
     verts = [(x - cx, y - cy, z - cz) for (x, y, z) in verts]
     span_x = max(xs) - min(xs)
@@ -131,6 +137,14 @@ def main():
         hexcol = colors[cidx] if 0 <= cidx < len(colors) else '#000000'
         region = COLOR_REGION.get(hexcol, DEFAULT_REGION)
         tris.append((a, c, b, region))
+
+    # Roll pivot: the body's vertical centre (model units). The hull is
+    # symmetric about its longitudinal axis, so this is the central
+    # cylinder's axis — bank should roll about it, not the base-anchored
+    # belly (y=0), or the fuselage visibly swings.
+    body_ys = [verts[i][1] for (a, b, c, r) in tris
+               if r == DEFAULT_REGION for i in (a, b, c)]
+    roll_pivot_y = (min(body_ys) + max(body_ys)) * 0.5 if body_ys else 0.0
 
     # Feature-edge extraction for the wireframe outline.
     def normal(tri):
@@ -198,7 +212,8 @@ def main():
     w("// model is updated.")
     w("//")
     w("// Coordinates are in game axes (x = lateral, y = up, z = forward),")
-    w("// centred on the model bounding box, in raw model units. Triangles")
+    w("// centred laterally + front-back and base-anchored vertically (the")
+    w("// hull belly sits at y = 0), in raw model units. Triangles")
     w("// are wound CCW-outward. SHIP_MODEL_SCALE maps model units to world")
     w("// units; the submit code applies scale, offsets, bank and world")
     w("// placement.")
@@ -221,6 +236,9 @@ def main():
     w("#define SHIP_MODEL_SCALE     %sf" % ("%.6f" % scale))
     w("#define SHIP_MODEL_Y_OFFSET  0.000000f  // world-units vertical nudge")
     w("#define SHIP_MODEL_Z_OFFSET  0.000000f  // world-units forward nudge")
+    w("// Bank rolls about this model-y (the hull's central axis), not the")
+    w("// base-anchored belly, so the fuselage doesn't swing.")
+    w("#define SHIP_MODEL_ROLL_PIVOT_Y %sf" % ("%.6f" % roll_pivot_y))
     w("")
     w("// ---- region colours (ARGB) ----")
     w("// Body is shaded per-face by the submit code; panel + indicators are")

@@ -107,10 +107,13 @@ static void draw_wingtip_burst(pax_buf_t* fb, game_state_t const* g, int side) {
     float const c          = cosf(bank_angle);
     float const s          = sinf(bank_angle);
     float const local_x    = (float)side * SPARK_WING_HALF_W;
-    // Wing tip's local y is 0; only the rotated x and -x*sin
-    // matter. Matches the projection math in game_draw_ship.
+    // The wing tip sits at the hull's roll axis, so it rolls about that
+    // axis: lateral local_x*c, and a dip of -local_x*s about the pivot
+    // height. Matches the pivoted bank in game_submit_ship so sparks
+    // stay glued to the rendered wing tip while banking.
+    float const roll_pivot = SHIP_MODEL_ROLL_PIVOT_Y * SHIP_MODEL_SCALE + SHIP_MODEL_Y_OFFSET;
     float const wx = local_x * c + g->ship_x_world;
-    float const wy = -local_x * s + SHIP_BASE_Y;
+    float const wy = -local_x * s + SHIP_BASE_Y + roll_pivot;
     float const wz = SHIP_Z_PLANE + SPARK_EMIT_DZ;
 
     float sx, sy;
@@ -717,14 +720,19 @@ void game_submit_ship(game_state_t const* g) {
     // The ship is submitted into the scene like any obstacle, so the
     // depth buffer occludes it correctly against geometry it flies
     // under, behind or alongside.
+    //
+    // The roll pivots about the hull's central axis (SHIP_MODEL_ROLL_PIVOT_Y),
+    // not the base-anchored belly (model y = 0) — otherwise the fuselage
+    // swings about a point below the ship as it banks.
+    float const roll_pivot = SHIP_MODEL_ROLL_PIVOT_Y * SHIP_MODEL_SCALE + SHIP_MODEL_Y_OFFSET;
     float wx[SHIP_MODEL_VERT_COUNT], wy[SHIP_MODEL_VERT_COUNT], wz[SHIP_MODEL_VERT_COUNT];
     for (size_t i = 0; i < SHIP_MODEL_VERT_COUNT; i++) {
         ship_model_vert_t const* v = &SHIP_MODEL_VERTS[i];
         float const mx = v->x * SHIP_MODEL_SCALE;
-        float const my = v->y * SHIP_MODEL_SCALE + SHIP_MODEL_Y_OFFSET;
+        float const my = v->y * SHIP_MODEL_SCALE + SHIP_MODEL_Y_OFFSET - roll_pivot;
         float const mz = v->z * SHIP_MODEL_SCALE + SHIP_MODEL_Z_OFFSET;
         float const lx =  mx * c + my * s;
-        float const ly = -mx * s + my * c;
+        float const ly = -mx * s + my * c + roll_pivot;
         wx[i] = lx + g->ship_x_world;
         wy[i] = ly + SHIP_BASE_Y + g->ship_y;
         wz[i] = mz + SHIP_Z_PLANE;
