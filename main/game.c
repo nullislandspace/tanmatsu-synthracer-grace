@@ -7,6 +7,7 @@
 #include "render.h"
 #include "scene.h"
 #include "shapes/pax_tris.h"
+#include "objects/ship_model.h"
 
 // --- Lateral motion -----------------------------------------------------------
 
@@ -52,58 +53,22 @@ static inline float ship_lateral_half_w(float bank) {
 #define SPEED_RECOVERY        2.5f
 
 // --- Ship mesh visuals --------------------------------------------------------
-
-#define SHIP_ROOF_LEFT_COLOR   0xFFFFFF6Bu
-#define SHIP_ROOF_RIGHT_COLOR  0xFFD8AA38u
-#define SHIP_BELLY_COLOR       0xFFF71FF1u
-#define SHIP_RIDGE_COLOR       0xFF31FBFBu
-
-typedef struct {
-    float x, y, z;
-} ship_vert_t;
-
-static ship_vert_t const ship_verts[] = {
-    [0] = {  0.00f,  0.30f,   0.32f},  // nose (elevated apex)
-    [1] = { -0.28f,  0.00f,  -0.10f},  // left  wing tip
-    [2] = {  0.28f,  0.00f,  -0.10f},  // right wing tip
-    [3] = {  0.00f,  0.00f,  -0.36f},  // tail
-};
-
-typedef enum {
-    SHIP_FACE_BELLY = 0,
-    SHIP_FACE_ROOF_LEFT,
-    SHIP_FACE_ROOF_RIGHT,
-} ship_face_t;
-
-typedef struct {
-    uint8_t     a, b, c;
-    ship_face_t face;
-} ship_tri_t;
-
-static ship_tri_t const ship_tris[] = {
-    {0, 2, 1, SHIP_FACE_BELLY},
-    {1, 2, 3, SHIP_FACE_BELLY},
-    {0, 1, 3, SHIP_FACE_ROOF_LEFT},
-    {0, 3, 2, SHIP_FACE_ROOF_RIGHT},
-};
-
-static uint8_t const ship_outline_edges[][2] = {
-    {0, 1}, {1, 3}, {3, 2}, {2, 0}, {0, 3},
-};
-
-#define SHIP_VERT_COUNT    (sizeof(ship_verts) / sizeof(ship_verts[0]))
-#define SHIP_TRI_COUNT     (sizeof(ship_tris)  / sizeof(ship_tris[0]))
-#define SHIP_OUTLINE_COUNT (sizeof(ship_outline_edges) / sizeof(ship_outline_edges[0]))
+//
+// The ship mesh lives in objects/ship_model.h — generated from
+// openscad/ship.3mf by tools/ship_3mf_to_header.py. It is partitioned
+// into regions (body, battery panel, four charge indicators) so the
+// future battery plugin can address the panel/indicators independently.
+// game_submit_ship() (below) consumes it directly; the model can be
+// re-exported and regenerated without touching any code here.
 
 // --- Sparks -------------------------------------------------------------------
 
 // Wingtip world-z offset, so the burst origin sits at the leading
 // edge of the wing rather than the geometric centre of the ship.
 #define SPARK_EMIT_DZ      (-0.10f)
-// Lateral half-extent of the mesh wing tip (matches ship_verts[1].x
-// magnitude and SHIP_COLLISION_HALF_W). Used as the local x of the
-// emission point so the projected origin matches the rendered wing
-// tip after the bank rotation.
+// Lateral half-extent of the wing tip (matches SHIP_COLLISION_HALF_W).
+// Used as the local x of the emission point so the projected spark
+// origin sits at the wing tip after the bank rotation.
 #define SPARK_WING_HALF_W  0.28f
 // Lines drawn per scraping wingtip per frame.
 #define SPARK_LINES        5
@@ -746,51 +711,79 @@ void game_submit_ship(game_state_t const* g) {
     float const c     = cosf(angle);
     float const s     = sinf(angle);
 
-    // The ship is a small 3D mesh near the camera (z = SHIP_Z_PLANE).
-    // It is submitted into the scene like any obstacle, so the depth
-    // buffer occludes it correctly against geometry it flies under,
-    // behind or alongside.
-    float wx[SHIP_VERT_COUNT], wy[SHIP_VERT_COUNT], wz[SHIP_VERT_COUNT];
-    for (size_t i = 0; i < SHIP_VERT_COUNT; i++) {
-        ship_vert_t const* v = &ship_verts[i];
-        float const lx = v->x * c + v->y * s;
-        float const ly = -v->x * s + v->y * c;
+    // Transform every model vertex into world space: scale (model units
+    // → world units) + the header's placement offsets, then a bank roll
+    // about the forward (z) axis, then translate to the flight position.
+    // The ship is submitted into the scene like any obstacle, so the
+    // depth buffer occludes it correctly against geometry it flies
+    // under, behind or alongside.
+    float wx[SHIP_MODEL_VERT_COUNT], wy[SHIP_MODEL_VERT_COUNT], wz[SHIP_MODEL_VERT_COUNT];
+    for (size_t i = 0; i < SHIP_MODEL_VERT_COUNT; i++) {
+        ship_model_vert_t const* v = &SHIP_MODEL_VERTS[i];
+        float const mx = v->x * SHIP_MODEL_SCALE;
+        float const my = v->y * SHIP_MODEL_SCALE + SHIP_MODEL_Y_OFFSET;
+        float const mz = v->z * SHIP_MODEL_SCALE + SHIP_MODEL_Z_OFFSET;
+        float const lx =  mx * c + my * s;
+        float const ly = -mx * s + my * c;
         wx[i] = lx + g->ship_x_world;
         wy[i] = ly + SHIP_BASE_Y + g->ship_y;
-        wz[i] = v->z + SHIP_Z_PLANE;
+        wz[i] = mz + SHIP_Z_PLANE;
     }
 
-    // Pre-dim every ship colour once if the ship is in shadow —
-    // 30% darker face + ridge fills. Far cheaper than per-pixel
-    // attenuation.
-    pax_col_t belly      = SHIP_BELLY_COLOR;
-    pax_col_t roof_left  = SHIP_ROOF_LEFT_COLOR;
-    pax_col_t roof_right = SHIP_ROOF_RIGHT_COLOR;
-    pax_col_t ridge      = SHIP_RIDGE_COLOR;
-    if (g->in_shadow) {
-        belly      = dim_argb(belly,      GAME_SHIP_SHADOW_TINT);
-        roof_left  = dim_argb(roof_left,  GAME_SHIP_SHADOW_TINT);
-        roof_right = dim_argb(roof_right, GAME_SHIP_SHADOW_TINT);
-        ridge      = dim_argb(ridge,      GAME_SHIP_SHADOW_TINT);
+    // Per-region base colours, shadow-dimmed once up front (30% darker)
+    // rather than per pixel. The body is additionally lit per-face
+    // below; the panel + indicators stay flat.
+    pax_col_t region_col[SHIP_REGION_COUNT];
+    for (int r = 0; r < SHIP_REGION_COUNT; r++) {
+        region_col[r] = g->in_shadow
+            ? dim_argb(SHIP_REGION_COLOR[r], GAME_SHIP_SHADOW_TINT)
+            : (pax_col_t)SHIP_REGION_COLOR[r];
     }
+    pax_col_t const outline = g->in_shadow
+        ? dim_argb(SHIP_MODEL_OUTLINE_COLOR, GAME_SHIP_SHADOW_TINT)
+        : (pax_col_t)SHIP_MODEL_OUTLINE_COLOR;
 
-    for (size_t i = 0; i < SHIP_TRI_COUNT; i++) {
-        ship_tri_t const* t   = &ship_tris[i];
-        pax_col_t         col = belly;
-        switch (t->face) {
-            case SHIP_FACE_ROOF_LEFT:  col = roof_left;  break;
-            case SHIP_FACE_ROOF_RIGHT: col = roof_right; break;
-            case SHIP_FACE_BELLY:      col = belly;      break;
+    // Fixed world-space light (front-top-left), matching the
+    // checkpoint/booster shading so the faceted hull reads as 3D.
+    float const light_x = -0.4f, light_y = 0.7f, light_z = -0.6f;
+    render_camera_t const cam = render_camera();
+
+    for (size_t i = 0; i < SHIP_MODEL_TRI_COUNT; i++) {
+        ship_model_tri_t const* t = &SHIP_MODEL_TRIS[i];
+        int const a = t->a, b = t->b, cc = t->c;
+
+        // CCW-outward face normal from the two edges.
+        float const ux = wx[b] - wx[a],  uy = wy[b] - wy[a],  uz = wz[b] - wz[a];
+        float const vx = wx[cc] - wx[a], vy = wy[cc] - wy[a], vz = wz[cc] - wz[a];
+        float const nx = uy * vz - uz * vy;
+        float const ny = uz * vx - ux * vz;
+        float const nz = ux * vy - uy * vx;
+
+        // Back-face cull against the camera at (cam.x, cam.y, 0).
+        float const fcx = (wx[a] + wx[b] + wx[cc]) * (1.0f / 3.0f);
+        float const fcy = (wy[a] + wy[b] + wy[cc]) * (1.0f / 3.0f);
+        float const fcz = (wz[a] + wz[b] + wz[cc]) * (1.0f / 3.0f);
+        if (nx * (cam.x - fcx) + ny * (cam.y - fcy) + nz * (0.0f - fcz) <= 0.0f) {
+            continue;
         }
-        scene_tri(wx[t->a], wy[t->a], wz[t->a],
-                  wx[t->b], wy[t->b], wz[t->b],
-                  wx[t->c], wy[t->c], wz[t->c], col);
+
+        // Directional lighting tint from the normalised face normal.
+        float const nlen = sqrtf(nx * nx + ny * ny + nz * nz);
+        float const inv  = (nlen > 1e-6f) ? (1.0f / nlen) : 0.0f;
+        float       d    = (nx * inv) * light_x + (ny * inv) * light_y + (nz * inv) * light_z;
+        if (d < 0.0f) d = 0.0f;
+        float const tint = 0.55f + 0.45f * d;
+
+        scene_tri(wx[a], wy[a], wz[a],
+                  wx[b], wy[b], wz[b],
+                  wx[cc], wy[cc], wz[cc],
+                  dim_argb(region_col[t->region], tint));
     }
 
-    for (size_t i = 0; i < SHIP_OUTLINE_COUNT; i++) {
-        uint8_t const a = ship_outline_edges[i][0];
-        uint8_t const b = ship_outline_edges[i][1];
-        scene_line(wx[a], wy[a], wz[a], wx[b], wy[b], wz[b], ridge);
+    for (size_t i = 0; i < SHIP_MODEL_EDGE_COUNT; i++) {
+        uint8_t const a = SHIP_MODEL_EDGES[i][0];
+        uint8_t const b = SHIP_MODEL_EDGES[i][1];
+        scene_line(wx[a], wy[a], wz[a], wx[b], wy[b], wz[b], outline);
     }
 }
 

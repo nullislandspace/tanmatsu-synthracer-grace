@@ -3393,3 +3393,81 @@
     - Implemented in `main/main.c` in the `crashed && s_checkpoint_valid`
       rewind block: stash the nine accumulator fields, do the two struct
       copies, then write the stashed values back over `game`.
+
+- 2026-05-22 — Ship model imported from OpenSCAD (3MF) + part-separated.
+    - The ship is now an imported mesh instead of the hand-coded
+      4-vertex tetrahedron. Source of truth: `openscad/ship.3mf`
+      (built from `openscad/ship.scad`). Pipeline:
+      `tools/ship_3mf_to_header.py` parses the 3MF and generates
+      `main/objects/ship_model.h`.
+    - **Colour-as-part-tag.** OpenSCAD `color()` is used purely to tag
+      parts, not for final appearance. The converter maps each known
+      colour to a render region: `#0C0C0C` → battery panel,
+      `#FFFFFA/B/C/D` → charge indicators 0–3, everything else (the
+      OpenSCAD default gold/green on the hull+wings) → body. Result:
+      body 118 tris, panel 12, each indicator 20 — kept as separate
+      regions (`ship_region_t`) so the future battery plugin (Phase
+      9.5) can drive the panel/indicators independently without
+      touching hull geometry. NOTE: indicator 3 is `#FFFFFD` in the
+      model (an earlier note said `#FFFFFC` — typo).
+    - **Axis remap + winding.** SCAD is Z-up / +Y-forward; game space is
+      x-lateral, y-up, z-forward, so the converter remaps
+      `game=(sx, sz, sy)`. That swap is orientation-reversing, so the
+      converter reverses triangle winding to keep faces CCW-outward;
+      `game_submit_ship` then back-face culls with a proper cross-product
+      normal (no longer draws every face) and lights the body per-face
+      (same front-top-left light as the checkpoint/booster). Panel +
+      indicators render flat.
+    - **Outline.** The converter keeps an edge only where exactly two
+      faces meet at a genuine crease — angle between adjacent-face
+      normals in [18°, 162°]. This drops three classes of stray line:
+      coplanar triangulation diagonals (near-0°), near-antiparallel
+      "knife-fold" edges (near-180°, e.g. a thin wing fold), and
+      non-manifold junction edges (face count != 2, where the separate
+      body/panel/indicator solids touch and OpenSCAD welds coincident
+      vertices). → 80 cyan outline lines. (First cut also kept boundary
+      + all >18° edges → 118 lines, which produced floating cyan lines
+      on/under the left wing from the panel-rim welds and two wing knife
+      folds; tightened to the crease band 2026-05-22.)
+    - **Placement is tuneable in the header, not in code.** The geometry
+      is centred on its bounding box in raw model units; the header
+      exposes `SHIP_MODEL_SCALE` (default 0.048696 = 0.56 wingspan /
+      11.5 model units, i.e. 2·SHIP_COLLISION_HALF_W), plus
+      `SHIP_MODEL_Y_OFFSET` / `SHIP_MODEL_Z_OFFSET` nudges and the
+      `SHIP_REGION_COLOR[]` palette. Re-exporting the model = re-run the
+      converter; no C changes. Tweaking size/position/colour = edit the
+      header macros only.
+    - **Collision unchanged.** The `SHIP_COLLISION_*` AABB in game.h was
+      not retuned. The visual wingspan matches it by construction, but
+      the imported hull is flatter and a bit shorter than the box
+      (height ≈0.14 vs 0.30, half-depth ≈0.25 vs 0.34) — revisit the
+      collision constants if the mismatch is noticeable on-device.
+    - Build clean; text +~3 KB (model rodata + submit code), bss
+      unchanged.
+
+- 2026-05-22 — Ship converter bug: 3MF multi-mesh index offsets.
+    - **Root cause of the "floating lines" and the "black triangle below
+      the left wing".** OpenSCAD exports each top-level part as its own
+      `<object>`/`<mesh>`, and each mesh's triangle `v1/v2/v3` indices
+      are LOCAL to that mesh. The converter's first cut flattened every
+      `<vertex>` in the document into one list and used triangle indices
+      as-is, so the 2nd–6th meshes (battery panel + 4 indicators)
+      indexed into the body's vertices → their triangles landed on the
+      hull/left-wing as garbage geometry. ship.3mf here has 6 objects:
+      body (61 v / 118 t), panel (8 v / 12 t), indicators ×4 (12 v /
+      20 t). All share one colorgroup; build items carry no transforms.
+    - **Fix:** `load_3mf` now walks each `<object>`'s `<mesh>`,
+      concatenating vertices and offsetting that mesh's triangle indices
+      by the running vertex count. Panel + indicators now sit top-centre
+      (world y just above the hull roof), as the model intends.
+    - **Correction to the prior outline-filter note.** The 36
+      "non-manifold junction" edges and the two wing "knife-fold" edges
+      that the crease-band filter ([18°,162°]) was credited with
+      removing were NOT real geometry — they were artifacts of this
+      indexing bug (mis-indexed triangles sharing body vertex indices
+      created fake high-valence edges and degenerate folds). With the
+      indexing fixed, each part is its own clean manifold. The
+      crease-band filter is retained as a sensible robust default, but
+      its original rationale was wrong. Outline is now 168 edges.
+    - Mis-diagnosed once as a stale/mismatched 3MF export before the
+      multi-object structure was spotted; the file was correct all along.
