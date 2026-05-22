@@ -156,9 +156,15 @@ Done in this order so each phase produces a runnable build:
      system.
    - **9.2 — Shield pickup.** Single-use; absorbs one head-on hit
      instead of dying — brief invuln + forward/up teleport.
-   - **9.3 — Checkpoint pickup.** Stores a respawn point; on
-     death, resume there instead of GAME_OVER. Needs a design
-     pass on exactly what run state is snapshotted/restored.
+   - **9.3 — Checkpoint pickup.** ✅ done. Stores a respawn point;
+     on a head-on crash, rewind there instead of GAME_OVER. Design
+     resolved (see decisions-log 2026-05-19 / 2026-05-22): the
+     snapshot is a struct copy of `world_state_t` + `game_state_t`;
+     on crash the **level** rewinds (generation, RNG, ship, sun,
+     inventory) but the player's **run progress is kept** (score,
+     distance, multiplier+peak, pickup tallies carry forward), so a
+     Re-Do never costs accumulated progress or meta-progression
+     credit.
    - **9.4 — Attachment slots + Magnet.** The equip framework
      (`attach1`/`attach2`, fills the `APP_STATE_UPGRADE_STUB`
      screen) plus the Magnet attachment — pulls nearby pickups

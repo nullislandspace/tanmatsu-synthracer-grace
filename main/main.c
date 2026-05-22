@@ -2141,15 +2141,50 @@ void app_main(void) {
 
             // Phase 9.3 checkpoint rewind. If a head-on crash got
             // here unabsorbed (no shield) and a checkpoint snapshot
-            // exists, restore the whole run state to that snapshot
-            // and open the Re-Do dialog instead of ending the run.
+            // exists, rewind the *level* — world generation, RNG,
+            // ship position, sun, inventory — to the snapshot and open
+            // the Re-Do dialog instead of ending the run.
+            //
+            // The player's run *progress* is NOT rewound: score,
+            // distance, multiplier (+ peak) and the per-run pickup
+            // tallies carry forward from the crash-time state, so a
+            // Re-Do never costs accumulated progress or the
+            // meta-progression credit it feeds at run end. (Max stage
+            // reached and play-time live in main.c statics — they
+            // already survive the struct copy.) The multiplier pair is
+            // carried with pickups_tri on purpose: the two are coupled
+            // (the multiplier bumps every 5th Tri), so rewinding one
+            // without the other would desync the cadence.
+            //
             // Done after world_advance so the restored state is the
             // final word for the frame; `crashed` is consumed so the
             // render switch routes to the dialog, not CRASHING.
             if (crashed && s_checkpoint_valid) {
                 sfx_crash_play();
+
+                double const kept_distance     = game.distance_traveled;
+                double const kept_score        = game.score;
+                int    const kept_multiplier   = game.multiplier;
+                int    const kept_mult_max     = game.multiplier_max;
+                int    const kept_p_boost      = game.pickups_speed_boost;
+                int    const kept_p_tri        = game.pickups_tri;
+                int    const kept_p_jump       = game.pickups_jump;
+                int    const kept_p_shield     = game.pickups_shield;
+                int    const kept_p_checkpoint = game.pickups_checkpoint;
+
                 world = s_checkpoint_world;
                 game  = s_checkpoint_game;
+
+                game.distance_traveled  = kept_distance;
+                game.score              = kept_score;
+                game.multiplier         = kept_multiplier;
+                game.multiplier_max     = kept_mult_max;
+                game.pickups_speed_boost = kept_p_boost;
+                game.pickups_tri         = kept_p_tri;
+                game.pickups_jump        = kept_p_jump;
+                game.pickups_shield      = kept_p_shield;
+                game.pickups_checkpoint  = kept_p_checkpoint;
+
                 s_checkpoint_valid   = false;
                 s_redo_ignore_pickup = true;
                 app_state = APP_STATE_CHECKPOINT_REDO;

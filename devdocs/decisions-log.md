@@ -3367,3 +3367,29 @@
       one checkpoint; a new pickup overwrites the snapshot.
     - **Phase 9.3 is complete.** Remaining in Phase 9: 9.4 attachment
       slots + magnet, 9.5 battery.
+
+- 2026-05-22 — Phase 9.3 revision — checkpoint redo keeps run progress.
+    - Changed how a checkpoint rewind interacts with run progress. The
+      original 9.3 design restored the *whole* run state from the
+      snapshot (`game = s_checkpoint_game`), which rewound the player's
+      accumulated score/distance/multiplier/pickup tallies along with
+      the level. New rule: the **level** rewinds (world generation, RNG,
+      ship position, sun, inventory charges, boost/shield state), but
+      the player's **run progress does not** — `score`,
+      `distance_traveled`, `multiplier`, `multiplier_max` and the five
+      `pickups_*` counters carry forward from the crash-time state.
+    - Rationale: a Re-Do must never cost accumulated progress or the
+      meta-progression credit those per-run accumulators feed into at
+      run end (`save_commit_run_end`). This is intentionally generous —
+      the replayed stretch can re-award score on top of what was kept.
+    - `multiplier` + `multiplier_max` are carried *with* `pickups_tri`
+      on purpose: they are coupled (multiplier bumps every 5th Tri), so
+      rewinding one without the other would desync the bump cadence.
+    - Already-safe by construction (no code change needed): max stage
+      reached (`s_peak_stage`) and active play time
+      (`s_run_play_seconds`) are main.c statics, untouched by the
+      `game`/`world` struct copy; persistent NVS stats (`save_data_t`)
+      are only written at run end, which a Re-Do does not trigger.
+    - Implemented in `main/main.c` in the `crashed && s_checkpoint_valid`
+      rewind block: stash the nine accumulator fields, do the two struct
+      copies, then write the stashed values back over `game`.
