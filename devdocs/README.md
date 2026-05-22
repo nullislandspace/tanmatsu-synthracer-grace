@@ -14,6 +14,7 @@ overview. The repo-root `DEVELOPMENT.md` is now just a pointer here.
 |----------|----------|
 | [decisions-log.md](decisions-log.md) | Append-only chronological log of every design / implementation decision. The project history. |
 | [architecture.md](architecture.md) | Project context, file layout, and per-module responsibilities (`game.c`, `render.c`, `scene.c`, `world.c`, …). |
+| [importing-objects.md](importing-objects.md) | How-to: turn an OpenSCAD model into an in-game world object via `tools/object_3mf_to_header.py` (modelling conventions, converter config, the emit callback, wiring). |
 | [roadmap.md](roadmap.md) | The phased implementation plan, per-phase verification checklist, and critical-files reference. |
 | [performance.md](performance.md) | Frame-time profiling and the catalogue of viable FPS optimisations. |
 | [input-mapping.md](input-mapping.md) | Keyboard / gamepad bindings and the rationale behind them. |

@@ -3517,14 +3517,15 @@
       height — markers use **height** = 2.0 u). The ship keeps its own
       tool untouched; the two could be merged later. Marker regions:
       `RESTMARK_REGION_POST` (grey `#A0A0A0`, lit per-face, white
-      outline) and `RESTMARK_REGION_BEACON` (green `#00FF00`, flat, green
-      outline).
+      outline) and `RESTMARK_REGION_BEACON` (green `#00FF00`, flat,
+      neutral dark-grey `#404040` outline).
     - **Pulsing beacon.** `restarea_marker_emit` pulses the beacon FILL
-      between full green and grey (`MARKER_BEACON_GREY` `#808080`) on a
-      cosine, `MARKER_PULSE_PERIOD_S = 1.0` s (full → grey → full). The
-      beacon OUTLINE stays full green (does not pulse); the post outline
-      is white. Same geometry-emitter + back-face-cull pattern as the
-      checkpoint/ship.
+      between full green and **black** (`MARKER_BEACON_DARK` `#000000`) on
+      a cosine, `MARKER_PULSE_PERIOD_S = 1.0` s (full → black → full). The
+      beacon OUTLINE stays a constant neutral dark grey `#404040` (does
+      not pulse); the post outline is white. Same geometry-emitter +
+      back-face-cull pattern as the checkpoint/ship. (Fade target + beacon
+      outline retuned from grey/green on 2026-05-22.)
     - Note: each marker is ~72 tris + 67 outline edges, and a rest
       stretch can have several pairs in view at once — heavier than the
       old 1-cube posts. Watch FPS in long rest areas; if needed, lower

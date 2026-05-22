@@ -420,6 +420,18 @@ the function makes it explicit and lets us animate the sun.
   its own `region_col[]` slot (individual on/off), and the submit loop has
   a hook to skip the panel + indicators when no battery is fitted. See the
   2026-05-22 ship decisions-log entries.
+- **Imported world objects.** Ordinary world objects can be imported the
+  same way via the general converter `tools/object_3mf_to_header.py`
+  (config-driven registry). Beyond the ship tool it emits region-tagged
+  triangles *and* edges plus per-region fill + outline colour tables, and
+  supports a base/centre vertical anchor and a height/wingspan scale
+  anchor. First user: the rest-area markers (`objects/restarea_marker.c`,
+  model in `restarea_marker_model.h`) — a grey lit hex post (white
+  outline) topped by a green beacon sphere whose fill pulses full
+  green → black → full green on a 1 s cosine while its outline stays a
+  constant neutral dark grey. They line the rest-area wall tops (replacing
+  the old green cube posts) via `restarea_marker_pair_spawn` from
+  `areas/rest.c`. See the 2026-05-22 rest-area-marker decisions-log entry.
 - HUD: top-right score + multiplier; top-left region indicator and
   challenge progress; bottom-left pickup inventory icons. Use
   `pax_font_saira_condensed` (faster) and `pax_clip()` so HUD doesn't fight
