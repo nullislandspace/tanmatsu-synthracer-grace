@@ -397,8 +397,13 @@ menus (main/settings/controls/audio/pause) + the rebind capture; (e) retire
 the bespoke menu states from `main.c`. On-device smoke after each.
 
 **Checklist (when scheduled):**
-- [ ] `se_run` + `se_app_config_t` + `se_app_callbacks_t` (engine owns
-  bootstrap, loop, vsync, timing, backdrop clear).
+- [~] `se_run` + `se_app_config_t` + `se_app_callbacks_t` — **API header
+  `se_run.h` laid down 2026-05-24** (signed-off contract, builds green,
+  byte-identical: nothing defines/calls it yet). Remaining: the engine-side
+  *implementation* — migrate `main.c`'s bootstrap (NVS/BSP/display/
+  framebuffers/scene_init/audio_mixer_init/vsync) + the ~960-line frame loop
+  onto `se_run`; promote the loop's locals; route the per-frame body through
+  the callbacks. **This is the big surgery — do it in a focused pass.**
 - [ ] Input-queue pump in the engine; consume **only** volume ± + audio-jack
   (+ F1-exit if `f1_exits`); forward everything else to `on_input`. Power
   button + F2/F3 left untouched.

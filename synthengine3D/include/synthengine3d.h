@@ -23,8 +23,9 @@
 #include "se_nbt.h"             // E3  -- NBT serialization primitive
 #include "se_save.h"            // E3  -- file-backed save-slot framework
 #include "se_scene.h"           // E4  -- 3D scene renderer + camera + projection
+#include "se_run.h"             // EF  -- application framework / run loop (API; impl staged in)
 
-// Subsystem public headers are added here as the extraction proceeds
-// (engine-extraction.md steps E5-E6):
-//   #include "se_object.h"      // E5 -- object/emit framework
-//   #include "se_ui.h"          // E6 -- data-driven menu widgets
+// Subsystem public headers added as the framework lands (EF):
+//   #include "se_ui.h"          // EF -- menu system (se_menu_t, run_menu, capture_key)
+//   #include "se_bindings.h"    // EF -- input remap dialog + persistence
+//   (se_object.h: not extracted -- E5 deferred, object pool stays game-side)
