@@ -1,6 +1,6 @@
 #include "objects/bridge.h"
 
-#include "direct_565.h"
+#include "se_direct565.h"
 #include "magicnumbers.h"
 #include "objects/wall.h"   // for WALL_X_LEFT / WALL_X_RIGHT / WALL_HALF_W
 #include "render.h"         // for render_project, RENDER_NEAR_CLIP_Z

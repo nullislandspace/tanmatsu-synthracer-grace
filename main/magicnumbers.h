@@ -19,15 +19,11 @@
 // helpers (`direct_565.h`) hardcode rotation + stride into the
 // inner loop while keeping the numeric values configurable — port
 // to a different display by updating these defines.
-#define DISPLAY_RAW_W       480
-#define DISPLAY_RAW_H       800
-
-#define DISPLAY_LOG_W       800   // == DISPLAY_RAW_H
-#define DISPLAY_LOG_H       480   // == DISPLAY_RAW_W
-
-// Raw-buffer stride, in pixels (not bytes). Equals DISPLAY_RAW_W
-// because the framebuffer is a tightly-packed 2D RGB565 array.
-#define DISPLAY_RAW_STRIDE  DISPLAY_RAW_W
+// The DISPLAY_* constants moved into the engine's overridable config
+// (synthengine3D/include/se_config.h) so the renderer owns them; they
+// are included here so game code that pulls in magicnumbers.h still sees
+// the same values. Override by defining before this header is reached.
+#include "se_config.h"
 
 
 // =============================================================
@@ -394,5 +390,7 @@
 // (+10 dB). So bigger numeric steps here translate to subtler
 // perceived changes than instinct suggests. Tune by ear, then
 // verify headroom math on paper rather than the other way around.
-#define AUDIO_MUSIC_GAIN  0.30f
-#define AUDIO_SFX_GAIN    0.35f
+// AUDIO_MUSIC_GAIN / AUDIO_SFX_GAIN now live in the engine config
+// (se_config.h, included above) as overridable defaults; the headroom
+// reasoning above is retained here for context. Override them per game
+// by defining before se_config.h is reached.

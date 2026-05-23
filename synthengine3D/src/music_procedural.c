@@ -1,6 +1,6 @@
-#include "music/music_procedural.h"
+#include "se_music_procedural.h"
 
-#include "audio_dsp.h"
+#include "se_audio_dsp.h"
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"

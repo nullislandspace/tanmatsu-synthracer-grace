@@ -1,4 +1,4 @@
-#include "rendertext.h"
+#include "se_text.h"
 
 #if defined(USE_HERSHEY_FONT) && defined(USE_HERSHEY_DIRECT)
 #include "hershey_font_direct.h"

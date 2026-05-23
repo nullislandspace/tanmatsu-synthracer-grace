@@ -3818,3 +3818,57 @@
     area defines `AD_TEXT_COLOR` (red) and hands it in. Lets the same sign
     object render different signage in different colours; a per-ad-text
     colour array would slot into the area trivially if wanted later.
+
+- 2026-05-23 — **SynthEngine3D extraction planned** (branch
+  `engine_extraction`). Decision to lift the game-agnostic engine (3D
+  software renderer, object framework, audio mixer + DSP + procedural music,
+  vector text, UI/menu widgets, settings, save framework) out of `main/` into
+  a self-contained `synthengine3D/` component behind a stable public API, so
+  internals can evolve without rewriting games and the component can later be
+  reused (graceloader, other apps). Full plan + step-by-step in
+  [engine-extraction.md](engine-extraction.md). Key decisions:
+    - **Dual-mode IDF component, not an idf.py game.** Clarified the
+      toolchain/build-system split: the project uses the IDF *toolchain*
+      (`riscv32-esp-elf-*`, hence `export.sh`) but **not** the IDF *build
+      system* (plain `project(app C)` CMake → `-nostdlib` `.so` linked
+      against `fakelib`, custom `app.ld` / `app_version.script` / crt0). So
+      the engine's `CMakeLists.txt` is dual-mode: `if(COMMAND
+      idf_component_register)` registers a real IDF component (for
+      graceloader, a real idf.py app, to consume later via the component
+      manager), `else()` defines a plain library target this game consumes via
+      `add_subdirectory`. The game stays a plain-CMake `.so` build (turning it
+      into an idf.py firmware build would fight the graceloader `.so` model).
+      An `idf_component.yml` ships now for future external management.
+    - **Public/internal API enforced by the build, three layers.** (1) Opaque
+      handle types — public headers forward-declare structs, definitions in
+      `src/internal/`, so layout changes can't break games; (2) include-path
+      separation — `include/` public is the only consumer-visible dir,
+      `src/`+`src/internal/` PRIVATE, so including an internal header fails to
+      compile; (3) `se_` naming + banners + a semver'd `se_version.h`
+      (public API = semver contract; anything internal may change at a patch).
+    - **Overridable defaults.** Engine ships `#ifndef`-guarded defaults
+      (`RENDER_HORIZON_Y` etc. stay defines, game-overridable) in
+      `se_config.h`; runtime config struct for coarse-grained values only.
+    - **App specifics stay in the game.** Engine is a toolkit; the graceloader
+      main loop, BSP bootstrap, vsync, input drain and app state machine
+      remain in `main/`. Native-vs-graceloader `#ifdef`s in the engine are
+      deferred past v1.
+    - **Self-contained docs inside the component** (README + CHANGELOG +
+      `docs/` + a minimal example), written for an outside developer — they
+      travel with the component; the game's `devdocs/` does not.
+    - **Performance contract: net-zero if done right.** It stays one `.so`
+      (`-Bsymbolic` ⇒ direct intra-`.so` calls, no PLT); no `-flto` and `.c`
+      files are already separate TUs, so no cross-TU inlining is lost; same
+      flags ⇒ same codegen. The hottest code is `static inline` in headers
+      (`direct_565.h` rasterizer, `audio_dsp.h` synth) — these become
+      **public inline headers** and must never be hidden behind opaque
+      handles; opaque handles are for coarse objects only. Hot-loop tunables
+      stay compile-time defines; the renderer→world inversion passes a
+      `se_shadow_caster_t[]` array, not a per-element callback; the engine
+      target must replicate the exact flags (esp. `-march=...xesppie`, or the
+      PIE SIMD silently degrades to scalar). Regression gate: record an
+      `app.map` size + on-device FPS baseline at E0 and re-check after the
+      structural moves (E1/E4/E5).
+    - **Migration is strangler-style:** cleanest/least-coupled modules first,
+      `make build` + `make verify` green at every step, user commits between
+      steps. No code moved yet — this entry records the plan only.

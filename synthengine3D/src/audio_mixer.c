@@ -1,8 +1,7 @@
-#include "audio_mixer.h"
+#include "se_audio.h"
 
-#include "audio_dsp.h"
-#include "audio_settings.h"
-#include "magicnumbers.h"
+#include "se_audio_dsp.h"
+#include "se_config.h"
 
 #include "bsp/audio.h"
 #include "bsp/input.h"
@@ -24,16 +23,28 @@ static char const TAG[] = "audio_mixer";
 #define MIXER_CHUNK_SAMPLES (MIXER_CHUNK_FRAMES * 2)       // L+R
 #define MIXER_CHUNK_BYTES   (MIXER_CHUNK_FRAMES * MIXER_FRAME_BYTES)
 
-// Master gain factors derived from `magicnumbers.h`. Both are
-// applied in Q15 fixed-point at mix-down time, so the per-voice
-// `*_AMP` constants in each `sfx_*.c` stay tuned to relative
+// Master gain factors (overridable engine defaults in se_config.h).
+// Both are applied in Q15 fixed-point at mix-down time, so the
+// per-voice `*_AMP` constants in each `sfx_*.c` stay tuned to relative
 // loudness between effects and these set the overall balance.
 //
-// See the "Audio gain staging" block in magicnumbers.h for the
-// headroom math (target: 5 concurrent SFX + music + hum without
-// hard-clipping the int16 mixer accumulator).
+// See the "Audio gain staging" block in se_config.h for the headroom
+// math (target: 5 concurrent SFX + music + hum without hard-clipping
+// the int16 mixer accumulator).
 #define MIXER_MUSIC_GAIN_Q15 ((int32_t)(AUDIO_MUSIC_GAIN * 32768.0f))
 #define MIXER_SFX_GAIN_Q15   ((int32_t)(AUDIO_SFX_GAIN   * 32768.0f))
+
+// Output gates pushed by the host app (at startup and on toggle) via
+// audio_mixer_set_music_enabled() / audio_mixer_set_group_enabled(); the
+// mixer task reads these instead of reaching into app/NVS settings, so
+// the engine carries no app-config dependency. The music slot has its
+// own gate; SFX voices are gated by their app-defined `group` index, so
+// the engine knows nothing about what any group *means*. Plain bools
+// written from the app thread and read on the audio task — a torn read
+// just means one chunk uses the stale value, which is harmless.
+static volatile bool g_music_gate = true;
+static volatile bool g_group_gate[SE_AUDIO_SFX_GROUP_COUNT] =
+    { [0 ... SE_AUDIO_SFX_GROUP_COUNT - 1] = true };   // groups default enabled
 
 // Number of consecutive silent chunks the mixer pushes through the
 // I2S DMA queue before powering down. ~46 ms covers the worst case
@@ -151,8 +162,7 @@ static void mixer_task_fn(void* arg) {
             continue;
         }
 
-        bool const music_gate = audio_settings_music_on();
-        bool const sfx_gate   = audio_settings_sfx_on();
+        bool const music_gate = g_music_gate;
         int active_sources = 0;
 
         memset(g_accum, 0, sizeof(g_accum));
@@ -170,22 +180,22 @@ static void mixer_task_fn(void* arg) {
         }
 
         // ---- SFX voices ----
-        // Gating is *per voice* based on its tag — engine hum has
-        // its own Audio-settings toggle, the rest share the SFX
-        // toggle. Without this split, "SFX off" would silence the
-        // hum too.
+        // Gating is *per voice* by its app-defined `group` index — the
+        // engine doesn't know what any group means; the host enables /
+        // disables groups via audio_mixer_set_group_enabled(). An
+        // out-of-range group is treated as always-on.
         //
         // SFX master gain is applied at sum-in time (Q15 fixed
         // point). Per-voice `*_AMP` constants in each sfx_*.c set
         // relative loudness; this knob sets the overall SFX bus
-        // level against the music + clip ceiling. See magicnumbers.h
+        // level against the music + clip ceiling. See se_config.h
         // for the 5-concurrent-voice headroom budget.
-        bool const hum_gate = audio_settings_hum_on();
         for (int i = 0; i < MIXER_VOICE_SLOTS; i++) {
             sfx_voice_t* v = g_voices[i].voice;
             if (v == NULL || v->finished || v->render == NULL) continue;
 
-            bool const allowed = (v->tag == SFX_VOICE_TAG_HUM) ? hum_gate : sfx_gate;
+            bool const allowed = (v->group < SE_AUDIO_SFX_GROUP_COUNT)
+                                     ? g_group_gate[v->group] : true;
             if (!allowed) continue;
 
             memset(g_mix_voice, 0, sizeof(g_mix_voice));
@@ -446,4 +456,13 @@ void audio_mixer_stop_all_voices(void) {
         }
     }
     xSemaphoreGive(g_slots_mutex);
+}
+
+// Output gates pushed by the host app (see the g_*_gate declarations).
+// Safe to call before audio_mixer_init() — they only set a flag the
+// mixer task reads once running.
+void audio_mixer_set_music_enabled(bool on) { g_music_gate = on; }
+
+void audio_mixer_set_group_enabled(uint8_t group, bool on) {
+    if (group < SE_AUDIO_SFX_GROUP_COUNT) g_group_gate[group] = on;
 }

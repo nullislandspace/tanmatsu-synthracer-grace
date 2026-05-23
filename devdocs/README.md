@@ -16,6 +16,7 @@ overview. The repo-root `DEVELOPMENT.md` is now just a pointer here.
 | [architecture.md](architecture.md) | Project context, file layout, and per-module responsibilities (`game.c`, `render.c`, `scene.c`, `world.c`, …). |
 | [importing-objects.md](importing-objects.md) | How-to: turn an OpenSCAD model into an in-game world object via `tools/object_3mf_to_header.py` (modelling conventions, converter config, the emit callback, wiring). |
 | [roadmap.md](roadmap.md) | The phased implementation plan, per-phase verification checklist, and critical-files reference. |
+| [engine-extraction.md](engine-extraction.md) | Plan + step-by-step checklist for extracting the reusable engine into the `synthengine3D/` component (on the `engine_extraction` branch). |
 | [performance.md](performance.md) | Frame-time profiling and the catalogue of viable FPS optimisations. |
 | [input-mapping.md](input-mapping.md) | Keyboard / gamepad bindings and the rationale behind them. |
 | [research.md](research.md) | Appendix A — offline-cached research on the original *Race The Sun*. |
@@ -49,6 +50,7 @@ done and what is next.
 | 11 | Meta-progression UI | ⬜ not started — **scope expanded:** absorbs the meta-progression work originally filed under Phase 8. The `meta.c` module: 25-level unlock ladder, 3-slot daily challenge system + challenge templates, awarding challenge points / level-ups, applying unlocks, level-up SFX & banner. Also owns the daily-challenge half of day-rollover — `save_apply_day_rollover()` already clears the `daily_done_*` flags on a day change (Phase 8), but the flags are inert until this phase's challenge system writes them. New challenge code must read the `s_session_date` snapshot, never the RTC. |
 | 12 | Apocalypse mode | ⬜ not started |
 | 13 | Polish (LEDs, splash, etc.) | ⬜ not started |
+| E | SynthEngine3D extraction | 🔶 in progress on the `engine_extraction` branch — **E0–E2 done 2026-05-23**. E0: component scaffold + dual-mode CMakeLists + `idf_component.yml` + `se_version.h`/umbrella wired in (size baseline recorded). E1: hot inline leaves moved in — `se_direct565.h` (was `direct_565.h`), `se_text.h` + the internal Hershey headers (was `rendertext.{c,h}` / `hershey*.h`), and a new overridable `se_config.h` for display geometry; **build byte-identical to baseline** (inline leaves still inline), all symbols satisfied, boundary clean. E2: audio stack moved in (`se_audio*.h`, DSP, mixer, procedural music) with both game couplings inverted — the mixer's settings gate became a push-model API and the master gains moved to `se_config.h`; the engine-`hum` concept was generalized to opaque SFX mute groups so the engine names no game sound. E2.1 (parameterize the music generator's content via a config struct) + E3–E9 pending. Full step-by-step in [engine-extraction.md](engine-extraction.md). Extracts the reusable engine into `synthengine3D/` as a dual-mode IDF component with a stable public API. Not on the main game phase track. |
 
 **Open questions / parking lot:**
 - **Framerate** — currently **28.3 FPS gameplay** after the

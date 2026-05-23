@@ -3,7 +3,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "direct_565.h"   // direct_565_logical_index, direct_565_pack
+#include "se_direct565.h"   // direct_565_logical_index, direct_565_pack
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "magicnumbers.h"

@@ -1,10 +1,20 @@
 #pragma once
+// =====================================================================
+//  SynthEngine3D  --  PUBLIC STABLE API  (hot inline framebuffer leaf)
+// ---------------------------------------------------------------------
+//  Direct RGB565 pixel / line / triangle primitives. These are
+//  performance-critical `static inline` leaves: they MUST stay in this
+//  public header so callers (engine and game) inline them -- never move
+//  them behind a function-call or opaque-handle boundary. Display
+//  geometry comes from se_config.h (overridable). Part of the stable,
+//  semver'd surface (see se_version.h).
+// =====================================================================
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "magicnumbers.h"
+#include "se_config.h"
 #include "pax_gfx.h"
 
 // Direct RGB565 pixel / line primitives.

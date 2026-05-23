@@ -11,7 +11,7 @@
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
-#include "direct_565.h"
+#include "se_direct565.h"
 #include "driver/ppa.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
@@ -22,7 +22,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "attachments.h"
-#include "audio_mixer.h"
+#include "se_audio.h"
 #include "audio_settings.h"
 #include "controls_settings.h"
 #include "game.h"
@@ -31,11 +31,11 @@
 #include "icons.h"
 #include "input.h"
 #include "magicnumbers.h"
-#include "music/music_procedural.h"
+#include "se_music_procedural.h"
 #include "nvs_flash.h"
 #include "pax_gfx.h"
 #include "render.h"
-#include "rendertext.h"
+#include "se_text.h"
 #include "save.h"
 #include "scene.h"
 #include "sfx/sfx_crash.h"
@@ -1927,6 +1927,12 @@ void app_main(void) {
     if (res != ESP_OK) {
         ESP_LOGW(TAG, "audio_mixer_init failed: %d — audio will be silent", res);
     }
+    // Push the loaded audio toggles into the engine mixer's output gates.
+    // The mixer no longer reads app settings itself (engine has no NVS
+    // dependency); the app maps its mute categories onto mixer groups.
+    audio_mixer_set_music_enabled(audio_settings_music_on());
+    audio_mixer_set_group_enabled(AUDIO_SFX_GROUP_GENERAL, audio_settings_sfx_on());
+    audio_mixer_set_group_enabled(AUDIO_SFX_GROUP_HUM, audio_settings_hum_on());
     // Apply launcher-persisted display/keyboard/LED brightness and
     // speaker/headphone volume + initial audio-jack routing. Has to
     // run after audio_mixer_init() because the mixer's own init

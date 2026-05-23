@@ -2,7 +2,7 @@
 
 #include <math.h>
 
-#include "direct_565.h"
+#include "se_direct565.h"
 #include "esp_timer.h"
 #include "magicnumbers.h"
 #include "scene.h"

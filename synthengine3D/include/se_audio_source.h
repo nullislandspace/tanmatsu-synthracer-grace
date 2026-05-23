@@ -1,3 +1,10 @@
+// =====================================================================
+//  SynthEngine3D  --  PUBLIC STABLE API  --  audio source contracts
+//  Part of the semver'd public surface (see se_version.h). The vtable
+//  structs below are value-types that ARE the contract: games implement
+//  music_source_t / sfx_voice_t and hand them to the mixer (se_audio.h).
+// =====================================================================
+//
 // Interfaces shared between the audio mixer and its plug-in sources.
 //
 // The mixer (`audio_mixer.c`) only sees two trait-style structs:
@@ -62,17 +69,6 @@ struct music_source_s {
 
 typedef struct sfx_voice_s sfx_voice_t;
 
-// Which Audio-settings toggle gates a given voice. One-shot SFX
-// (ding, crash, scrape, cube-bump, plink) share the
-// `audio_settings_sfx_on` flag; the engine hum has its own
-// `audio_settings_hum_on` flag so players who like the SFX cues
-// but find the constant low drone fatiguing can mute just the
-// hum without losing the rest.
-typedef enum {
-    SFX_VOICE_TAG_ONESHOT = 0,   // gated by audio_settings_sfx_on
-    SFX_VOICE_TAG_HUM,           // gated by audio_settings_hum_on
-} sfx_voice_tag_t;
-
 struct sfx_voice_s {
     // Render `frames` stereo frames to `stereo_out`. Output buffer
     // is pre-zeroed; the mixer sums the result at unity gain. Set
@@ -91,11 +87,14 @@ struct sfx_voice_s {
     // the flag for it).
     bool finished;
 
-    // Which Audio-settings toggle gates this voice. Defaults to
-    // SFX_VOICE_TAG_ONESHOT — voices that don't set this
-    // explicitly are treated as ordinary one-shots and follow the
-    // main SFX gate.
-    sfx_voice_tag_t tag;
+    // App-defined mute group [0, SE_AUDIO_SFX_GROUP_COUNT). The mixer
+    // silences a voice when its group is gated off via
+    // audio_mixer_set_group_enabled(); the *meaning* of each group is
+    // entirely up to the host app (e.g. a game might use group 0 for
+    // general SFX and group 1 for a persistent engine drone with its
+    // own mute toggle). Defaults to 0 (zero-initialised), so voices
+    // that don't care all share group 0.
+    uint8_t group;
 
     // Backend-specific state follows in the embedding struct.
 };

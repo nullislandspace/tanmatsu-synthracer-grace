@@ -1,5 +1,5 @@
 // Hershey Vector Font — direct pixel rendering into a pax_buf_t.
-// Built on top of the shared `direct_565.h` helpers, so the inner
+// Built on top of the shared `se_direct565.h` helpers, so the inner
 // per-pixel loop is identical to the one used by `synthwave_step`
 // and `render_obstacles`: one halfword store, no orientation
 // switch, no PAX setter dispatch.
@@ -12,7 +12,7 @@
 
 #include <stdlib.h>
 
-#include "direct_565.h"
+#include "se_direct565.h"
 #include "hershey.h"
 #include "pax_gfx.h"
 

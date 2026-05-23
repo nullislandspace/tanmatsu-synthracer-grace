@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "audio_source.h"  // AUDIO_SAMPLE_RATE_HZ
+#include "se_audio_source.h"  // AUDIO_SAMPLE_RATE_HZ
 
 #include "esp_err.h"
 #include <stdbool.h>
