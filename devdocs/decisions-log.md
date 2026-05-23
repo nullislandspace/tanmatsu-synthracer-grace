@@ -3978,3 +3978,58 @@
       measured. Sequencing: finish the mechanical extraction (E6 menus, E7
       backdrop, E8 docs, E9 verify) first, then ER. Full spec in
       [engine-extraction.md](engine-extraction.md) (ER section).
+
+- 2026-05-24 — **Major pivot: the engine becomes an application framework
+  (inversion of control).** This reverses the original constraint 4 ("app
+  specifics stay in the game; engine is a toolkit"). The user's call:
+  volume keys, audio-jack, F1-exit, vsync, and the input-queue pump are
+  identical in every graceloader game, so the engine should own them and the
+  game shouldn't re-implement loop plumbing per title. Decision: do it
+  properly in one pass on this branch rather than piecemeal across releases.
+    - **New capstone phase EF** (`se_run` + callbacks). Engine owns: BSP/
+      display/audio bootstrap, the framebuffer + double-buffer + vsync blit,
+      the input-queue pump, the device-global keys (volume ±, audio-jack
+      re-route, F2/F3 brightness, F1-exit when the game opts in, power), per-
+      frame `dt`, `scene_init`, and the backdrop clear. The game registers
+      `on_init/on_input/on_update/on_backdrop/on_render/on_shutdown` + a config
+      (`f1_exits`, `backdrop_argb`, …) and a `void* user`. Polled steering
+      stays a direct BSP read inside `on_update`.
+    - **Backdrop hook (answers the user's question):** engine clears to
+      `backdrop_argb` (black default) **or** calls `on_backdrop(fb)` if
+      registered. Race the Synth draws its synthwave there; the synthwave/PPA
+      code stays game-side. This subsumes E7.
+    - **Menu system (subsumes E6), built on the loop.** Once the engine owns
+      the frame, menus get `se_menu_t` (definition + live cursor state; row
+      kinds NONE/CHECK/TEXT/CUSTOM, CUSTOM carrying a `draw_value` callback so
+      the keybind→icon logic stays game-side; theme via `SE_UI_COL_*` in
+      `se_config.h`). Core is per-frame (`se_menu_input(action)` /
+      `se_menu_draw(fb)`) so it composes with live gameplay (pause overlay);
+      a blocking `se_ui_run_menu(&def,&result)` wrapper (pumps engine frames +
+      the backdrop hook) gives the "show menu → get result" call site the user
+      wanted; `se_ui_capture_key()` replaces the bespoke key-capture state for
+      rebinds. Menu *content* + which key means "down" (remappable) stay
+      game-side.
+    - **Risk:** the biggest rewrite of the effort (re-architects the
+      ~3079-line `main.c`). Mitigated by the branch + a strangler sub-plan
+      (stand up `se_run` driving existing code first, then move input/globals,
+      then vsync, then the menu system, then retire bespoke states), building
+      green + on-device smoke at each step. The `se_run`/callback API is being
+      signed off before any code moves (same discipline as the E3 save API).
+    - **Re-sequenced remaining work:** EF → E8 docs → E9 verify → ER render
+      pipeline; E2.1 (music config) parked. E0–E4 done; E5 deferred. Full spec
+      in [engine-extraction.md](engine-extraction.md) (EF section).
+    - **EF API refined (user sign-off, supersedes the globals list above):**
+      (1) The engine consumes **only** volume ± + audio-jack live (+ F1-exit
+      if opted in). **F2/F3 are NOT grabbed** (function keys too valuable;
+      brightness is a setting) and the **power button is left alone** (2 s-hold
+      power-off is in the coprocessor; it's next to volume and fragile, so a
+      short tap must never cost progress). (2) **Brightness is a device-global
+      *setting*, not a key.** The engine owns four shared-`"system"`-NVS
+      hardware settings — speaker/hp volume, screen brightness, keyboard
+      backlight, LED brightness — loaded at boot from the launcher/other apps,
+      applied via BSP, adjustable from the in-game settings menu, and
+      persisted back so they carry across apps. App-specific settings
+      (music/SFX/hum, keybinds, gyro) stay the game's. (3) **Menu nav keys are
+      engine-owned + fixed but overridable** via `SE_UI_KEY_UP/DOWN/ACTIVATE/
+      BACK` `#define`s in `se_config.h` (not the game's remappable gameplay
+      bindings) — so a non-QWERTY port can retarget them.

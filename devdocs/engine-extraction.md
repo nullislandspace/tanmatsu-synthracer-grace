@@ -70,11 +70,19 @@ objects, areas, the save *schema*, menu *content*).
    `target_compile_definitions`, or (c) a runtime config struct passed at
    init. Hot-loop tunables stay compile-time `#define`s (see perf contract).
 
-4. **App specifics stay in the game.** The engine is a *toolkit*, not the
-   app. The graceloader main loop, BSP/display/audio bootstrap, vsync, input
-   drain, and the app state machine remain in `main/`. (Native-app vs
-   graceloader `#ifdef`s inside the engine are a *later* concern, out of
-   scope for v1.)
+4. **The engine is an application *framework* (inversion of control).**
+   *(REVISED 2026-05-24 — this reverses the original "app specifics stay in
+   the game; engine is a toolkit" call.)* The engine owns the run loop: BSP /
+   display / audio bootstrap, the vsync/blit double-buffer, the input-queue
+   pump, the device-global keys (volume ±, audio-jack re-route, brightness,
+   F1-exit when the game enables it, power button), per-frame timing, and the
+   backdrop clear. The game plugs in via callbacks (`se_run(&callbacks)`) and
+   is *content + per-frame logic*, not loop plumbing. The **only** things that
+   stay game-side are genuinely game-specific: gameplay/state logic, world +
+   objects, the save schema, the synthwave backdrop drawing (via the backdrop
+   hook), and menu *content*. Built in phase **EF**. Native-app vs graceloader
+   differences live behind engine `#ifdef`s (anticipated earlier; handled
+   inside EF / as encountered).
 
 5. **Self-contained documentation** lives **inside** `synthengine3D/` (it
    travels with the component; the game's `devdocs/` does not). Written for a
@@ -245,17 +253,143 @@ the game; not genericised into the engine. Why:
 So E5 lands as "no extraction"; the effort it would have taken is redirected
 into the **ER** render-pipeline phase below.
 
-### E6 — UI / menu widget framework
-- [ ] Extract `menu_view_t` + `menu_draw()` + row kinds + panel/chevron drawing from `main.c` → `se_ui.{c,h}`. Game keeps menu content + the state machine.
-- [ ] Build + verify; on-device menu smoke.
+### E6 — UI / menu system → FOLDED INTO EF 2026-05-24
+Originally "extract the menu renderer." Discussion grew it into a full menu
+*system* (engine owns nav + selection state + input-to-action + the rebind
+capture, not just the draw) and then into the realisation that once the
+engine owns the run loop (**EF**) the menu system rides on it cleanly. So
+it's built **as part of EF**. Decided keybind-row cut: a generic
+`MENU_VAL_CUSTOM` + a `draw_value` callback keeps the scancode→icon logic
+game-side. See EF.
 
-### E6 — UI / menu widget framework
-- [ ] Extract `menu_view_t` + `menu_draw()` + row kinds + panel/chevron drawing from `main.c` → `se_ui.{c,h}`. Game keeps menu content + the state machine.
-- [ ] Build + verify; on-device menu smoke.
+### E7 — Backdrop → FOLDED INTO EF 2026-05-24
+The backdrop is no longer a "split" — it becomes EF's **backdrop hook**: the
+engine clears to black by default, or calls the game's registered
+`on_backdrop(fb)` (Race the Synth draws its synthwave there). The synthwave
+shapes/PPA code stay game-side, invoked from that hook. See EF.
 
-### E7 — Backdrop split (scope decision)
-- [ ] Decide: extract a generic PPA hardware-blit helper to the engine, keep the synthwave shapes/aesthetic game-side — **or defer** (keep `synthwave.c` entirely game-side for v1). Flagged optional.
-- [ ] Build + verify (if anything moves).
+### EF — Application framework / run loop (inversion of control)  ⬅ the capstone
+
+> Added 2026-05-24. The deliberate pivot from "engine = toolkit the game
+> calls" to "engine = framework that runs the app and calls the game"
+> (reverses constraint 4). This is the **largest, highest-risk** phase — it
+> re-architects `main.c` (the ~3079-line loop + state machine + globals) — so
+> the `se_run` / callback API is designed and signed off **before** any code
+> moves (same discipline as the E3 save API). Subsumes E6 (menu system) and
+> E7 (backdrop hook).
+
+**What the engine owns** (the run loop): BSP/device + display + audio
+bootstrap; the framebuffer + double-buffer + tearing-effect/vsync blit; the
+input-queue pump; the device-global **keys** it consumes live — **only**
+volume ± and audio-jack re-route, plus F1-exit *when the game opts in*;
+per-frame `dt` timing; `scene_init`; the backdrop clear. None of this is
+game-specific — every graceloader game wants it identically.
+- **NOT consumed by the engine:** F2/F3 (function keys are too valuable to
+  spend on brightness — brightness is a *setting*, see below) and the power
+  button (a 2 s hold powers off in the coprocessor; it sits next to volume
+  and is fragile, so a short tap must never cost progress — the engine leaves
+  it entirely alone).
+
+**Device-global settings the engine owns** (loaded from the launcher-shared
+`"system"` NVS at boot, applied via BSP, adjustable in-game through a menu,
+and **persisted back** so changes carry across apps — exactly how volume
+already works): **volume** (two `"system"` NVS values — `speaker.volume` and
+`hp.volume` — with the **audio-jack state selecting which is live**; volume ±
+adjusts the active one, and the jack handler re-applies on plug/unplug),
+**screen brightness**, **keyboard-backlight brightness**, and **LED
+brightness**. A game starts from
+whatever the player set in the launcher / other apps, and can change any of
+them from its settings menu. The engine exposes get/set helpers (each set
+applies via BSP + writes the shared NVS); the game's settings menu just wires
+rows to them. (App-specific settings — music/SFX/hum toggles, keybinds, gyro
+— remain the *game's* in its own NVS namespace; only the device-global
+hardware settings are the engine's.)
+
+**What the game provides** (`se_run(&cfg, &callbacks)`): content + per-frame
+logic via callbacks, plus config. Proposed contract:
+```c
+typedef struct {
+    bool     f1_exits;          // engine handles F1 → return to launcher
+    uint32_t backdrop_argb;     // clear colour when on_backdrop is NULL
+    // ... display orientation, audio rate, etc. (sensible defaults)
+} se_app_config_t;
+
+typedef struct {
+    void (*on_init)(void* user);                       // after engine bootstrap
+    void (*on_input)(const se_input_event_t* ev, void* user); // events the engine didn't consume
+    void (*on_update)(float dt, void* user);           // per-frame game logic / state machine
+    void (*on_backdrop)(pax_buf_t* fb, void* user);    // optional; else clear to backdrop_argb
+    void (*on_render)(pax_buf_t* fb, void* user);      // 3D scene + HUD
+    void (*on_shutdown)(void* user);
+} se_app_callbacks_t;
+
+void se_run(const se_app_config_t* cfg, const se_app_callbacks_t* cb, void* user);
+```
+Per frame the engine: pumps input → consumes its globals → forwards the rest
+to `on_input` → `on_update(dt)` → `on_backdrop` (or clear) → `on_render` →
+blit at vsync. Polled steering (`bsp_input_read_navigation_key`) stays a
+direct BSP call inside `on_update` (it's not queue-based). `user` threads the
+game state to every callback.
+
+**Menu system (folded-in E6), built on the loop.** With the engine owning the
+frame, menus get a clean API:
+- `se_menu_t` holds a menu definition (`title`, rows, hints, layout) + live
+  cursor/selection state. Row kinds `NONE / CHECK / TEXT / CUSTOM`; `CUSTOM`
+  carries a `draw_value(fb,x,y,h,col,ctx)` callback (keeps the game's
+  keybind→icon rendering game-side). Theme via `SE_UI_COL_*` in `se_config.h`.
+- Core is **per-frame**: `se_menu_handle_event(menu, ev)` (the game forwards
+  events it got from `on_input`; the **engine** maps them to `UP/DOWN/
+  ACTIVATE/BACK` using fixed nav keys — see below — and updates the cursor,
+  returning whether it consumed the event + any result) + `se_menu_draw(menu,
+  fb)`. So it composes with live gameplay (e.g. the pause overlay), and the
+  game never writes nav logic.
+- **Menu nav keys are engine-owned, fixed, but overridable** via `#define`s
+  in `se_config.h` (`SE_UI_KEY_UP/DOWN/ACTIVATE/BACK`, defaulting to D-pad +
+  arrows / space + enter + gamepad-A / esc + gamepad-B). Menus don't use the
+  game's *remappable* gameplay bindings — that keeps the engine self-contained,
+  and the `#define`s let a port to a non-QWERTY device retarget them.
+- Convenience **blocking** wrapper on top — `se_ui_run_menu(&def, &result)` —
+  which internally pumps engine frames (servicing globals + the backdrop hook)
+  until a row is activated or cancelled, giving the "show menu → get result"
+  call site for screens with no concurrent gameplay (title, settings…).
+- Rebind capture: `se_ui_capture_key(uint16_t* out_sc)` — blocks pumping
+  frames showing a prompt, returns the raw scancode. Replaces the bespoke
+  `APP_STATE_KEY_CAPTURE`. The menu only reports "rebind row N"; the game
+  decides what to store.
+
+**Backdrop (folded-in E7).** The synthwave shapes + PPA blit stay game-side,
+invoked from `on_backdrop`. Engine default = clear to `backdrop_argb`.
+
+**Stays game-side:** gameplay + the game's own state machine (inside
+`on_update`/`on_render`), world + objects, save schema, synthwave drawing,
+menu *content*. Native-vs-graceloader differences go behind engine `#ifdef`s.
+
+**Risk & execution strategy.** Biggest rewrite of the effort. Strangler within
+the branch, build green at each sub-step, e.g.: (a) stand up `se_run` driving
+the existing per-frame code via thin callbacks (loop moves, behaviour
+identical); (b) move the input pump + globals into the engine, forward the
+rest; (c) move vsync/blit; (d) build the `se_ui` menu system + port the list
+menus (main/settings/controls/audio/pause) + the rebind capture; (e) retire
+the bespoke menu states from `main.c`. On-device smoke after each.
+
+**Checklist (when scheduled):**
+- [ ] `se_run` + `se_app_config_t` + `se_app_callbacks_t` (engine owns
+  bootstrap, loop, vsync, timing, backdrop clear).
+- [ ] Input-queue pump in the engine; consume **only** volume ± + audio-jack
+  (+ F1-exit if `f1_exits`); forward everything else to `on_input`. Power
+  button + F2/F3 left untouched.
+- [ ] Device-global settings API (shared `"system"` NVS, load-at-boot + apply
+  + persist): speaker/hp volume, screen brightness, keyboard backlight, LED
+  brightness — get/set helpers the settings menu wires rows to.
+- [ ] `se_ui` menu system (`se_menu_t`, per-frame `handle_event`/`draw`,
+  `MENU_VAL_*` incl. `CUSTOM` callback, theme + `SE_UI_KEY_*` nav in
+  `se_config.h`) + `se_ui_run_menu` + `se_ui_capture_key`.
+- [ ] Port `main.c`'s list menus + rebind capture; retire the bespoke states;
+  add the brightness rows (screen / keyboard / LED) to the settings menu.
+- [ ] `on_backdrop` hook; synthwave invoked from it.
+- [ ] Build + verify + on-device smoke at each sub-step; final FPS vs baseline.
+
+---
 
 ### E8 — Documentation (first-class deliverable)
 - [ ] `README.md` — pitch, capabilities, "hello triangle + sound" quick start, both build modes, version/stability policy, links into `docs/`.
