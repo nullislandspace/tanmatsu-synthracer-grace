@@ -37,7 +37,7 @@
 #include "render.h"
 #include "se_text.h"
 #include "save.h"
-#include "scene.h"
+#include "se_scene.h"
 #include "sfx/sfx_crash.h"
 #include "sfx/sfx_engine_hum.h"
 #include "sfx/sfx_gong.h"

@@ -6,7 +6,7 @@
 #include "esp_timer.h"
 #include "magicnumbers.h"
 #include "render.h"      // render_camera, RENDER_NEAR_CLIP_Z
-#include "scene.h"       // scene_tri, scene_line
+#include "se_scene.h"       // scene_tri, scene_line
 #include "world.h"
 
 // Red palette — distinct from the green speed booster and the

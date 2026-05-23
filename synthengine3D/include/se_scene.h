@@ -1,9 +1,21 @@
 #pragma once
+// =====================================================================
+//  SynthEngine3D  --  PUBLIC STABLE API  --  3D scene pipeline
+// ---------------------------------------------------------------------
+//  The software 3D renderer: a per-pixel z-buffered rasterizer plus the
+//  pinhole camera + projection it draws through. Games submit world-space
+//  triangles / wireframe edges; the engine projects, depth-tests and
+//  rasterizes them. The engine knows nothing about game objects — the
+//  game iterates its own world and calls scene_tri / scene_line. Part of
+//  the semver'd public surface (see se_version.h); projection constants
+//  are overridable defaults in se_config.h.
+// =====================================================================
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "pax_gfx.h"
+#include "se_config.h"   // RENDER_* projection params (overridable)
 
 // Depth-buffered 3D scene pipeline.
 //
@@ -49,3 +61,28 @@ void scene_line(float x0, float y0, float z0,
 // Rasterize every deferred edge. Call once after all triangles and
 // edges for the frame have been submitted.
 void scene_flush(void);
+
+// --- Camera & projection ---------------------------------------------
+//
+// The scene projects through a single module-global pinhole camera, set
+// once per frame before submitting geometry. Kept as a struct so it can
+// gain fields later (zoom, shake, look-ahead) without touching call
+// sites. `x` is the lateral eye position, `y` the eye height; both are
+// world units. The projection itself uses the RENDER_* constants from
+// se_config.h (overridable per game).
+typedef struct {
+    float x;
+    float y;
+} render_camera_t;
+
+// Set / read the scene camera. Call render_set_camera() once per frame
+// before the first scene_tri / scene_line.
+void            render_set_camera(float x, float y);
+render_camera_t render_camera(void);
+
+// Project a world point (x_w, y_w, z_w) to screen pixels using the
+// current camera. y = 0 is the ground plane, +y up, +z forward (away
+// from the camera). Out values are in pax logical pixels. (scene_tri /
+// scene_line project internally; this is for game code that needs to
+// project a point itself — e.g. drawing a floor shadow.)
+void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy);

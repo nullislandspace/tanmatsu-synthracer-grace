@@ -7,7 +7,7 @@
 #include "objects/restarea_marker_model.h"
 #include "objects/wall.h"   // WALL_X_LEFT / WALL_X_RIGHT / WALL_HALF_W / WALL_HEIGHT
 #include "render.h"         // render_camera, RENDER_NEAR_CLIP_Z
-#include "scene.h"          // scene_tri, scene_line
+#include "se_scene.h"          // scene_tri, scene_line
 #include "world.h"
 
 // Beacon pulse: full period in seconds (full green → grey → full green).

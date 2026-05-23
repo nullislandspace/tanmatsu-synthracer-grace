@@ -21,6 +21,7 @@ set(SE_SRCS
     src/music_procedural.c # E2: procedural music source
     src/nbt.c              # E3: NBT serialization primitive
     src/se_save.c          # E3: file-backed save-slot framework
+    src/se_scene.c         # E4: z-buffer rasterizer + camera + projection
 )
 
 if(COMMAND idf_component_register)

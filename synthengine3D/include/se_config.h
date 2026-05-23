@@ -88,3 +88,31 @@
 #ifndef SE_SAVE_SLOT_COUNT
 #define SE_SAVE_SLOT_COUNT  3
 #endif
+
+// ---- Renderer / pinhole-camera projection ---------------------------
+//
+// Parameters of the software 3D scene's projection (se_scene.h). World
+// space is x = lateral, y = up, z = forward (into the screen); the camera
+// sits at z = 0. A world point projects as:
+//     sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * (x - cam_x) / z
+//     sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y - cam_y) / z
+// RENDER_HORIZON_Y is the screen row the horizon vanishes to — a game
+// with its own backdrop should override it to match (Race the Synth sets
+// it to its synthwave horizon). All overridable per game.
+#ifndef RENDER_HALF_W
+#define RENDER_HALF_W       ((float)DISPLAY_LOG_W / 2.0f)
+#endif
+#ifndef RENDER_HORIZON_Y
+#define RENDER_HORIZON_Y    256.0f
+#endif
+#ifndef RENDER_FOCAL_LEN
+#define RENDER_FOCAL_LEN    450.0f
+#endif
+#ifndef RENDER_CAM_Y
+#define RENDER_CAM_Y        1.0f    // camera's resting (grounded) height
+#endif
+// Near-plane z below which the projection blows up; geometry is clamped
+// to it and wholly-behind triangles/edges are dropped.
+#ifndef RENDER_NEAR_CLIP_Z
+#define RENDER_NEAR_CLIP_Z  0.5f
+#endif

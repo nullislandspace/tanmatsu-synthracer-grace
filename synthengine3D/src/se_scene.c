@@ -1,15 +1,38 @@
-#include "scene.h"
+#include "se_scene.h"
 
 #include <math.h>
 #include <string.h>
 
+#include "se_config.h"      // DISPLAY_* + RENDER_* projection constants
 #include "se_direct565.h"   // direct_565_logical_index, direct_565_pack
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "magicnumbers.h"
-#include "render.h"        // render_camera, RENDER_* projection constants
 
 static char const* TAG = "scene";
+
+// --- Camera -------------------------------------------------------------------
+//
+// The scene projects through one module-global pinhole camera, set once
+// per frame via render_set_camera() before any geometry is submitted.
+// x defaults to track centre, y to the resting eye height; the host
+// overwrites both every frame (e.g. to follow a ship).
+static render_camera_t s_camera = { 0.0f, RENDER_CAM_Y };
+
+void render_set_camera(float x, float y) {
+    s_camera.x = x;
+    s_camera.y = y;
+}
+
+render_camera_t render_camera(void) {
+    return s_camera;
+}
+
+void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy) {
+    if (z_w < 0.01f) z_w = 0.01f;  // guard against /0 if a near-clip slips through
+    float const inv_z = 1.0f / z_w;
+    *out_sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * (x_w - s_camera.x) * inv_z;
+    *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y_w - s_camera.y) * inv_z;
+}
 
 // --- Depth encoding -----------------------------------------------------------
 //

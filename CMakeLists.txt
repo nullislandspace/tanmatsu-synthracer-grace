@@ -17,7 +17,6 @@ set(APP_SOURCES
     main/game.c
     main/world.c
     main/render.c
-    main/scene.c
     main/obstacle.c
     main/objects/cube.c
     main/objects/wall.c

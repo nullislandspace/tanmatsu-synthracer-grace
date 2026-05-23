@@ -22,9 +22,9 @@
 #include "se_music_procedural.h"// E2  -- procedural music source
 #include "se_nbt.h"             // E3  -- NBT serialization primitive
 #include "se_save.h"            // E3  -- file-backed save-slot framework
+#include "se_scene.h"           // E4  -- 3D scene renderer + camera + projection
 
 // Subsystem public headers are added here as the extraction proceeds
-// (engine-extraction.md steps E4-E6):
-//   #include "se_scene.h"       // E4 -- 3D scene renderer + projection
+// (engine-extraction.md steps E5-E6):
 //   #include "se_object.h"      // E5 -- object/emit framework
 //   #include "se_ui.h"          // E6 -- data-driven menu widgets

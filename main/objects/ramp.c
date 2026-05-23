@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #include "render.h"      // render_camera, RENDER_NEAR_CLIP_Z
-#include "scene.h"       // scene_tri, scene_line
+#include "se_scene.h"       // scene_tri, scene_line
 #include "world.h"
 
 // Dull yellow body with a bright-yellow wireframe — distinct from

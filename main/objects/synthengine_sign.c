@@ -8,7 +8,7 @@
 #include "objects/synthengine_sign_model.h"
 #include "objects/wall.h"   // WALL_HEIGHT
 #include "render.h"         // render_camera, RENDER_NEAR_CLIP_Z
-#include "scene.h"          // scene_tri, scene_line
+#include "se_scene.h"          // scene_tri, scene_line
 #include "se_text.h"        // simplex[] Hershey glyph table (public engine API)
 #include "world.h"          // obstacle_spawn
 

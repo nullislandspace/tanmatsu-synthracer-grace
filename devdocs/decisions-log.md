@@ -3911,3 +3911,38 @@
     - Build clean, all symbols satisfied (text 96662→97063, +401 B for the
       generic peek/config/callback layer). On-device save/load/peek round-trip
       smoke still pending (can't run from the build host).
+
+- 2026-05-23 — **E4 renderer extraction + the world-coupling cut.** Moved
+  the software 3D pipeline into the engine and severed the renderer's
+  dependency on the game world — the headline goal of the whole effort.
+    - `scene.{c,h}` → `se_scene.{c,h}` (z-buffer rasterizer). The pinhole
+      camera + projection (`render_camera_t`, `render_set_camera`,
+      `render_camera`, `render_project`) moved from `render.c` into
+      `se_scene.c`/`.h` alongside it — they're one cohesive "3D scene"
+      module. Symbol names kept (precedent), so call sites are unchanged.
+    - **The world dependency was cut by *recognition*, not a new abstraction.**
+      The original sketch proposed inverting `render_submit_obstacles` /
+      `render_shadows` behind a generic `se_shadow_caster_t[]` array. On
+      reading the code, those functions (and the cube/pyramid/icosahedron
+      emitters) are plainly *game* code: they iterate the obstacle pool, know
+      `obstacle_t`, and use `GAME_*` tuning + a synthwave-specific floor-shadow
+      projection. So they simply stayed in the game's `render.c`, now calling
+      the engine's `scene_tri`/`scene_line`/`render_project`. No premature
+      caster API. Net effect, and the point of E4: **no engine source or
+      header includes `world.h` (or `render.h`/`game.h`/`magicnumbers.h`)** —
+      verified by grep.
+    - `render.h` became a game-only header (world-aware decls) that
+      re-exports `se_scene.h`, so every existing `#include "render.h"` /
+      `"scene.h"` call site keeps compiling (the latter swept to
+      `"se_scene.h"`).
+    - **Magicnumbers split finished:** `RENDER_HALF_W/HORIZON_Y/FOCAL_LEN/
+      CAM_Y/NEAR_CLIP_Z` → `se_config.h` as `#ifndef` overridable defaults
+      (`RENDER_HORIZON_Y` documented as the per-game backdrop-match knob, per
+      the user's earlier call). With E1's display geometry and E2's audio
+      gains, the engine half of `magicnumbers.h` now lives entirely in
+      `se_config.h`; `GAME_*` gameplay tuning stays in the game.
+    - Build clean, all symbols satisfied; text 97063→97109 (+46 B, just the
+      relocation). Performance note: `scene_project` (per-vertex hot path) now
+      shares a TU with `render_camera()`, so it can inline that call — a
+      marginal improvement over the pre-split cross-TU call. On-device FPS
+      reconfirm welcome but no regression expected.
