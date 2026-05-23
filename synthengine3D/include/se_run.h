@@ -17,6 +17,7 @@
 // =====================================================================
 
 #include <stdbool.h>
+#include <stddef.h>      // size_t (se_display_info_t)
 #include <stdint.h>
 
 #include "bsp/input.h"   // bsp_input_event_t (forwarded to on_input)
@@ -80,3 +81,22 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
 // Ask the run loop to exit after the current frame (then se_run returns,
 // firing on_shutdown). A no-op before se_run() is entered.
 void se_request_exit(void);
+
+// Resolved display geometry + pixel layout the engine derived from the
+// BSP at bootstrap. Valid from on_init() onward (the engine has already
+// initialised the display and allocated the framebuffers by then). A game
+// needs these to build its own auxiliary buffers (e.g. backdrop layer
+// caches) and to drive raw-framebuffer hardware blocks (PPA bands) in the
+// same orientation/format the engine's framebuffers use.
+typedef struct {
+    size_t            width;       // raw framebuffer width  (BSP h-res, pixels)
+    size_t            height;      // raw framebuffer height (BSP v-res, pixels)
+    pax_buf_type_t    pax_format;  // PAX buffer type matching the LCD format
+    bool              reversed;    // true if pixel byte order is big-endian
+    pax_orientation_t orientation; // PAX orientation applied to the framebuffers
+} se_display_info_t;
+
+// Fill *out with the resolved display info (see above). Safe to call any
+// time after the engine has bootstrapped (i.e. from on_init onward); a
+// no-op if `out` is NULL.
+void se_display_info(se_display_info_t* out);

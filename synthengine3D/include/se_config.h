@@ -89,6 +89,17 @@
 #define SE_SAVE_SLOT_COUNT  3
 #endif
 
+// ---- Application framework / run loop -------------------------------
+//
+// se_run()'s per-frame delta-time (seconds) is clamped to at most this
+// before being handed to on_update(), so a long stall (debugger pause,
+// flash erase, scheduling hiccup) can't teleport the simulation with a
+// huge dt. The game sees a capped step instead. Override per game if its
+// fixed-step budget differs.
+#ifndef SE_FRAME_DT_MAX
+#define SE_FRAME_DT_MAX  0.1f
+#endif
+
 // ---- Renderer / pinhole-camera projection ---------------------------
 //
 // Parameters of the software 3D scene's projection (se_scene.h). World

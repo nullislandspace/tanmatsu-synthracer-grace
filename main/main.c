@@ -37,6 +37,7 @@
 #include "render.h"
 #include "se_text.h"
 #include "save.h"
+#include "se_run.h"
 #include "se_scene.h"
 #include "sfx/sfx_crash.h"
 #include "sfx/sfx_engine_hum.h"
@@ -106,24 +107,18 @@ static int                          ppa_pending_n    = 0;
 
 static char const TAG[] = "racethesynth";
 
+// Raw display geometry, fetched once from the engine (se_display_info)
+// in on_init. The PPA backdrop band math needs the raw framebuffer
+// dimensions. The framebuffers themselves, blit, vsync and the
+// double-buffer swap are owned by the engine's run loop (se_run) now.
 static size_t                       display_h_res        = 0;
 static size_t                       display_v_res        = 0;
-static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
-static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
-// Double-buffered framebuffer. The LCD's DMA reads `fb_front`
-// continuously while the CPU + PPA draw into `*fb` (the back buffer).
-// `bsp_display_blit` is called with the current back buffer pointer;
-// after the post-blit vsync wait, the two buffers swap so the buffer
-// just sent becomes the front (being scanned) and the previous front
-// becomes the back (next frame's draw target). This eliminates the
-// CPU-modifies-while-LCD-reads tearing that single-buffering caused.
-static pax_buf_t                    fb_a                 = {0};
-static pax_buf_t                    fb_b                 = {0};
-static pax_buf_t*                   fb                   = &fb_a;
-static pax_buf_t*                   fb_front             = &fb_b;
-static void*                        fb_a_pixels          = NULL;
-static void*                        fb_b_pixels          = NULL;
-static size_t                       fb_size              = 0;
+// Current frame's back buffer. The engine owns the two framebuffers and
+// hands the live one to the draw callbacks each frame; on_backdrop /
+// on_render mirror that pointer into this file-scope `fb` so the many
+// in-file draw helpers and the PPA submits can keep referring to `fb`
+// exactly as before the framework migration.
+static pax_buf_t*                   fb                   = NULL;
 
 // Pre-rendered backdrop layers, split into two PPA-driven caches so
 // the sun can move independently of the mountains. The per-frame
@@ -297,10 +292,6 @@ static bool   s_godmode         = false;
 // After a stall, hold the frozen scene this long so the player
 // registers what happened before the game-over panel appears.
 #define STALL_HOLD_SECONDS  1.5
-
-static void blit(void) {
-    bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(fb));
-}
 
 // PPA "transaction done" callback. Runs in interrupt context; gives
 // the shared counting semaphore once per completed op so the main
@@ -1827,90 +1818,101 @@ static void commit_run_end(game_state_t const* g, world_state_t const* w, bool h
              (int)reason, (long long)((t1 - t0) / 1000));
 }
 
-void app_main(void) {
-    esp_err_t res = nvs_flash_init();
-    if (res == ESP_ERR_NVS_NO_FREE_PAGES || res == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        res = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(res);
+// ---------------------------------------------------------------------
+//  Application framework wiring (EF, sub-step 1).
+//
+//  The engine (se_run) now owns the device + display bootstrap, the two
+//  framebuffers, vsync/blit, the buffer swap and the per-frame delta
+//  time. The game is the four callbacks below plus its content. State the
+//  old monolithic app_main kept as loop locals is promoted to file scope
+//  here so the callbacks share it.
+// ---------------------------------------------------------------------
 
-    bsp_configuration_t const bsp_configuration = {
-        .display =
-            {
-                .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
-                .num_fbs                = 1,
-            },
-    };
-    res = bsp_device_initialize(&bsp_configuration);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize BSP: %d", res);
-        return;
-    }
+// Game + world simulation state. ~5 KB at the current pool size; static
+// storage keeps it off any task stack.
+static game_state_t  game;
+static world_state_t world;
 
-    res = bsp_display_get_parameters(&display_h_res, &display_v_res, &display_color_format, &display_data_endian);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get display parameters: %d", res);
-        return;
-    }
+// Checkpoint run-state snapshot (Phase 9.3): collecting a checkpoint
+// copies the whole world + game state here; a later head-on crash
+// restores it. In-memory only — not persisted across power-off.
+static world_state_t s_checkpoint_world;
+static game_state_t  s_checkpoint_game;
+static bool          s_checkpoint_valid = false;
+// Swallows the use-button press-edge on the frame the Re-Do dialog opens,
+// so crashing mid-jump (space held) can't instantly dismiss it.
+static bool          s_redo_ignore_pickup = false;
 
-    pax_buf_type_t format = PAX_BUF_24_888RGB;
-    switch (display_color_format) {
-        case LCD_COLOR_PIXEL_FORMAT_RGB565:
-            format = PAX_BUF_16_565RGB;
-            break;
-        case LCD_COLOR_PIXEL_FORMAT_RGB888:
-            format = PAX_BUF_24_888RGB;
-            break;
-        default:
-            break;
-    }
+// Top-level state machine + per-run bookkeeping (were app_main locals).
+static app_state_t   app_state          = APP_STATE_SLOT_SELECT;
+static bool          run_end_committed  = false;
+static uint32_t      daily_seed         = 0;
+// The menu/title floor scrolls with this fake speed so the scene reads as
+// "live" instead of static. The world isn't advanced (no obstacles spawn
+// yet) — start_run() initializes the world fresh each time PLAYING begins.
+static float const   title_scroll_speed = 6.0f;
 
-    bsp_display_rotation_t display_rotation = bsp_display_get_default_rotation();
-    pax_orientation_t      orientation      = PAX_O_UPRIGHT;
-    switch (display_rotation) {
-        case BSP_DISPLAY_ROTATION_90:
-            orientation = PAX_O_ROT_CCW;
-            break;
-        case BSP_DISPLAY_ROTATION_180:
-            orientation = PAX_O_ROT_HALF;
-            break;
-        case BSP_DISPLAY_ROTATION_270:
-            orientation = PAX_O_ROT_CW;
-            break;
-        case BSP_DISPLAY_ROTATION_0:
-        default:
-            orientation = PAX_O_UPRIGHT;
-            break;
-    }
+// This frame's delta time, published by on_update so on_backdrop (which
+// has no dt parameter) can scroll the floor by the same amount.
+static float         s_frame_dt = 0.0f;
 
-    // Allocate both framebuffers in PSRAM with PPA-cache-line
-    // alignment. Each is wrapped in its own pax_buf_t so PAX rasterises
-    // straight into the raw layout the LCD (and PPA) will read. The
-    // `fb` pointer tracks the current back buffer; `fb_front` tracks
-    // the buffer last handed to bsp_display_blit (= currently being
-    // scanned out by the LCD). The two swap each frame after blit +
-    // vsync — at any moment the CPU and PPA only touch `*fb`, never
-    // the one the LCD is reading.
-    fb_size = (size_t)display_h_res * display_v_res * 2u;
-    size_t const aligned_fb_size = (fb_size + PPA_PSRAM_CACHE_LINE - 1) & ~(size_t)(PPA_PSRAM_CACHE_LINE - 1);
-    fb_a_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, aligned_fb_size, MALLOC_CAP_SPIRAM);
-    fb_b_pixels = heap_caps_aligned_alloc(PPA_PSRAM_CACHE_LINE, aligned_fb_size, MALLOC_CAP_SPIRAM);
-    if (fb_a_pixels == NULL || fb_b_pixels == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate framebuffers (a=%p b=%p)", fb_a_pixels, fb_b_pixels);
-        return;
-    }
+// ---- Per-frame input snapshot ---------------------------------------
+// The input pump is still game-side this sub-step: on_update drains the
+// queue and consumes every one-shot into these statics, so the physics
+// pass (on_update) and the render switch (on_render) read one consistent
+// snapshot for the frame. (The pump + global keys move into se_run next.)
+static bool  s_in_pickup      = false;
+static float s_in_steer       = 0.0f;
+static bool  s_in_steer_left  = false;
+static bool  s_in_steer_right = false;
+static int   s_in_menu_nav    = 0;
+static bool  s_in_menu_esc    = false;
+static bool  s_in_menu_bs     = false;
+static bool  s_in_pause       = false;
+static int   s_in_typed       = -1;
+static bool  s_in_typed_d     = false;
+// End-of-run signals computed in the physics pass (on_update), consumed
+// by the PLAYING render case to pick the post-run state.
+static bool  s_crashed = false;
+static bool  s_stalled = false;
 
-    pax_buf_init(&fb_a, fb_a_pixels, display_h_res, display_v_res, format);
-    pax_buf_reversed(&fb_a, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
-    pax_buf_set_orientation(&fb_a, orientation);
+// ---- Per-frame profiling --------------------------------------------
+// Same stage breakdown as the pre-framework loop, re-anchored across the
+// callbacks. blit + vsync + swap belong to the engine now, so they roll
+// up into one "present" bucket measured as the gap between a frame's
+// on_render end and the next frame's on_update start.
+static int64_t s_t_phys_end     = 0;   // on_update end   (-> bgkick start)
+static int64_t s_t_bg_end       = 0;   // on_backdrop end (-> obs start)
+static int64_t s_prof_fg_end    = 0;   // last on_render end
+static int64_t prof_input_us    = 0;
+static int64_t prof_phys_us     = 0;
+static int64_t prof_bgkick_us   = 0;
+static int64_t prof_bgflr_us    = 0;
+static int64_t prof_bgwait_us   = 0;
+static int64_t prof_obs_us      = 0;
+static int64_t prof_fgrest_us   = 0;
+static int64_t prof_present_us  = 0;
+static int     prof_frames      = 0;
+static int64_t prof_window_start = 0;
 
-    pax_buf_init(&fb_b, fb_b_pixels, display_h_res, display_v_res, format);
-    pax_buf_reversed(&fb_b, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
-    pax_buf_set_orientation(&fb_b, orientation);
+// on_init — game-side bootstrap, run once after the engine has the
+// display, framebuffers, scene buffers and audio mixer up (so
+// se_display_info() is valid and the mixer gates can be pushed).
+static void on_init(void* user) {
+    (void)user;
+
+    // The engine owns the display + framebuffers; pull the geometry it
+    // resolved so the PPA backdrop bands and the layer caches match the
+    // framebuffers' format / endianness / orientation exactly.
+    se_display_info_t di;
+    se_display_info(&di);
+    display_h_res = di.width;
+    display_v_res = di.height;
+    pax_buf_type_t    const format      = di.pax_format;
+    bool              const fb_reversed  = di.reversed;
+    pax_orientation_t const orientation = di.orientation;
 
     synthwave_init();
-    scene_init();
     icons_load();
     input_init();
     input_set_mode(INPUT_MODE_TITLE);
@@ -1927,10 +1929,9 @@ void app_main(void) {
     // "current day" can't shift mid-session if the player crosses
     // midnight.
     capture_session_date();
-    res = audio_mixer_init();
-    if (res != ESP_OK) {
-        ESP_LOGW(TAG, "audio_mixer_init failed: %d — audio will be silent", res);
-    }
+    // The engine's se_run bootstrap already brought the mixer + I2S up
+    // before on_init; here we only push our app-side toggle state into
+    // its output gates.
     // Push the loaded audio toggles into the engine mixer's output gates.
     // The mixer no longer reads app settings itself (engine has no NVS
     // dependency); the app maps its mute categories onto mixer groups.
@@ -1971,11 +1972,11 @@ void app_main(void) {
     // back to 180 logical wide × 800 logical tall — every sun-band
     // x coordinate (294..506) would then clip out of bounds.
     pax_buf_init(&sun_cache, sun_pixels, SUN_CACHE_LOG_H, SUN_CACHE_LOG_W, format);
-    pax_buf_reversed(&sun_cache, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_reversed(&sun_cache, fb_reversed);
     pax_buf_set_orientation(&sun_cache, orientation);
 
     pax_buf_init(&mountain_cache, mountain_pixels, MOUNTAIN_CACHE_LOG_H, MOUNTAIN_CACHE_LOG_W, format);
-    pax_buf_reversed(&mountain_cache, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_reversed(&mountain_cache, fb_reversed);
     pax_buf_set_orientation(&mountain_cache, orientation);
 
     // Sun cache: sky purple in the gaps + sun bands at their canonical
@@ -2046,79 +2047,35 @@ void app_main(void) {
         return;
     }
 
-    SemaphoreHandle_t vsync_sem = NULL;
-    esp_err_t         te_err    = bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING);
-    if (te_err == ESP_OK) {
-        te_err = bsp_display_get_tearing_effect_semaphore(&vsync_sem);
-    }
-    if (te_err != ESP_OK || vsync_sem == NULL) {
-        ESP_LOGW(TAG, "Vsync not available — animation may stutter");
-        vsync_sem = NULL;
-    }
-
-    // World state is ~5 KB at the current pool size — keep it off
-    // the app_main stack so we don't have to worry about IDF's
-    // default stack budget.
-    static game_state_t  game;
-    static world_state_t world;
-
-    // Checkpoint run-state snapshot (Phase 9.3). Collecting a
-    // checkpoint copies the whole world + game state here; a later
-    // head-on crash restores it. In-memory only — not persisted
-    // across power-off. world_state_t carries the obstacle pool, the
-    // area + stage + RNG state and the wall cursors; game_state_t the
-    // ship, scores, stats, sun and inventory — so the pair is a
-    // complete, deterministic resume point.
-    static world_state_t s_checkpoint_world;
-    static game_state_t  s_checkpoint_game;
-    static bool          s_checkpoint_valid = false;
-    // Swallows the use-button press-edge on the frame the Re-Do
-    // dialog opens, so crashing mid-jump (space held) can't instantly
-    // dismiss it.
-    static bool          s_redo_ignore_pickup = false;
-
     game_init(&game);
 
-    // Daily seed. Derived from today's calendar date so every run
-    // — across restarts, across app reboots — uses the same world
-    // layout until the next midnight rollover.
-    uint32_t const daily_seed = derive_daily_seed();
-    // The menu/title floor scrolls with a fake speed so the scene
-    // reads as "live" instead of static. The world isn't advanced
-    // (no obstacles spawn yet) — start_run() initializes the world
-    // fresh each time PLAYING begins.
-    float const title_scroll_speed = 6.0f;
+    // Daily seed. Derived from today's calendar date so every run —
+    // across restarts, across app reboots — uses the same world layout
+    // until the next midnight rollover.
+    daily_seed = derive_daily_seed();
 
-    // Persistence setup: mkdir /int/synthracer if missing. Defaults
-    // until the user picks a slot.
+    // Persistence setup: mkdir /int/synthracer if missing. Defaults until
+    // the user picks a slot.
     save_init();
     save_init_defaults(&s_save);
 
-    app_state_t app_state = APP_STATE_SLOT_SELECT;
-    bool        run_end_committed = false;
-    int64_t     prev_us   = esp_timer_get_time();
-
-    // Per-frame timing accumulators (microseconds), summed over a
-    // ~1 s window then logged + reset. Phases are mutually exclusive
-    // and together cover the whole loop iteration, so the sum should
-    // approximately equal `window_us`.
-    int64_t prof_input_us  = 0;
-    int64_t prof_phys_us   = 0;
-    int64_t prof_bgkick_us = 0;
-    int64_t prof_bgflr_us  = 0;
-    int64_t prof_bgwait_us = 0;
-    int64_t prof_obs_us    = 0;
-    int64_t prof_fgrest_us = 0;
-    int64_t prof_blit_us   = 0;
-    int64_t prof_vsync_us  = 0;
-    int     prof_frames    = 0;
-    int64_t prof_window_us = 0;
-    int64_t prof_prev_us   = prev_us;
+    app_state         = APP_STATE_SLOT_SELECT;
+    run_end_committed = false;
 
     ESP_LOGI(TAG, "Race the Synth: slot-select up");
+}
 
-    while (1) {
-        int64_t const t_loop_start = esp_timer_get_time();
+// on_update — per-frame game logic: drain + snapshot input, run the
+// debug knobs, then the physics pass (PLAYING) or the post-run holds.
+// The engine has already computed and clamped `dt`.
+static void on_update(float dt, void* user) {
+    (void)user;
+
+    int64_t const t_loop_start = esp_timer_get_time();
+    // Account the previous frame's present (engine blit + vsync + swap)
+    // and arm the profiling window on the first frame.
+    if (s_prof_fg_end != 0)     prof_present_us  += t_loop_start - s_prof_fg_end;
+    if (prof_window_start == 0) prof_window_start = t_loop_start;
 
         if (input_drain_events()) {
             // F1 = straight exit to launcher. Per the design: this
@@ -2126,15 +2083,27 @@ void app_main(void) {
             // save mid-run — losing progress here is by design. The
             // proper "abort a run" path is the F4 pause menu's
             // Abort entry, which commits a QUIT run before returning
-            // to the main menu.
+            // to the main menu. (EF sub-step 2 moves this into se_run.)
             audio_mixer_shutdown();
             bsp_device_restart_to_launcher();
         }
 
-        int64_t now_us = t_loop_start;
-        float   dt     = (float)(now_us - prev_us) / 1e6f;
-        prev_us        = now_us;
-        if (dt > 0.1f) dt = 0.1f;
+        // Consume every one-shot input into the per-frame snapshot so
+        // the physics pass below and the render switch (on_render) read
+        // one consistent view of the frame. The queue was drained just
+        // above; these calls only read + clear the latched flags.
+        s_in_pickup   = input_consume_pickup();
+        s_in_steer    = input_steering();
+        input_steer_held(&s_in_steer_left, &s_in_steer_right);
+        s_in_menu_nav = input_consume_menu_nav();
+        s_in_menu_esc = input_consume_menu_cancel();
+        s_in_menu_bs  = input_consume_backspace();
+        s_in_pause    = input_consume_pause_toggle();
+        s_in_typed    = -1;
+        s_in_typed_d  = input_consume_digit(&s_in_typed);
+
+        // Publish dt for on_backdrop (which has no dt parameter).
+        s_frame_dt = dt;
 
         // Debug speed knob acts on the *base* speed so the scrape
         // ramps don't fight the player's tuning.
@@ -2156,10 +2125,12 @@ void app_main(void) {
             if (game.sun_y > GAME_SUN_SINK_RANGE_PX)   game.sun_y = GAME_SUN_SINK_RANGE_PX;
         }
 
-        bool  const pickup_pressed = input_consume_pickup();
-        float const steer          = input_steering();
-        bool        steer_left = false, steer_right = false;
-        input_steer_held(&steer_left, &steer_right);
+        // Read this frame's input snapshot (consumed at the top of
+        // on_update) into the names the physics pass already uses.
+        bool  const pickup_pressed = s_in_pickup;
+        float const steer          = s_in_steer;
+        bool        steer_left  = s_in_steer_left;
+        bool        steer_right = s_in_steer_right;
 
         // Debug: TAB cuts the current area short and forces the
         // next one to a specific type. Currently hard-wired to the
@@ -2397,6 +2368,22 @@ void app_main(void) {
             }
         }
         int64_t const t_after_phys = esp_timer_get_time();
+        prof_input_us += t_after_input - t_loop_start;
+        prof_phys_us  += t_after_phys  - t_after_input;
+        s_t_phys_end   = t_after_phys;
+        // Publish the end-of-run signals for the PLAYING render case.
+        s_crashed = crashed;
+        s_stalled = stalled;
+}
+
+// on_backdrop — the synthwave backdrop: PPA sky/sun/mountain composite +
+// the floor grid (with obstacle shadows). Runs after on_update, before
+// on_render, on the engine's current back buffer.
+static void on_backdrop(pax_buf_t* fb_param, void* user) {
+    (void)user;
+    fb = fb_param;
+    // on_backdrop has no dt parameter; use the value on_update published.
+    float const dt = s_frame_dt;
 
         // Background pass — FILL → SRM → BLEND, explicitly serialised.
         // PPA's dispatch order across different clients is *not*
@@ -2491,17 +2478,34 @@ void app_main(void) {
         // be in place before any foreground render touches it.
         ppa_wait_one();
         int64_t const t_after_bg = esp_timer_get_time();
+        prof_bgkick_us += t_after_bgkick - s_t_phys_end;
+        prof_bgflr_us  += t_after_bgflr  - t_after_bgkick;
+        prof_bgwait_us += t_after_bg     - t_after_bgflr;
+        s_t_bg_end      = t_after_bg;
+}
+
+// on_render — the foreground: the 3D scene + HUD + menus + state
+// transitions, switched on app_state. Runs after on_backdrop on the same
+// back buffer; the engine blits + swaps once this returns.
+static void on_render(pax_buf_t* fb_param, void* user) {
+    (void)user;
+    fb = fb_param;
 
         // Foreground pass — state-dependent dynamic content.
         // `obs` measures render_obstacles in isolation since it
         // dominates the gameplay frame; everything else (ship,
         // sparks, HUD, overlays) rolls up under `fgrest`.
-        int const menu_nav       = input_consume_menu_nav();
-        bool const menu_esc      = input_consume_menu_cancel();
-        bool const menu_bs       = input_consume_backspace();
-        bool const pause_toggle  = input_consume_pause_toggle();
-        int       typed          = -1;
-        bool const typed_d       = input_consume_digit(&typed);
+        // Input was drained + snapshotted in on_update; read the frame's
+        // values back into the names the switch already refers to.
+        int  const menu_nav       = s_in_menu_nav;
+        bool const menu_esc       = s_in_menu_esc;
+        bool const menu_bs        = s_in_menu_bs;
+        bool const pause_toggle   = s_in_pause;
+        int        typed          = s_in_typed;
+        bool const typed_d        = s_in_typed_d;
+        bool const pickup_pressed = s_in_pickup;
+        bool const crashed        = s_crashed;
+        bool const stalled        = s_stalled;
 
         int64_t t_after_obs = 0;
         switch (app_state) {
@@ -3033,57 +3037,52 @@ void app_main(void) {
             }
         }
         int64_t const t_after_fg = esp_timer_get_time();
-
-        blit();
-        int64_t const t_after_blit = esp_timer_get_time();
-
-        if (vsync_sem != NULL) {
-            xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(50));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(16));
-        }
-        int64_t const t_after_vsync = esp_timer_get_time();
-
-        // Swap back/front: the buffer we just blitted is now the
-        // front (the LCD scans it out); the previous front becomes
-        // the new back (next frame's draw target). Both PPA and CPU
-        // only ever touch `*fb`, so the LCD's scan-out buffer is
-        // never modified mid-flight — no more tearing.
-        pax_buf_t* tmp = fb;
-        fb             = fb_front;
-        fb_front       = tmp;
-
-        prof_input_us  += t_after_input  - t_loop_start;
-        prof_phys_us   += t_after_phys   - t_after_input;
-        prof_bgkick_us += t_after_bgkick - t_after_phys;
-        prof_bgflr_us  += t_after_bgflr  - t_after_bgkick;
-        prof_bgwait_us += t_after_bg     - t_after_bgflr;
-        prof_obs_us    += t_after_obs    - t_after_bg;
-        prof_fgrest_us += t_after_fg     - t_after_obs;
-        prof_blit_us   += t_after_blit   - t_after_fg;
-        prof_vsync_us  += t_after_vsync  - t_after_blit;
+        prof_obs_us    += t_after_obs - s_t_bg_end;
+        prof_fgrest_us += t_after_fg  - t_after_obs;
+        s_prof_fg_end   = t_after_fg;
         prof_frames    += 1;
-        prof_window_us  = t_after_vsync - prof_prev_us;
 
-        if (prof_window_us >= 1000000) {
-            float const fps    = prof_frames * 1e6f / (float)prof_window_us;
+        // FPS / per-stage breakdown over a ~1 s window. blit + vsync +
+        // the buffer swap are the engine's now, so they fold into the
+        // single "present" bucket (the gap between this on_render end and
+        // the next on_update start, accumulated there).
+        int64_t const window_us = t_after_fg - prof_window_start;
+        if (window_us >= 1000000) {
+            float const fps    = prof_frames * 1e6f / (float)window_us;
             float const inv_fr = 1.0f / (float)prof_frames;
             ESP_LOGI(TAG,
-                     "FPS=%.1f  in=%.2f phys=%.2f bgkick=%.2f bgflr=%.2f bgwait=%.2f obs=%.2f fgrest=%.2f blit=%.2f vsync=%.2f ms",
+                     "FPS=%.1f  in=%.2f phys=%.2f bgkick=%.2f bgflr=%.2f bgwait=%.2f obs=%.2f fgrest=%.2f present=%.2f ms",
                      fps,
-                     (float)prof_input_us  * inv_fr / 1000.0f,
-                     (float)prof_phys_us   * inv_fr / 1000.0f,
-                     (float)prof_bgkick_us * inv_fr / 1000.0f,
-                     (float)prof_bgflr_us  * inv_fr / 1000.0f,
-                     (float)prof_bgwait_us * inv_fr / 1000.0f,
-                     (float)prof_obs_us    * inv_fr / 1000.0f,
-                     (float)prof_fgrest_us * inv_fr / 1000.0f,
-                     (float)prof_blit_us   * inv_fr / 1000.0f,
-                     (float)prof_vsync_us  * inv_fr / 1000.0f);
+                     (float)prof_input_us   * inv_fr / 1000.0f,
+                     (float)prof_phys_us    * inv_fr / 1000.0f,
+                     (float)prof_bgkick_us  * inv_fr / 1000.0f,
+                     (float)prof_bgflr_us   * inv_fr / 1000.0f,
+                     (float)prof_bgwait_us  * inv_fr / 1000.0f,
+                     (float)prof_obs_us     * inv_fr / 1000.0f,
+                     (float)prof_fgrest_us  * inv_fr / 1000.0f,
+                     (float)prof_present_us * inv_fr / 1000.0f);
             prof_input_us  = prof_phys_us = prof_bgkick_us = prof_bgflr_us = 0;
-            prof_bgwait_us = prof_obs_us = prof_fgrest_us = prof_blit_us = prof_vsync_us = 0;
+            prof_bgwait_us = prof_obs_us = prof_fgrest_us = prof_present_us = 0;
             prof_frames    = 0;
-            prof_prev_us   = t_after_vsync;
+            prof_window_start = t_after_fg;
         }
-    }
+}
+
+// app_main — hand the run loop to the engine. The engine owns the device
+// + display bootstrap, the framebuffers, vsync/blit and the frame loop;
+// the four callbacks above supply the content. f1_exits stays false this
+// sub-step: F1 is still handled inside on_update until EF sub-step 2
+// moves the input pump (and the device-global keys) into se_run.
+void app_main(void) {
+    static se_app_config_t const cfg = {
+        .f1_exits      = false,
+        .backdrop_argb = 0xFF000000u,
+    };
+    static se_app_callbacks_t const cb = {
+        .on_init     = on_init,
+        .on_update   = on_update,
+        .on_backdrop = on_backdrop,
+        .on_render   = on_render,
+    };
+    se_run(&cfg, &cb, NULL);
 }

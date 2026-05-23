@@ -4033,3 +4033,50 @@
       engine-owned + fixed but overridable** via `SE_UI_KEY_UP/DOWN/ACTIVATE/
       BACK` `#define`s in `se_config.h` (not the game's remappable gameplay
       bindings) — so a non-QWERTY port can retarget them.
+
+- 2026-05-24 — **EF sub-step 1 implemented: the engine owns the run loop.**
+  Stood up `synthengine3D/src/se_run.c` and migrated `main.c`'s `app_main`
+  onto it. The engine now owns: NVS/BSP/display bootstrap, the two PSRAM
+  (cache-line-aligned) framebuffers + `pax_buf` setup, `scene_init`,
+  `audio_mixer_init`, the vsync/tearing-effect semaphore, the per-frame `dt`
+  (clamped to the new overridable `SE_FRAME_DT_MAX`), the default backdrop
+  clear, `blit` and the double-buffer swap. `app_main` is now a 12-line
+  `se_run(&cfg,&cb,NULL)` call.
+    - **Loop → callbacks.** The ~960-line `while(1)` body was split, *without
+      re-indenting it*, into the four `se_run` callbacks: `on_init`
+      (game-side content bootstrap — synthwave/PPA caches, icons, input,
+      settings, save, `game_init`, daily seed), `on_update` (input drain +
+      per-frame **input snapshot** + debug knobs + the physics pass / post-run
+      holds), `on_backdrop` (the PPA sky/sun/mountain composite + the floor
+      grid + obstacle shadows), `on_render` (the `app_state` switch: scene +
+      HUD + menus + state transitions). Per-frame order is identical to the
+      old loop (update → backdrop → render → present).
+    - **Shared frame state.** The old loop locals were promoted to file-scope
+      statics (`game`, `world`, checkpoint snapshots, `app_state`,
+      `run_end_committed`, `daily_seed`, profiling). Input is consumed **once**
+      per frame into an `s_in_*` snapshot in `on_update` so the physics pass
+      and the render switch read one consistent view (consume order among
+      independent one-shot flags is irrelevant); `crashed`/`stalled` are
+      published via `s_crashed`/`s_stalled`; `dt` via `s_frame_dt` (on_backdrop
+      has no dt param).
+    - **Framebuffer bridge (the key low-churn move).** ~100 in-file draw
+      helpers + the PPA submits reference a file-scope `pax_buf_t* fb`; rather
+      than thread `fb` through every call, `on_backdrop`/`on_render` mirror the
+      engine's current back buffer (the callback param) into that `fb` at the
+      top of the frame. Raw display geometry the PPA bands + layer caches need
+      is pulled from the new public **`se_display_info()`** in `on_init`.
+    - **Profiling re-anchored, not lost.** The same per-stage breakdown
+      (in/phys/bgkick/bgflr/bgwait/obs/fgrest) is kept across the callbacks via
+      boundary-timestamp statics; `blit`+`vsync`+swap are the engine's now, so
+      they fold into one **`present`** bucket (the gap between a frame's
+      on_render end and the next on_update start).
+    - **Deliberately deferred to sub-step 2:** the input-queue *pump* and the
+      device-global keys stay game-side — `on_update` still calls
+      `input_drain_events()` and handles F1→launcher itself, and
+      `cfg.f1_exits=false`. `on_input` is wired in the API but unused so far.
+    - **Build:** green + `make verify` clean. text 97109→97822 (+713 B) — the
+      framework scaffolding (`se_run`/`se_bootstrap`/`se_present`/
+      `se_display_info`) + 4-callback-per-frame dispatch, **not** a hot-path
+      regression: the `static inline` rasterizer/DSP leaves are untouched and
+      the per-frame work is the same code, so the perf contract holds (confirm
+      `fgrest` unchanged on the next on-device flash). **On-device smoke owed.**

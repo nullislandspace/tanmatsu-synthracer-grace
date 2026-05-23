@@ -22,6 +22,7 @@ set(SE_SRCS
     src/nbt.c              # E3: NBT serialization primitive
     src/se_save.c          # E3: file-backed save-slot framework
     src/se_scene.c         # E4: z-buffer rasterizer + camera + projection
+    src/se_run.c           # EF: application framework / run loop
 )
 
 if(COMMAND idf_component_register)

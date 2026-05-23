@@ -397,13 +397,25 @@ menus (main/settings/controls/audio/pause) + the rebind capture; (e) retire
 the bespoke menu states from `main.c`. On-device smoke after each.
 
 **Checklist (when scheduled):**
-- [~] `se_run` + `se_app_config_t` + `se_app_callbacks_t` — **API header
-  `se_run.h` laid down 2026-05-24** (signed-off contract, builds green,
-  byte-identical: nothing defines/calls it yet). Remaining: the engine-side
-  *implementation* — migrate `main.c`'s bootstrap (NVS/BSP/display/
-  framebuffers/scene_init/audio_mixer_init/vsync) + the ~960-line frame loop
-  onto `se_run`; promote the loop's locals; route the per-frame body through
-  the callbacks. **This is the big surgery — do it in a focused pass.**
+- [x] `se_run` + `se_app_config_t` + `se_app_callbacks_t` — **API header
+  `se_run.h` laid down 2026-05-24** (signed-off contract). **Sub-step 1
+  implemented 2026-05-24** (`synthengine3D/src/se_run.c`): the engine now
+  owns the device bootstrap (NVS/BSP/display), the two PSRAM framebuffers,
+  `scene_init`, `audio_mixer_init`, the vsync/tearing-effect semaphore, the
+  per-frame `dt` (clamped to `SE_FRAME_DT_MAX`), the default backdrop clear,
+  `blit` and the buffer swap. `main.c`'s `app_main` is now a 12-line `se_run`
+  call; its old monolithic loop is split into the four callbacks
+  (`on_init` = content bootstrap; `on_update` = input drain/snapshot +
+  physics; `on_backdrop` = PPA sky/sun/mountain + floor; `on_render` = the
+  `app_state` switch). Loop locals promoted to file scope; `fb` is now a
+  bridge pointer set from the callback param (all in-file draw helpers +
+  PPA submits unchanged); raw display geometry pulled via the new
+  **`se_display_info()`** (public). Build green + verify clean; text
+  97109→97822 (+713 B = the framework scaffolding + 4-callback dispatch, not
+  a hot-path change — the inline rasterizer/DSP leaves are untouched, so
+  `fgrest` should be unchanged on-device). **F1-exit + the input pump stay
+  game-side this sub-step** (`cfg.f1_exits=false`); they move next.
+  *(On-device smoke owed: full render/audio/menus/playthrough.)*
 - [ ] Input-queue pump in the engine; consume **only** volume ± + audio-jack
   (+ F1-exit if `f1_exits`); forward everything else to `on_input`. Power
   button + F2/F3 left untouched.
