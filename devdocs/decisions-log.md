@@ -3946,3 +3946,35 @@
       shares a TU with `render_camera()`, so it can inline that call — a
       marginal improvement over the pre-split cross-TU call. On-device FPS
       reconfirm welcome but no regression expected.
+
+- 2026-05-24 — **E5 resolved as defer; render pipeline pivot (ER) added.**
+  A design discussion reframed the object-framework question.
+    - **E5 = keep `obstacle.{c,h}` game-side (no extraction).** The pool lives
+      in `world_state_t` (checkpoint struct-copies it, so the engine can't own
+      it); `collide`/`physics` take game/world state; the kind + hit enums are
+      game semantics; and — decisively — **the engine never calls the object
+      callbacks** (all dispatch is in `game.c`/`world.c`/`render.c`). So the
+      only generic thing to extract would be a POD struct + pool allocator,
+      thin, with one consumer and 29 files of `obstacle_t` churn. Not worth it.
+    - **The real reuse leverage is the render *pipeline*, not the object pool.**
+      The engine is immediate-mode — it has no render list; games submit
+      geometry via `scene_tri`/`scene_line` each frame and organise their own
+      objects however they like. A second game needs the pipeline, not
+      `obstacle_t`.
+    - **New phase ER (post-extraction): pivot `se_scene` immediate → deferred.**
+      `scene_tri`/`scene_line` accumulate a per-frame geometry list (as edges
+      already do); a new `scene_render(mode)` does the work and `scene_flush`
+      folds in. Object `emit` code is unchanged. This lets the engine own /
+      select the rasterization algorithm (z-buffer now; painter's/sorted/tiled
+      later) and do central FOV/resolution-aware frustum + back-face culling
+      and front-to-back ordering — so games stop re-deriving culling. Likely a
+      real win because the game is fill-bound (front-to-back early-z cuts
+      overdraw), but net perf is an on-device A/B question (buffering traffic
+      vs fill saved). **Initial cut ships ordering + culling as DUMMY
+      pass-throughs** (Race the Synth already pre-culls in how `world.c`
+      builds the object list), so the first ER lands the architecture
+      (deferred accumulation + `scene_render` + algorithm hook + no-op
+      cull/order seams) behavior-identically; real cull/sort fill in later and
+      measured. Sequencing: finish the mechanical extraction (E6 menus, E7
+      backdrop, E8 docs, E9 verify) first, then ER. Full spec in
+      [engine-extraction.md](engine-extraction.md) (ER section).

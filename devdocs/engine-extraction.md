@@ -223,10 +223,31 @@ a faithful relocation.
 - [x] **Magnumbers split (finished):** `RENDER_HALF_W/HORIZON_Y/FOCAL_LEN/CAM_Y/NEAR_CLIP_Z` → `se_config.h` as `#ifndef` overridable defaults (with `RENDER_HORIZON_Y` documented as the per-game backdrop-match knob). Combined with E1 (display geometry) + E2 (audio gains), the engine half of `magicnumbers.h` is now all in `se_config.h`; `GAME_*` gameplay tuning stays game-side. `render.h` re-exports `se_scene.h` so all existing call sites keep compiling unchanged.
 - [x] Build + verify + **map check passed: text 97063→97109 (+46 B, just the relocation).** All symbols satisfied. **Boundary confirmed: no engine source/header includes `world.h`/`render.h`/`game.h`/`magicnumbers.h`.** Bonus: `scene_project` (per-vertex hot path) now shares a TU with `render_camera()` so it can inline that call — marginally *better* than the pre-split cross-TU call. (On-device FPS reconfirm welcome on next flash, but the +46 B and the inlining argument predict no regression.)
 
-### E5 — Genericize the object/emit framework
-- [ ] `obstacle.{c,h}` → `se_object.{c,h}`: pool + callback dispatch (`emit/collide/shadow/physics/cleanup` + scratch). Generalize `kind`: engine = "user object + callbacks"; the game defines and registers its kinds.
-- [ ] Migrate `objects/*` to the engine object API (they remain game content).
-- [ ] Build + verify + FPS check.
+### E5 — Object/emit framework → DECIDED: keep game-side (defer) ✅ 2026-05-24
+Resolved **C (defer)** after a design discussion. `obstacle.{c,h}` stays in
+the game; not genericised into the engine. Why:
+- The object pool is `obstacle_t obstacles[512]` **inside `world_state_t`**,
+  which the checkpoint feature struct-copies — so the engine can't own the
+  pool. And `obstacle_spawn` takes `world_state_s*`, `collide` takes
+  `game_state_s*` + returns the game's `OBSTACLE_HIT_*`, `physics` takes
+  `world_state_s*`, and the `kind` enum is game semantics.
+- **The engine never invokes the object callbacks** — all dispatch
+  (`collide` in `game.c`, `physics` in `world.c`, `emit`/`shadow` in
+  `render.c`) is game code. So the engine's only generic offering would be a
+  POD struct + a pool allocator (thin), while the interesting parts are
+  irreducibly game-shaped.
+- **The real reuse leverage is the *render pipeline*, not the object pool**
+  (see **ER**). A second game organises its own objects however it likes and
+  feeds geometry to the engine via `scene_tri`/`scene_line`; it does not need
+  `obstacle_t`. Extracting the pool would be churn (29 files reference
+  `obstacle_t`) for an abstraction with one consumer and little payoff.
+
+So E5 lands as "no extraction"; the effort it would have taken is redirected
+into the **ER** render-pipeline phase below.
+
+### E6 — UI / menu widget framework
+- [ ] Extract `menu_view_t` + `menu_draw()` + row kinds + panel/chevron drawing from `main.c` → `se_ui.{c,h}`. Game keeps menu content + the state machine.
+- [ ] Build + verify; on-device menu smoke.
 
 ### E6 — UI / menu widget framework
 - [ ] Extract `menu_view_t` + `menu_draw()` + row kinds + panel/chevron drawing from `main.c` → `se_ui.{c,h}`. Game keeps menu content + the state machine.
@@ -253,13 +274,86 @@ a faithful relocation.
 
 ---
 
+## ER — Render pipeline pivot: immediate → deferred (post-extraction)
+
+> Added 2026-05-24 after a design discussion. This is **not** a relocation
+> like E1–E9; it's a renderer-architecture enhancement, scheduled after the
+> extraction is complete so the engine is self-contained first and this can
+> be measured on its own. It changes `se_scene`'s public contract, so the E8
+> renderer docs should be revised when it lands (or note it as forthcoming).
+
+**Motivation.** Today `se_scene` is hybrid-immediate: `scene_tri` projects
+and rasterizes *on submit* (the algorithm is hardwired into it), while
+`scene_line` defers to an internal list drawn at `scene_flush()`. The engine
+never sees the whole frame at once, and **every culling decision is made
+game-side** (each object's `emit` back-face-culls itself: `emit_cube`'s
+`show_left/right/top`, the icosahedron's `dot_view`, the near-clip guards).
+That means every future game re-derives culling against its own FOV /
+resolution. The engine's real reuse leverage is this pipeline (project →
+cull → order → rasterize), not the object pool (see E5).
+
+**The pivot (variant b — accumulate then render).** Keep `scene_tri` /
+`scene_line` as the submission calls, but have them **accumulate** into a
+per-frame engine geometry list (as `scene_line` already does for edges).
+Add `scene_render(mode/opts)` that does the actual work; `scene_flush` folds
+into it. Object `emit` code is unchanged — it still just calls
+`scene_tri`/`scene_line`. Once the engine holds the whole frame it can:
+- **own / select the algorithm** — z-buffer today, painter's / sorted /
+  tiled later, chosen by the game via `scene_render(SE_RENDER_ZBUFFER)` etc.,
+  with no change to any game call site;
+- **cull centrally** — frustum / off-screen rejection + back-face culling
+  tuned once to FOV + resolution, so games submit naive geometry (e.g. all
+  faces of a character rotated 360°, consistent winding) and the engine drops
+  the invisible ones. *Optional* — a perf-critical game can still pre-cull;
+- **order centrally** — front-to-back so occluded pixels fail early-z
+  *without being written*. Likely a real win here because the game is
+  **fill-bound** (`obs`/`bgflr` dominate at 14–40 ms), which submission-order
+  immediate mode can't guarantee.
+
+**Initial scope (this is the key simplification).** The **ordering and
+culling steps ship as DUMMIES / pass-throughs first** — Race the Synth
+already pre-culls heavily in how `world.c` generates the object list, so the
+first ER cut is behavior-identical to today: accumulate tris + edges, then
+`scene_render()` rasterizes them in submission order with the existing
+z-buffer. What lands in the first cut is the *architecture*: deferred
+accumulation, the `scene_render()` entry point, the algorithm-selection hook,
+and the cull/order *seams* as no-ops. Real frustum/back-face culling and
+front-to-back sort are filled in later (and measured) without touching game
+call sites.
+
+**Costs / open questions.**
+- Per-frame triangle buffer in PSRAM (~44 B/tri, like the existing
+  4096-edge buffer) — a few thousand tris ≈ 100–200 KB. Fine on the P4, not
+  free.
+- **Net perf is an on-device A/B question:** buffering adds memory traffic;
+  central cull + front-to-back sort removes fill. On a fill-bound device the
+  sort likely wins, but measure with the FPS counter (the regression gate
+  becomes a *win* gate here).
+- Central back-face culling needs a winding convention + a per-call toggle
+  (so games that pre-cull aren't double-charged). Deferred to when the cull
+  stops being a dummy.
+
+**Checklist (when scheduled):**
+- [ ] `scene_tri` accumulates into a per-frame PSRAM triangle list (cap +
+  overflow-drop like edges).
+- [ ] `scene_render(se_render_mode_t mode)` — rasterize the accumulated tris
+  + edges; default `SE_RENDER_ZBUFFER` reproduces today's output exactly.
+  `scene_flush` folds in (or stays as an alias).
+- [ ] Cull seam (`se_render` frustum + back-face) wired as a **no-op**
+  pass-through initially.
+- [ ] Order seam (front-to-back sort) wired as a **no-op** initially.
+- [ ] Build + verify + **on-device A/B** (FPS vs the immediate-mode baseline).
+- [ ] Revise `synthengine3D/docs/renderer.md` for the deferred contract.
+
+---
+
 ## Open decisions (resolve as we reach them)
 
 - **SFX ownership** (E2): framework engine-side, recipes game-side — confirm
   on contact.
-- **Object struct visibility** (E5): the object carries game-set callback
-  pointers + scratch, so it's likely a *public* value-type with an
-  engine-owned pool, rather than fully opaque. Decide at E5.
+- ~~**Object struct visibility** (E5)~~ — RESOLVED 2026-05-24: defer the whole
+  object framework (keep `obstacle.{c,h}` game-side); the reuse leverage is
+  the render pipeline (ER), not the pool. See E5.
 - **Backdrop / PPA** (E7): extract the blit helper vs. defer entirely.
 - **Native-app vs graceloader `#ifdef`s** inside the engine — explicitly
   deferred past v1.
