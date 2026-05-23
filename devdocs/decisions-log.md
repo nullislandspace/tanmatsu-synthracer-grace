@@ -3872,3 +3872,42 @@
     - **Migration is strangler-style:** cleanest/least-coupled modules first,
       `make build` + `make verify` green at every step, user commits between
       steps. No code moved yet — this entry records the plan only.
+
+- 2026-05-23 — **E3 save framework: generic slot manager in the engine
+  (Option B).** The original sketch was ambiguous about how much of the save
+  system to extract. Code review showed `save.c`/`save_nbt.c` are ~400 lines
+  bound to the `save_data_t` schema, so the *minimal* honest cut would have
+  moved only the NBT primitive. But the user had listed "save file handling"
+  as an engine capability and confirmed reuse is the explicit goal, so we
+  chose **Option B**: a generic, reusable save-slot framework in the engine.
+    - `nbt.{c,h}` → `se_nbt.{c,h}` — generic FILE*-based tagged serializer.
+    - New `se_save.{c,h}` — engine owns N file-backed slots
+      (`SE_SAVE_SLOT_COUNT`, an overridable `#define` per the user so a game
+      sets its own slot count), the slot directory (`mkdir`), and the on-disk
+      wrapping. The game registers a `se_save_config_t` (dir, game name/
+      version, serialize + deserialize callbacks). API: `se_save_init`,
+      `se_save_slot_exists`, `se_save_peek`, `se_save_load_slot`,
+      `se_save_write_slot(slot, kind, data, info)`.
+    - **Peek header (co-designed with user).** Engine writes a `se_peek`
+      compound first in every file: `timestamp` + `format_version` filled by
+      the engine automatically; `game_name`/`game_version` from the config; a
+      free-text `info` display string and a `se_save_kind_t`
+      (MANUAL/AUTOSAVE/QUICKSAVE — a generic enum the user wanted for other
+      games; RTS always MANUAL) supplied per write. Slot-select reads only
+      this block. The game's old structured peek fields (score/stage/runs)
+      collapse into the `info` string, formatted in `save_write_slot`.
+    - **Game keeps** its `save_data_t` schema, the serialize/deserialize
+      callbacks (the former `save_write_state`/`save_read_state`, minus the
+      peek), defaults, run-stats merge, run-end commit, and — deliberately —
+      the **day-rollover** logic (it's daily-challenge *policy*, not generic
+      persistence, so it did NOT go into the engine despite the original
+      sketch mentioning it). No opaque handle: the slot manager is a
+      configured singleton, which is simpler and matches the existing design.
+    - **Save-format change, graceful.** The peek block layout changed, so a
+      pre-existing on-device slot loads all its progress (the stats/meta/daily
+      compounds are untouched and the game reader skips the unknown old/new
+      peek) but shows a blank date/info on the slot-select line until the next
+      save rewrites it. User pre-approved changing the save internals.
+    - Build clean, all symbols satisfied (text 96662→97063, +401 B for the
+      generic peek/config/callback layer). On-device save/load/peek round-trip
+      smoke still pending (can't run from the build host).

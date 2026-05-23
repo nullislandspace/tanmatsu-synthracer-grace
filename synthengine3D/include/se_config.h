@@ -79,3 +79,12 @@
 #ifndef SE_AUDIO_SFX_GROUP_COUNT
 #define SE_AUDIO_SFX_GROUP_COUNT  4
 #endif
+
+// ---- Save framework -------------------------------------------------
+//
+// Number of independent save slots the engine manages (se_save.h). Each
+// slot is one file under the configured save directory. Override per
+// game (some games want a single slot, others many).
+#ifndef SE_SAVE_SLOT_COUNT
+#define SE_SAVE_SLOT_COUNT  3
+#endif

@@ -1,19 +1,12 @@
 #include <string.h>
 
-#include "nbt.h"
+#include "se_nbt.h"
 #include "save.h"
 
 // All field names live in one place. Keep them stable so old saves
-// continue to load even after the in-memory struct evolves.
-
-static void write_peek(NbtWriter* w, save_data_t const* s) {
-    nbt_write_compound(w, "peek");
-    nbt_write_int64(w, "last_played_unix", s->last_played_unix);
-    nbt_write_int64(w, "score_best",       s->peek_score_best);
-    nbt_write_int32(w, "stage_best",       s->peek_stage_best);
-    nbt_write_int32(w, "runs_total",       s->peek_runs_total);
-    nbt_write_end(w);
-}
+// continue to load even after the in-memory struct evolves. The slot's
+// peek header (date / kind / display summary) is written separately by
+// the engine (se_save) and is NOT part of this game schema.
 
 // Symmetric writer for one run_stats_t — same field names in both
 // `last_run` and `all_time` compounds so display + savetool reading
@@ -90,26 +83,12 @@ static void write_daily(NbtWriter* w, save_data_t const* s) {
 }
 
 void save_write_state(NbtWriter* w, save_data_t const* s) {
-    write_peek(w, s);
     write_stats(w, s);
     write_meta(w, s);
     write_daily(w, s);
 }
 
 // --- Reader ---
-
-static void read_peek(NbtReader* r, save_data_t* s) {
-    char name[64];
-    int type;
-    while ((type = nbt_read_tag(r, name, sizeof(name))) != NBT_END) {
-        if (type < 0) break;
-        if      (type == NBT_INT64 && strcmp(name, "last_played_unix") == 0) s->last_played_unix = nbt_read_int64(r);
-        else if (type == NBT_INT64 && strcmp(name, "score_best")       == 0) s->peek_score_best  = nbt_read_int64(r);
-        else if (type == NBT_INT32 && strcmp(name, "stage_best")       == 0) s->peek_stage_best  = nbt_read_int32(r);
-        else if (type == NBT_INT32 && strcmp(name, "runs_total")       == 0) s->peek_runs_total  = nbt_read_int32(r);
-        else nbt_skip_payload(r, type);
-    }
-}
 
 static void read_run_stats(NbtReader* r, run_stats_t* rs) {
     char name[64];
@@ -203,8 +182,10 @@ void save_read_state(NbtReader* r, save_data_t* s) {
     int type;
     while ((type = nbt_read_tag(r, name, sizeof(name))) != NBT_END) {
         if (type < 0) break;
-        if      (type == NBT_COMPOUND && !strcmp(name, "peek"))  read_peek (r, s);
-        else if (type == NBT_COMPOUND && !strcmp(name, "stats")) read_stats(r, s);
+        // The engine's "se_peek" header (and any legacy "peek" from an
+        // older format) falls through to nbt_skip_payload — peek data is
+        // owned by se_save, not this game schema.
+        if      (type == NBT_COMPOUND && !strcmp(name, "stats")) read_stats(r, s);
         else if (type == NBT_COMPOUND && !strcmp(name, "meta"))  read_meta (r, s);
         else if (type == NBT_COMPOUND && !strcmp(name, "daily")) read_daily(r, s);
         else nbt_skip_payload(r, type);

@@ -1,4 +1,4 @@
-#include "nbt.h"
+#include "se_nbt.h"
 
 #include <string.h>
 

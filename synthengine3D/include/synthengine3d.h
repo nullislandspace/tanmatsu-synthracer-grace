@@ -20,11 +20,11 @@
 #include "se_audio_dsp.h"       // E2  -- DSP primitives (osc, env, biquad)
 #include "se_audio.h"           // E2  -- software mixer
 #include "se_music_procedural.h"// E2  -- procedural music source
+#include "se_nbt.h"             // E3  -- NBT serialization primitive
+#include "se_save.h"            // E3  -- file-backed save-slot framework
 
 // Subsystem public headers are added here as the extraction proceeds
-// (engine-extraction.md steps E3-E6):
-//   #include "se_nbt.h"         // E3 -- NBT serialization
-//   #include "se_save.h"        // E3 -- save-slot framework
+// (engine-extraction.md steps E4-E6):
 //   #include "se_scene.h"       // E4 -- 3D scene renderer + projection
 //   #include "se_object.h"      // E5 -- object/emit framework
 //   #include "se_ui.h"          // E6 -- data-driven menu widgets

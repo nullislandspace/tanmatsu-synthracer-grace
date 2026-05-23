@@ -1082,23 +1082,27 @@ static void draw_slot_select(void) {
     float const row_h = 56.0f;
     float const top   = fbh * 0.34f;
     for (int i = 0; i < SAVE_SLOT_COUNT; i++) {
-        save_peek_info_t info  = {0};
-        int              exist = save_slot_peek(i, &info) == 0;
-        bool const       sel   = (i == s_slot_cursor);
-        pax_col_t        title_col = sel ? MENU_COL_HILITE : MENU_COL_NORMAL;
-        pax_col_t        sub_col   = sel ? MENU_COL_NORMAL : MENU_COL_SUB;
+        se_save_peek_t info  = {0};
+        int            exist = se_save_peek(i, &info) == 0;
+        bool const     sel   = (i == s_slot_cursor);
+        pax_col_t      title_col = sel ? MENU_COL_HILITE : MENU_COL_NORMAL;
+        pax_col_t      sub_col   = sel ? MENU_COL_NORMAL : MENU_COL_SUB;
 
         char title[32];
         snprintf(title, sizeof(title), "Slot %d", i + 1);
 
         char sub[128];
         if (exist) {
+            // info.info is the game's display summary built in
+            // save_write_slot; blank on slots written before se_save, so
+            // fall back to just the timestamp in that case.
             char when[64];
-            format_unix(info.last_played_unix, when, sizeof(when));
-            snprintf(sub, sizeof(sub),
-                     "best %lld  stage %d  runs %d  %s",
-                     (long long)info.score_best, (int)info.stage_best,
-                     (int)info.runs_total, when);
+            format_unix(info.timestamp, when, sizeof(when));
+            if (info.info[0] != '\0') {
+                snprintf(sub, sizeof(sub), "%s  %s", info.info, when);
+            } else {
+                snprintf(sub, sizeof(sub), "%s", when);
+            }
         } else {
             snprintf(sub, sizeof(sub), "[new]");
         }

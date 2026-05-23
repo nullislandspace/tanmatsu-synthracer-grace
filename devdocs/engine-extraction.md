@@ -208,10 +208,14 @@ synthwave settings become the game's data (or an engine-provided
 designing the config schema is the bulk of the work; deferred so E2 stays
 a faithful relocation.
 
-### E3 — Serialization + save framework split
-- [ ] `nbt.{c,h}` → `se_nbt.{c,h}` (generic reader/writer, public).
-- [ ] Split `save.{c,h}` / `save_nbt.c`: engine = N-slot manager + day-rollover mechanism + NBT read/write that drives game callbacks (`se_save_serialize_fn` / `se_save_deserialize_fn`); game = the `save_data_t` schema + the callbacks.
-- [ ] Build + verify; on-device save/load round-trip smoke.
+### E3 — Serialization + save framework split ✅ 2026-05-23 (Option B, co-designed)
+- [x] `nbt.{c,h}` → `se_nbt.{c,h}` (generic FILE*-based tagged serializer, public; banner added).
+- [x] **Generic slot framework in the engine (`se_save.{c,h}`)** — chose **Option B** over the minimal "NBT only" cut, because reuse is the explicit goal and the user listed "save file handling" as an engine capability. The engine owns: N file-backed slots (`SE_SAVE_SLOT_COUNT`, overridable `#define` in `se_config.h`), the on-disk wrapping (NBT root + an engine **peek header**), the slot directory (`mkdir`), and `slot_exists`/`peek`/`load`/`write`. The game provides a `se_save_config_t` (dir, game name, game version, serialize/deserialize callbacks). API: `se_save_init` / `se_save_slot_exists` / `se_save_peek` / `se_save_load_slot` / `se_save_write_slot(slot, kind, data, info)`.
+- [x] **Peek header (co-designed):** engine fills `timestamp` + `format_version` automatically; the game supplies `game_name`/`game_version` (config) + a free-text `info` display string + a `se_save_kind_t` (MANUAL/AUTOSAVE/QUICKSAVE — generic, RTS always MANUAL) per write. Written as the `se_peek` compound first in the file so slot-select reads it without loading full state.
+- [x] **Game side stays, thinner:** `save_nbt.c` dropped `write_peek`/`read_peek`; `save_write_state`/`save_read_state` are now the two callbacks (they skip the engine's `se_peek` as an unknown tag). `save.c` builds the config + the `info` summary string (`"best… stage… runs…"`) and delegates to `se_save_*`; `save_data_t` lost its 4 peek-mirror fields and `save_peek_info_t`/`save_slot_peek` are gone. `main.c` slot-select reads `se_save_peek_t` (timestamp + `info`).
+- [x] **Deviation from the original sketch:** day-rollover stayed game-side (it's daily-challenge *policy*, not generic persistence), and there's no opaque handle (the slot manager is a configured singleton). Recorded in decisions-log.
+- [x] Build + verify: **All symbols satisfied.** Size text 96662→97063 (+401 B: the generic peek + config + callback layer — added functionality, not a hot path; save runs on menu transitions). Boundary clean: engine save sources include no game headers; no stale peek refs in the game.
+- [ ] **On-device smoke still needed (format changed):** confirm (a) a pre-existing slot still loads its progress and shows blank date/info until re-saved, then re-saves correctly; (b) a fresh save writes → loads → peeks round-trip. *(Can't be done from the build host.)*
 
 ### E4 — 3D scene renderer + invert the world dependency
 - [ ] `scene.{c,h}` → `se_scene.{c,h}` (public: `se_scene_begin/tri/line/flush`, `se_render_set_camera`/`se_render_camera`, `se_project`).

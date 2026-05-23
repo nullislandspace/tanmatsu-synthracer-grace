@@ -40,7 +40,6 @@ set(APP_SOURCES
     main/areas/simple_platform.c
     main/areas/synthengine_ad.c
     main/areas/rest.c
-    main/nbt.c
     main/save.c
     main/save_nbt.c
     main/audio_settings.c

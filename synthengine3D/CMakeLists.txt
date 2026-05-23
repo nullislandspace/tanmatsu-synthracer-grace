@@ -19,6 +19,8 @@ set(SE_SRCS
     src/audio_dsp.c        # E2: DSP primitives (oscillators, env, biquad)
     src/audio_mixer.c      # E2: software mixer + I2S, group-gated output
     src/music_procedural.c # E2: procedural music source
+    src/nbt.c              # E3: NBT serialization primitive
+    src/se_save.c          # E3: file-backed save-slot framework
 )
 
 if(COMMAND idf_component_register)

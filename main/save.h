@@ -3,11 +3,15 @@
 #include <stdint.h>
 #include <time.h>
 
-// Persistence layer. Three independent slots, each a NBT file under
-// /int/synthracer/save{0,1,2}.bin. No autosave slot — we write to the
-// active slot after every run.
+#include "se_save.h"   // engine save-slot framework (se_save_*, se_save_peek_t)
 
-#define SAVE_SLOT_COUNT  3
+// Persistence layer. SE_SAVE_SLOT_COUNT independent slots, each an NBT
+// file under SAVE_PATH_PREFIX, written through the engine's se_save
+// framework: the engine owns the slot files + the peek header; this game
+// owns the save_data_t schema and its (de)serialisation. No autosave
+// slot — we write to the active slot after every run.
+
+#define SAVE_SLOT_COUNT  SE_SAVE_SLOT_COUNT
 #define SAVE_PATH_PREFIX "/int/synthracer"
 
 // Run-end reason codes (committed into stats.run_end_reason).
@@ -47,14 +51,10 @@ typedef struct {
 // On-disk top-level state. Same struct shape is reused for `last_run`
 // and `all_time`, so display code can render both with identical logic.
 typedef struct {
-    // Peek block — written first so save_slot_peek can read it without
-    // parsing the rest of the file. Mirrors fields from `stats.all_time`
-    // (refreshed by save_write_slot just before serialisation).
-    int64_t last_played_unix;       // time(NULL) at last save, 0 if never
-    int64_t peek_score_best;        // mirror of stats.all_time.score
-    int32_t peek_stage_best;        // mirror of stats.all_time.stage_reached
-    int32_t peek_runs_total;        // mirror of stats.all_time.runs_total
-
+    // The slot's peek header (date / kind / a display summary) is owned
+    // by the engine (se_save_peek_t) — no mirror fields here. The game's
+    // serialiser writes only the compounds below; save_write_slot builds
+    // the engine peek's `info` string from stats.all_time at write time.
     struct {
         run_stats_t last_run;
         run_stats_t all_time;
@@ -111,15 +111,6 @@ typedef struct {
     } daily;
 } save_data_t;
 
-// Peek struct — what save_slot_peek returns. Maps to the file's peek
-// compound, no need to load the rest.
-typedef struct {
-    int64_t last_played_unix;
-    int64_t score_best;
-    int32_t stage_best;
-    int32_t runs_total;
-} save_peek_info_t;
-
 // Forward-declare so the commit helper can take a game state without
 // including game.h transitively.
 struct game_state_s;
@@ -130,20 +121,17 @@ void save_init_defaults(save_data_t* s);
 // mkdir /int/synthracer (idempotent).
 void save_init(void);
 
-// 1 if the slot file exists, 0 otherwise.
+// 1 if the slot file exists, 0 otherwise. (Slot-select code reads the
+// engine peek directly via se_save_peek(); no game-side peek wrapper.)
 int  save_slot_exists(int slot);
-
-// Read just the peek compound. Returns 0 on success, -1 on
-// missing/corrupt/IO error. `out` is zeroed on failure.
-int  save_slot_peek(int slot, save_peek_info_t* out);
 
 // Full load. `s` is initialised to defaults first; unknown / missing
 // tags keep their default values. Returns 0 on success, -1 on
 // missing/corrupt/IO error.
 int  save_load_slot(int slot, save_data_t* s);
 
-// Full write. Stamps last_played_unix from time(NULL) and copies the
-// stats summary into the peek block before serialising.
+// Full write. Formats the engine peek's display `info` string from
+// stats.all_time, then writes the slot via se_save (kind = manual).
 int  save_write_slot(int slot, save_data_t* s);
 
 // Merge a just-ended run's stats into the all-time accumulators.
