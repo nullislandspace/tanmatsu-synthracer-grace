@@ -357,6 +357,30 @@ frame, menus get a clean API:
   `APP_STATE_KEY_CAPTURE`. The menu only reports "rebind row N"; the game
   decides what to store.
 
+**Input bindings — engine-owned remap dialog + persistence (added 2026-05-24).**
+Since it's an engine, key remapping belongs to it, not re-implemented per
+game. The **game declares** its controls (a table of `{id, label,
+default_scancode}`) + an NVS namespace; the **engine owns** the rest —
+loading persisted bindings (falling back to the declared defaults), the whole
+remap **dialog** (a `se_ui` menu, one row per control showing its current
+key via the `CUSTOM`/keybind drawing, activate → `se_ui_capture_key` → set +
+persist), and the query the game calls when starting/continuing a run:
+```c
+typedef struct { int id; const char* label; uint16_t default_sc; } se_binding_def_t;
+typedef struct { const char* nvs_namespace; const se_binding_def_t* defs; int count; } se_bindings_config_t;
+void     se_bindings_init(const se_bindings_config_t* cfg); // load persisted, else defaults
+uint16_t se_bindings_get(int id);                           // current scancode for a control
+void     se_bindings_set(int id, uint16_t sc);              // set + persist
+void     se_bindings_run_dialog(void);                      // the remap menu (engine-rendered)
+```
+This absorbs the game's `controls_settings.c` + the bespoke controls menu +
+`APP_STATE_KEY_CAPTURE`. The game keeps only its control enum + defaults, and
+polls `se_bindings_get(LEFT)` etc. in `on_update` for steering. **Open
+detail:** the controls screen also carries the game's *gyro* toggle (a CHECK
+row) — either `se_bindings_run_dialog` accepts optional extra toggle-rows
+(label + get/set callbacks) so the whole screen is engine-rendered, or the
+gyro stays a separate game setting row. Decide when building.
+
 **Backdrop (folded-in E7).** The synthwave shapes + PPA blit stay game-side,
 invoked from `on_backdrop`. Engine default = clear to `backdrop_argb`.
 
@@ -384,6 +408,10 @@ the bespoke menu states from `main.c`. On-device smoke after each.
 - [ ] `se_ui` menu system (`se_menu_t`, per-frame `handle_event`/`draw`,
   `MENU_VAL_*` incl. `CUSTOM` callback, theme + `SE_UI_KEY_*` nav in
   `se_config.h`) + `se_ui_run_menu` + `se_ui_capture_key`.
+- [ ] **Input bindings subsystem** (`se_bindings_*`): game declares controls
+  + defaults + NVS namespace; engine owns load/persist + `get`/`set` + the
+  remap dialog. Absorbs `controls_settings.c` + the controls menu +
+  `APP_STATE_KEY_CAPTURE`; resolve the gyro-toggle-row detail.
 - [ ] Port `main.c`'s list menus + rebind capture; retire the bespoke states;
   add the brightness rows (screen / keyboard / LED) to the settings menu.
 - [ ] `on_backdrop` hook; synthwave invoked from it.
