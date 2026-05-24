@@ -97,14 +97,6 @@ bool input_consume_force_next_area(void);
 // toggling godmode (crash / stall end-of-run disabled). Self-clears.
 bool input_consume_godmode_toggle(void);
 
-// Begin key-capture for the Controls remap dialog. While capture is
-// active, the next plain key press is latched and every other event
-// (steering, menu nav, F1 exit, volume, …) is swallowed so the
-// pressed key is bound rather than acted on. Capture ends when
-// input_consume_captured_key() returns true.
-void input_begin_key_capture(void);
-
-// If a key was captured since input_begin_key_capture(), returns true,
-// writes the BSP scancode into *out_scancode, and ends capture mode.
-// Returns false while still waiting for a key press.
-bool input_consume_captured_key(uint16_t* out_scancode);
+// (Key-rebind capture moved into the engine: the Controls menu calls the
+// engine's blocking se_ui_capture_key(), which drains the input queue
+// itself, so input.c no longer exposes a capture mode.)

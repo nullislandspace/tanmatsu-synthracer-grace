@@ -18,10 +18,13 @@
 
 #include "se_run.h"
 
-#include "se_config.h"   // SE_FRAME_DT_MAX, SE_HW_VOLUME_STEP_PCT
-#include "se_audio.h"    // audio_mixer_init, audio_mixer_shutdown
-#include "se_hw.h"       // se_hw_init, se_hw_step_volume, se_hw_on_jack_event
-#include "se_scene.h"    // scene_init
+#include "se_config.h"      // SE_FRAME_DT_MAX, SE_HW_VOLUME_STEP_PCT, SE_UI_*
+#include "se_audio.h"       // audio_mixer_init, audio_mixer_shutdown
+#include "se_hw.h"          // se_hw_init, se_hw_step_volume, se_hw_on_jack_event
+#include "se_scene.h"       // scene_init
+#include "se_ui.h"          // se_ui_capture_key (defined here -- needs the loop)
+#include "se_text.h"        // rendertext_draw (capture prompt)
+#include "se_direct565.h"   // direct_565_dim_rect (capture prompt panel)
 
 #include "bsp/device.h"
 #include "bsp/display.h"
@@ -58,9 +61,12 @@ static volatile bool      s_exit_requested = false;
 // ---- Input pump state -----------------------------------------------
 static QueueHandle_t      s_input_queue    = NULL;   // BSP event queue
 static bool               s_f1_exits       = false;  // from se_app_config_t
-// When true, every event is forwarded to on_input and the engine handles
-// no device-global keys (used during a game's rebind capture).
-static bool               s_input_passthrough = false;
+
+// Callbacks + config retained for blocking modals (se_ui_capture_key)
+// that need to re-run the backdrop hook + present frames mid-callback.
+static se_app_callbacks_t const* s_cb            = NULL;
+static void*                     s_user          = NULL;
+static uint32_t                  s_backdrop_argb = 0;
 
 void se_request_exit(void) {
     s_exit_requested = true;
@@ -70,8 +76,13 @@ void se_display_info(se_display_info_t* out) {
     if (out) *out = s_di;
 }
 
-void se_input_set_passthrough(bool on) {
-    s_input_passthrough = on;
+// Draw the current frame's backdrop: the game's hook, or a flat clear.
+static void se_draw_backdrop(void) {
+    if (s_cb && s_cb->on_backdrop) {
+        s_cb->on_backdrop(s_fb, s_user);
+    } else {
+        pax_background(s_fb, s_backdrop_argb);
+    }
 }
 
 // Drain the BSP input queue once. The engine consumes the device-global
@@ -79,26 +90,20 @@ void se_input_set_passthrough(bool on) {
 // re-route, and F1-exit when the game opted in -- and forwards every
 // other event to on_input. The power button and F2/F3 are deliberately
 // left untouched (the power button's 2 s-hold power-off lives in the
-// coprocessor; function keys are too valuable to spend). While
-// passthrough is on (rebind capture) the engine consumes nothing and
-// forwards everything.
+// coprocessor; function keys are too valuable to spend).
 static void se_pump_input(se_app_callbacks_t const* cb, void* user) {
     if (s_input_queue == NULL) return;
 
     bsp_input_event_t ev;
     while (xQueueReceive(s_input_queue, &ev, 0) == pdTRUE) {
-        // Audio-jack is pure device routing -- never a bindable key, so
-        // the engine consumes it even during passthrough.
+        // Audio-jack is pure device routing -- the engine consumes it.
         if (ev.type == INPUT_EVENT_TYPE_ACTION &&
             ev.args_action.type == BSP_INPUT_ACTION_TYPE_AUDIO_JACK) {
             se_hw_on_jack_event(ev.args_action.state);
             continue;
         }
-        // Volume +/- and F1-exit are consumed live, except under
-        // passthrough (rebind capture), where they must reach the game
-        // so they can be bound rather than acted on.
-        if (!s_input_passthrough &&
-            ev.type == INPUT_EVENT_TYPE_NAVIGATION && ev.args_navigation.state) {
+        // Volume +/- and F1-exit are consumed live.
+        if (ev.type == INPUT_EVENT_TYPE_NAVIGATION && ev.args_navigation.state) {
             bsp_input_navigation_key_t const key = ev.args_navigation.key;
             if (key == BSP_INPUT_NAVIGATION_KEY_VOLUME_UP) {
                 se_hw_step_volume(+SE_HW_VOLUME_STEP_PCT);
@@ -140,6 +145,88 @@ static void se_present(void) {
     pax_buf_t* tmp = s_fb;
     s_fb           = s_fb_front;
     s_fb_front     = tmp;
+}
+
+// ---- Rebind key capture ---------------------------------------------
+
+// Map one input event to the BSP scancode it would bind, or 0 if it is
+// not a single bindable key press. Function keys arrive on the navigation
+// channel but have scancode equivalents; plain keys arrive as single-byte
+// scancode presses (release events have the high bit set; escaped
+// multi-byte scancodes >= 0xE000 don't make sensible single-key binds).
+static uint16_t se_bindable_scancode(bsp_input_event_t const* ev) {
+    if (ev->type == INPUT_EVENT_TYPE_NAVIGATION && ev->args_navigation.state) {
+        switch (ev->args_navigation.key) {
+            case BSP_INPUT_NAVIGATION_KEY_F1:  return BSP_INPUT_SCANCODE_F1;
+            case BSP_INPUT_NAVIGATION_KEY_F2:  return BSP_INPUT_SCANCODE_F2;
+            case BSP_INPUT_NAVIGATION_KEY_F3:  return BSP_INPUT_SCANCODE_F3;
+            case BSP_INPUT_NAVIGATION_KEY_F4:  return BSP_INPUT_SCANCODE_F4;
+            case BSP_INPUT_NAVIGATION_KEY_F5:  return BSP_INPUT_SCANCODE_F5;
+            case BSP_INPUT_NAVIGATION_KEY_F6:  return BSP_INPUT_SCANCODE_F6;
+            case BSP_INPUT_NAVIGATION_KEY_F7:  return BSP_INPUT_SCANCODE_F7;
+            case BSP_INPUT_NAVIGATION_KEY_F8:  return BSP_INPUT_SCANCODE_F8;
+            case BSP_INPUT_NAVIGATION_KEY_F9:  return BSP_INPUT_SCANCODE_F9;
+            case BSP_INPUT_NAVIGATION_KEY_F10: return BSP_INPUT_SCANCODE_F10;
+            case BSP_INPUT_NAVIGATION_KEY_F11: return BSP_INPUT_SCANCODE_F11;
+            case BSP_INPUT_NAVIGATION_KEY_F12: return BSP_INPUT_SCANCODE_F12;
+            default: return 0;
+        }
+    }
+    if (ev->type == INPUT_EVENT_TYPE_SCANCODE) {
+        uint16_t const sc = ev->args_scancode.scancode;
+        if (sc != BSP_INPUT_SCANCODE_NONE
+            && (sc & BSP_INPUT_SCANCODE_RELEASE_MODIFIER) == 0
+            && sc < 0xE000u) {
+            return sc;
+        }
+    }
+    return 0;
+}
+
+// Draw the "press a key" modal: a dim panel + heading + the control label
+// + a hint. Mirrors the layout the game used before the dialog moved into
+// the engine.
+static void se_draw_capture_prompt(char const* label) {
+    float const fbw = pax_buf_get_widthf(s_fb);
+    float const fbh = pax_buf_get_heightf(s_fb);
+    int   const pw  = (int)(fbw * 0.56f);
+    int   const ph  = (int)(fbh * 0.44f);
+    int   const px  = (int)((fbw - (float)pw) * 0.5f);
+    int   const py  = (int)((fbh - (float)ph) * 0.5f);
+    direct_565_dim_rect((uint16_t*)pax_buf_get_pixels(s_fb), s_fb->reverse_endianness,
+                        px, py, pw, ph);
+
+    float const lx = (float)px + SE_UI_TEXT_INSET;
+    rendertext_draw(s_fb, SE_UI_COL_TITLE, NULL, 36.0f, lx, fbh * 0.40f, "Press a key");
+    if (label) {
+        char prompt[48];
+        snprintf(prompt, sizeof(prompt), "Rebinding: %s", label);
+        rendertext_draw(s_fb, SE_UI_COL_NORMAL, NULL, 22.0f, lx, fbh * 0.56f, prompt);
+    }
+    rendertext_draw(s_fb, SE_UI_COL_HINT, NULL, 14.0f, lx, fbh * 0.66f,
+                    "the next key you press becomes the binding");
+}
+
+uint16_t se_ui_capture_key(char const* prompt_label) {
+    if (s_input_queue == NULL) return 0;
+
+    uint16_t captured = 0;
+    while (captured == 0 && !s_exit_requested) {
+        // Drain the queue ourselves (bypassing the normal pump), grabbing
+        // the first bindable key -- so volume / F1, which the pump would
+        // otherwise consume, can be bound here too.
+        bsp_input_event_t ev;
+        while (xQueueReceive(s_input_queue, &ev, 0) == pdTRUE) {
+            if (captured == 0) {
+                uint16_t const sc = se_bindable_scancode(&ev);
+                if (sc != 0) captured = sc;
+            }
+        }
+        se_draw_backdrop();
+        se_draw_capture_prompt(prompt_label);
+        se_present();
+    }
+    return captured;
 }
 
 // Bootstrap NVS, BSP, the display, the framebuffers, the scene buffers,
@@ -259,14 +346,16 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
     se_app_config_t lcfg = {0};
     if (cfg) lcfg = *cfg;
 
-    s_exit_requested    = false;
-    s_input_passthrough = false;
-    s_f1_exits          = lcfg.f1_exits;
+    s_exit_requested = false;
+    s_f1_exits       = lcfg.f1_exits;
+    s_backdrop_argb  = lcfg.backdrop_argb;
 
     if (cb == NULL || cb->on_update == NULL) {
         ESP_LOGE(TAG, "se_run: callbacks (and on_update) are required");
         return;
     }
+    s_cb   = cb;     // retained for blocking modals (se_ui_capture_key)
+    s_user = user;
 
     if (!se_bootstrap()) {
         return;
@@ -295,11 +384,7 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
         cb->on_update(dt, user);
 
         // Backdrop: the game's hook, or a flat clear when none is set.
-        if (cb->on_backdrop) {
-            cb->on_backdrop(s_fb, user);
-        } else {
-            pax_background(s_fb, lcfg.backdrop_argb);
-        }
+        se_draw_backdrop();
 
         // Foreground: 3D scene, HUD, menus.
         if (cb->on_render) {

@@ -105,3 +105,15 @@ se_menu_result_t se_menu_input(se_menu_t* menu, se_menu_action_t action);
 // the rows (label + value per row kind, chevron on the selected row), and
 // an optional footer hint. Pure rendering -- no state change.
 void se_menu_draw(se_menu_t const* menu, pax_buf_t* fb);
+
+// Blocking "press a key" capture for a key rebind. Pumps engine frames --
+// drawing the registered backdrop (on_backdrop) + a prompt panel -- until
+// the user presses a bindable key, then returns its BSP scancode.
+// `prompt_label` (e.g. the control's name) is shown under the heading;
+// NULL for none. Any physical key binds, including F-keys and the volume
+// keys / F1 that the run loop would otherwise consume (the capture drains
+// the input queue itself, so those reach it here). Returns 0 only if the
+// loop is asked to exit (se_request_exit) before a key is pressed.
+//   (Implemented in the run loop -- it needs the engine's frame
+//   primitives -- but declared here with the rest of the UI surface.)
+uint16_t se_ui_capture_key(char const* prompt_label);

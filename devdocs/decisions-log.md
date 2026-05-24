@@ -4247,3 +4247,48 @@
       `make verify` clean. **On-device smoke owed** (Controls: nav, keybind
       icons, rebind, gyro toggle; Upgrade: slots/picker/equip + no-slots +
       duplicate-block; regression check on main/settings/audio/pause).
+    - *On-device smoke: passed (user, 2026-05-24).*
+
+- 2026-05-24 — **EF sub-step 4b-ii: engine `se_ui_capture_key`; bespoke
+  key-capture retired.** The "press a key" rebind dialog is now the engine's,
+  completing the engine-owned bindings vision.
+    - **`se_ui_capture_key(prompt_label)`** (declared in `se_ui.h`, defined in
+      `se_run.c` because it needs the loop primitives): a **blocking** modal
+      that pumps engine frames — re-running the registered `on_backdrop` hook +
+      drawing a "press a key" prompt panel + presenting at vsync — until the
+      user presses a bindable key, then returns its scancode. It **drains the
+      input queue itself** (bypassing the normal per-frame pump), so the keys
+      the pump would otherwise eat (volume ±, F1) reach it and can be bound;
+      `se_bindable_scancode` maps F-key nav events + single-byte scancode
+      presses to a scancode (the old `nav_to_scancode` + filter, moved engine
+      side). To support it, `se_run` retains the callbacks + backdrop colour in
+      file statics (`s_cb`/`s_user`/`s_backdrop_argb`) and factored the
+      backdrop into `se_draw_backdrop`.
+    - **Game collapse.** The Controls keybind row now calls `se_ui_capture_key`
+      inline (`sc = se_ui_capture_key(label); if (sc) se_bindings_set(id, sc)`)
+      — no state transition. Deleted: `APP_STATE_KEY_CAPTURE` (+ its enum entry
+      + the `in_settings_family` ref), `draw_key_capture`, `s_capture_target`,
+      and in `input.c` the whole capture path (`input_begin_key_capture` /
+      `input_consume_captured_key` / `s_capturing` / `s_captured` /
+      `nav_to_scancode` + the two capture branches in `input_handle_event`).
+    - **`se_input_set_passthrough` removed** (engine + the input.c calls): it was
+      the transitional crutch for the bespoke capture; the blocking capture
+      drains the queue directly, so the normal pump always consumes its globals
+      and no passthrough is needed. (Never released, so no compat concern.)
+    - **Net result — the requested split is met:** the game declares its
+      controls + defaults + NVS namespace and queries the mapping
+      (`se_bindings_get`); the engine owns the storage, the persistence, the
+      rendered controls menu, and the rebind dialog/capture.
+    - **One accepted visual nuance:** rebinding from the *pause* menu now shows
+      the synthwave backdrop (via the re-run `on_backdrop`) behind the prompt
+      rather than the frozen obstacle scene (which is an `on_render` thing the
+      blocking modal doesn't call). Brief + minor.
+    - Also fixed two unrelated reports: the `draw_slot_select` `snprintf`
+      truncation warning (grew `sub[128]`→`[160]`), and the **Credits scroll**
+      (`CREDITS_SCROLL_STEP` was 3 lines/press → now 1 line, so it scrolls
+      line-by-line instead of jumping section-to-section).
+    - Build green + `make verify` clean; text 98717→98915 (+198 B: the engine
+      capture + prompt, minus the removed game capture). **On-device smoke
+      owed** (rebind each control incl. binding an F-key / a normal letter;
+      rebind from pause; confirm steering/pause still honour new binds; credits
+      scroll one line per press).

@@ -152,7 +152,8 @@ typedef enum {
     APP_STATE_CREDITS,          // auto-scrolling credits roll
     APP_STATE_SETTINGS,         // settings submenu: Controls / Audio
     APP_STATE_CONTROLS,         // controls list: gyro checkbox + 4 keybinds
-    APP_STATE_KEY_CAPTURE,      // "press a key" modal for a keybind remap
+                                // (the keybind "press a key" capture is a
+                                // blocking engine call, not a state)
     APP_STATE_AUDIO_SETTINGS,   // three-checkbox panel: music / SFX / hum
     APP_STATE_PLAYING,
     APP_STATE_PAUSED,           // pause overlay: Resume / Abort run
@@ -209,10 +210,6 @@ enum {
     CONTROLS_ENTRY_COUNT,
 };
 static int s_controls_cursor = CONTROLS_ENTRY_GYRO;
-
-// Which keybind the open "press a key" modal is rebinding. Set when
-// entering STATE_KEY_CAPTURE from a keybind row.
-static controls_key_t s_capture_target = CONTROL_KEY_LEFT;
 
 // Audio-settings cursor entries (STATE_AUDIO_SETTINGS).
 enum {
@@ -1007,7 +1004,9 @@ static void draw_slot_select(void) {
         char title[32];
         snprintf(title, sizeof(title), "Slot %d", i + 1);
 
-        char sub[128];
+        // Sized to hold info.info (64) + "  " + when (64) + NUL without
+        // truncation, so the "%s  %s" format below is always safe.
+        char sub[160];
         if (exist) {
             // info.info is the game's display summary built in
             // save_write_slot; blank on slots written before se_save, so
@@ -1040,31 +1039,9 @@ static void draw_slot_select(void) {
 // its APP_STATE_* case, so the game's bespoke menu_draw / menu_view_t are
 // gone. The Controls keybind rows use se_ui's CUSTOM kind + the
 // controls_keybind_draw callback above to keep the key-icon logic
-// game-side. What remains below are the hand-laid NON-list screens:
-// slot-select, seed entry, stats, credits, the "press a key" modal.)
-
-// "Press a key" modal shown while a keybind is being remapped.
-static void draw_key_capture(void) {
-    draw_menu_panel_size(0.56f, 0.44f);
-    float const fbh = pax_buf_get_heightf(fb);
-    float const lx  = menu_left_x(0.56f);
-
-    char const* what = "key";
-    switch (s_capture_target) {
-        case CONTROL_KEY_LEFT:  what = "Left";     break;
-        case CONTROL_KEY_RIGHT: what = "Right";    break;
-        case CONTROL_KEY_ITEM:  what = "Use item"; break;
-        case CONTROL_KEY_PAUSE: what = "Pause";    break;
-        default: break;
-    }
-    char prompt[48];
-    snprintf(prompt, sizeof(prompt), "Rebinding: %s", what);
-
-    draw_left(lx, fbh * 0.40f, 36.0f, MENU_COL_TITLE, "Press a key");
-    draw_left(lx, fbh * 0.56f, 22.0f, MENU_COL_NORMAL, prompt);
-    draw_left(lx, fbh * 0.66f, 14.0f, MENU_COL_HINT,
-              "the next key you press becomes the binding");
-}
+// game-side, and the "press a key" rebind modal is the engine's blocking
+// se_ui_capture_key. What remains below are the hand-laid NON-list
+// screens: slot-select, seed entry, stats, credits.)
 
 // Seed-input screen — numeric entry, prefilled from last_custom_seed.
 static void draw_seed_input(void) {
@@ -1167,9 +1144,9 @@ static int upgrade_slot_count(void) {
 // viewport are culled whole rather than clipped.
 #define CREDITS_PANEL_W     0.86f
 #define CREDITS_PANEL_H     0.96f
-#define CREDITS_LINE_H      24.0f                  // row pitch
-#define CREDITS_TEXT_H      18.0f                  // glyph height
-#define CREDITS_SCROLL_STEP (CREDITS_LINE_H * 3.0f) // px per UP/DOWN press
+#define CREDITS_LINE_H      24.0f          // row pitch
+#define CREDITS_TEXT_H      18.0f          // glyph height
+#define CREDITS_SCROLL_STEP CREDITS_LINE_H // px per UP/DOWN press = one line
 
 static char const* const credits_lines[] = {
     "Race the Synth was inspired by the steam game \"Race the Sun\"",
@@ -2175,8 +2152,7 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         // PAUSED instead — frozen floor, frozen scene behind.
         bool const in_settings_family = (app_state == APP_STATE_SETTINGS
                                          || app_state == APP_STATE_CONTROLS
-                                         || app_state == APP_STATE_AUDIO_SETTINGS
-                                         || app_state == APP_STATE_KEY_CAPTURE);
+                                         || app_state == APP_STATE_AUDIO_SETTINGS);
         bool const is_menu_state = (app_state == APP_STATE_SLOT_SELECT
                                     || app_state == APP_STATE_MENU
                                     || app_state == APP_STATE_SEED_INPUT
@@ -2488,30 +2464,16 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                         controls_settings_set_gyro_on(!controls_settings_gyro_on());
                     } else {
                         // Rows past the gyro checkbox map 1:1 onto
-                        // controls_key_t — open the remap modal.
-                        s_capture_target =
+                        // controls_key_t — the engine runs the blocking
+                        // "press a key" capture and hands back a scancode.
+                        controls_key_t const target =
                             (controls_key_t)(s_controls_cursor - CONTROLS_ENTRY_LEFT);
-                        input_begin_key_capture();
-                        app_state = APP_STATE_KEY_CAPTURE;
+                        uint16_t const sc =
+                            se_ui_capture_key(rows[s_controls_cursor].label);
+                        if (sc != 0) se_bindings_set(target, sc);
                     }
                 } else if (res == SE_MENU_RESULT_BACK) {
                     app_state = APP_STATE_SETTINGS;
-                }
-                break;
-            }
-
-            case APP_STATE_KEY_CAPTURE: {
-                // The backdrop (synthwave, or the frozen game when
-                // opened from the pause menu) is already in place;
-                // just overlay the modal. No exit hint — F1 is
-                // captured as a binding here, not an exit key.
-                draw_settings_scene(&world, &game);
-                t_after_obs = esp_timer_get_time();
-                draw_key_capture();
-                uint16_t captured = 0;
-                if (input_consume_captured_key(&captured)) {
-                    se_bindings_set(s_capture_target, captured);
-                    app_state = APP_STATE_CONTROLS;
                 }
                 break;
             }

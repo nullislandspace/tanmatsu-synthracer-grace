@@ -100,13 +100,3 @@ typedef struct {
 // time after the engine has bootstrapped (i.e. from on_init onward); a
 // no-op if `out` is NULL.
 void se_display_info(se_display_info_t* out);
-
-// Temporarily route *every* input event to on_input, bypassing the
-// engine's device-global key handling (volume +/-, audio-jack, F1-exit).
-// Intended for a key-rebind "press any key" capture, where those keys
-// must reach the game to be bound rather than being acted on. Call with
-// `true` when capture begins and `false` when it ends.
-//   NOTE: transitional. Once the rebind dialog is engine-owned
-//   (se_ui_capture_key, a later EF sub-step) the engine knows it is
-//   capturing and this explicit toggle goes away.
-void se_input_set_passthrough(bool on);

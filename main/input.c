@@ -8,7 +8,6 @@
 #include "freertos/FreeRTOS.h"
 #include "graceloader_imu.h"
 #include "se_bindings.h"     // se_bindings_get (remappable keybinds)
-#include "se_run.h"          // se_input_set_passthrough (rebind capture)
 
 static char const TAG[] = "input";
 
@@ -24,34 +23,8 @@ static bool          s_pause_toggle  = false; // latest pause-key press edge
 static bool          s_force_area    = false; // latest TAB press edge (debug)
 static bool          s_godmode_edge  = false; // latest G press edge (debug)
 
-// Key-capture mode for the Controls remap dialog. While `s_capturing`
-// is true, the next plain key press is latched into `s_captured`
-// (0 = nothing captured yet) and *all* other event handling is
-// skipped — so the key the player presses is bound, not acted on.
-static bool          s_capturing     = false;
-static uint16_t      s_captured      = 0;
-
-// Translate an F-key navigation event to its scancode. Function keys
-// can surface on either the navigation or the scancode channel
-// depending on the BSP build; capturing both makes F-key binds robust.
-// Returns 0 for keys with no scancode equivalent (arrows, gamepad, …).
-static uint16_t nav_to_scancode(bsp_input_navigation_key_t key) {
-    switch (key) {
-        case BSP_INPUT_NAVIGATION_KEY_F1:  return BSP_INPUT_SCANCODE_F1;
-        case BSP_INPUT_NAVIGATION_KEY_F2:  return BSP_INPUT_SCANCODE_F2;
-        case BSP_INPUT_NAVIGATION_KEY_F3:  return BSP_INPUT_SCANCODE_F3;
-        case BSP_INPUT_NAVIGATION_KEY_F4:  return BSP_INPUT_SCANCODE_F4;
-        case BSP_INPUT_NAVIGATION_KEY_F5:  return BSP_INPUT_SCANCODE_F5;
-        case BSP_INPUT_NAVIGATION_KEY_F6:  return BSP_INPUT_SCANCODE_F6;
-        case BSP_INPUT_NAVIGATION_KEY_F7:  return BSP_INPUT_SCANCODE_F7;
-        case BSP_INPUT_NAVIGATION_KEY_F8:  return BSP_INPUT_SCANCODE_F8;
-        case BSP_INPUT_NAVIGATION_KEY_F9:  return BSP_INPUT_SCANCODE_F9;
-        case BSP_INPUT_NAVIGATION_KEY_F10: return BSP_INPUT_SCANCODE_F10;
-        case BSP_INPUT_NAVIGATION_KEY_F11: return BSP_INPUT_SCANCODE_F11;
-        case BSP_INPUT_NAVIGATION_KEY_F12: return BSP_INPUT_SCANCODE_F12;
-        default: return 0;
-    }
-}
+// (Key-rebind capture is the engine's now — se_ui_capture_key blocks and
+// drains the queue itself, so input.c no longer has a capture mode.)
 
 void input_init(void) {
     // The engine (se_run) owns the BSP input queue and pumps it each
@@ -82,17 +55,6 @@ void input_handle_event(bsp_input_event_t const* ev) {
     switch (event.type) {
         case INPUT_EVENT_TYPE_NAVIGATION:
             if (event.args_navigation.state) {
-                if (s_capturing) {
-                    // Remap dialog open — bind an F-key if this
-                    // navigation event carries one, swallow the rest.
-                    // (The engine forwards volume / F1 here too while
-                    // capture is active, so they can be bound; F1
-                    // resolves to a scancode below, volume to 0 = no
-                    // bind.)
-                    uint16_t sc = nav_to_scancode(event.args_navigation.key);
-                    if (sc != 0 && s_captured == 0) s_captured = sc;
-                    break;
-                }
                 if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A) {
                     s_pickup_edge = true;
                 } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_UP) {
@@ -108,19 +70,6 @@ void input_handle_event(bsp_input_event_t const* ev) {
             break;
         case INPUT_EVENT_TYPE_SCANCODE: {
             uint16_t const sc = event.args_scancode.scancode;
-            if (s_capturing) {
-                // Remap dialog open — latch the first plain key press.
-                // Skip key-release events (0x80 bit set) and escaped
-                // multi-byte scancodes (0xe0xx); only single-byte
-                // presses make sensible bindings.
-                if (sc != BSP_INPUT_SCANCODE_NONE
-                    && (sc & BSP_INPUT_SCANCODE_RELEASE_MODIFIER) == 0
-                    && sc < 0xE000u
-                    && s_captured == 0) {
-                    s_captured = sc;
-                }
-                break;
-            }
             // Space (use-pickup / menu-confirm) and the Q/A debug sun
             // nudge are the queued events we care about mid-game; ENTER
             // also confirms menus; ESC and BACKSPACE are menu-cancel /
@@ -327,22 +276,4 @@ bool input_consume_godmode_toggle(void) {
     bool e          = s_godmode_edge;
     s_godmode_edge = false;
     return e;
-}
-
-void input_begin_key_capture(void) {
-    s_capturing = true;
-    s_captured  = 0;
-    // Ask the engine to forward every event (including the volume keys
-    // and F1) so the next key press can be bound rather than acted on.
-    se_input_set_passthrough(true);
-}
-
-bool input_consume_captured_key(uint16_t* out_scancode) {
-    if (!s_capturing || s_captured == 0) return false;
-    if (out_scancode) *out_scancode = s_captured;
-    s_captured  = 0;
-    s_capturing = false;
-    // Restore normal device-global key handling in the engine pump.
-    se_input_set_passthrough(false);
-    return true;
 }
