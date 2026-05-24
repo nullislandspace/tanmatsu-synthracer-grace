@@ -528,6 +528,17 @@ static void on_init(void* user) {
     // framebuffer geometry from `di`.
     backdrop_init(di.width, di.height, di.pax_format, di.reversed, di.orientation);
 
+    // Engine scene optimizations (both output-neutral — they change only
+    // draw speed, never the pixels). On-device A/B (2026-05-24) on frozen
+    // scenes showed frustum cull a strict win (obs −6% heavy, −6% light;
+    // FPS up in both), while depth order is overdraw-dependent (−3% heavy
+    // but +8% on light scenes where the per-frame sort outweighs the
+    // early-z savings). So: cull on, order off. See devdocs ER.2.
+    scene_set_options(&(se_scene_options_t){
+        .frustum_cull = true,
+        .depth_order  = false,
+    });
+
     game_init(&game);
 
     // Daily seed. Derived from today's calendar date so every run —
@@ -932,7 +943,12 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         float const cam_y = is_menu_state
                               ? RENDER_CAM_Y
                               : RENDER_CAM_Y + GAME_CAM_Y_FOLLOW * game.ship_y;
-        render_set_camera(floor_cam_x, cam_y);
+        // Eye on the z = 0 plane, looking straight down +z (zero
+        // orientation) — the engine's 6-DOF camera configured to match
+        // the original fixed pinhole exactly. z / yaw / pitch / roll are
+        // available here if the game ever wants to bank, dive or pull the
+        // eye back.
+        render_set_camera_6dof(floor_cam_x, cam_y, 0.0f, 0.0f, 0.0f, 0.0f);
         bool  const fully_shadowed   = !is_menu_state
                                        && (game.sun_y >= GAME_SUN_SINK_RANGE_PX);
         synthwave_step_base(fb, fully_shadowed);

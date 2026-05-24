@@ -682,6 +682,67 @@ call sites.
   comment in `se_scene.h` already describes it). Build green + verify clean;
   text 105144 → 105286 (+142 B scaffolding).
 
+### ER.2 — real cull/order passes + 6-DOF camera (landed 2026-05-24, engine 0.3.0)
+
+The no-op seams are now real, opt-in passes, and the camera became full 6-DOF.
+
+- [x] **6-DOF camera.** `render_camera_t` grew from `{ x, y }` to
+  `{ x, y, z, yaw, pitch, roll }`; `render_set_camera_6dof()` added,
+  `render_set_camera(x, y)` kept as the legacy shorthand. The world→camera
+  rotate+translate uses a basis (right/up/forward) cached once per `set`, so
+  the trig is per-frame and the per-vertex cost is a 3×3 multiply. At zero
+  `z`/orientation the basis is **exactly** identity, so the projection is
+  byte-for-byte the old fixed pinhole; the near-cull moved to camera space
+  (identical for the game, correct for any pose). Game migrated its one call
+  site to `render_set_camera_6dof(x, y, 0,0,0,0)` → no visual change.
+- [x] **`frustum_cull`** (`scene_cull_pass`): screen-space "all verts outside
+  one edge" reject, compacting tris/edges in place. Runs *after* projection,
+  so the screen rect is the projected frustum — respects camera pose + FOV for
+  free, and stays correct under future camera rotation. Output-neutral.
+- [x] **`depth_order`** (`scene_order_pass`): front-to-back `qsort` of tris by
+  summed-`w` (1/z) centroid for early-z. Edges unsorted (never write depth).
+  Output-neutral (the z-buffer is order-independent), so this only trades a
+  per-frame sort against saved framebuffer writes.
+- [x] **Toggle API:** one `se_scene_options_t` + `scene_set_options()` /
+  `scene_get_options()` (chosen over two per-flag setters: atomic + extensible;
+  toggling one is a get-modify-set). **Both default OFF** → `scene_render` is
+  byte-identical to 0.2.0 until a game opts in. Game has a commented switch in
+  `on_init` (currently both OFF).
+- [x] **Back-face culling stays game-side — decided, not deferred.** The engine
+  sees only anonymous projected tris; objects know their normals and already
+  cull at emit (`emit_cube`). A generic engine back-face pass would be
+  redundant *and* winding-risky, so it's explicitly out of scope (resolves the
+  ER "winding convention + per-call toggle" open question by declining it).
+- [x] Docs: `se_version.h` → 0.3.0, `CHANGELOG.md` entry, `docs/renderer.md`
+  camera + optional-passes sections, header comments. Build green + verify
+  clean; text 105326 → 106278 (+952 B: the 3×3 transform + cull/order + API).
+- [x] **On-device A/B done 2026-05-24** (frozen-scene method: pause to freeze
+  the geometry, cycle the two passes one switch at a time, read the `obs=`
+  profiler bucket — the baseline reproduced exactly before and after each
+  sweep, so the deltas are clean). Measured `obs` ms:
+
+  | scene | `cull=0 ord=0` | `cull=1 ord=0` | `cull=1 ord=1` | `cull=0 ord=1` |
+  |-------|---------------:|---------------:|---------------:|---------------:|
+  | heavy (banner signs) | 49.95 | 46.90 (−6.1%) | 45.40 (−9.1%) | 48.50 (−2.9%) |
+  | light (few objects)  | 21.82 | 20.58 (−5.7%) | 22.17 (+1.6%) | 23.48 (+7.6%) |
+
+  - **`frustum_cull`: strict win** — −6% heavy, −6% light, FPS up in both
+    (11.5→11.9, 19.0→19.5). No scene where it hurt. **Enabled** in the game's
+    `on_init`.
+  - **`depth_order`: overdraw-dependent** — its effect is additive and
+    independent of cull: ≈ −1.5 ms under heavy overdraw, ≈ +1.6 ms under light
+    (the per-frame qsort outweighs the early-z savings when there's little
+    overlap; and banner scenes are mostly *lines*, which it can't help). **Left
+    off** — kept as an available option for a future overdraw-heavy game.
+  - The strict-win config across scene types is `cull=1, ord=0`. (`cull+ord`
+    is only best in the heavy scene and slightly regresses the light one.)
+  - Note for future work: `obs` + the fixed backdrop buckets (`bgflr` ~22 ms,
+    `bgkick` ~11 ms) dominate the frame; the cull win is real but small against
+    those. The real levers for banner-heavy scenes are the line rasterizer and
+    the floor compositor, not the z-buffer passes.
+- [x] 6-DOF migration visually confirmed unchanged (identity pose; byte-for-byte
+  projection as argued).
+
 ---
 
 ## Open decisions (resolve as we reach them)
