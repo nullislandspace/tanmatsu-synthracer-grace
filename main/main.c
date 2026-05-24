@@ -38,6 +38,7 @@
 #include "save.h"
 #include "se_run.h"
 #include "se_scene.h"
+#include "se_ui.h"
 #include "sfx/sfx_crash.h"
 #include "sfx/sfx_engine_hum.h"
 #include "sfx/sfx_gong.h"
@@ -1137,26 +1138,9 @@ static void draw_main_menu(void) {
     menu_draw(&m);
 }
 
-// Settings submenu — Controls / Audio.
-static void draw_settings_menu(void) {
-    static char const* const labels[SETTINGS_ENTRY_COUNT] = {
-        [SETTINGS_ENTRY_CONTROLS] = "Controls",
-        [SETTINGS_ENTRY_AUDIO]    = "Audio",
-    };
-    menu_row_t rows[SETTINGS_ENTRY_COUNT] = {0};
-    for (int i = 0; i < SETTINGS_ENTRY_COUNT; i++) {
-        rows[i].label = labels[i];
-        rows[i].kind  = MENU_VAL_NONE;
-    }
-    menu_view_t const m = {
-        .title = "Settings", .title_h = 36.0f, .subtitle = NULL,
-        .rows = rows, .row_count = SETTINGS_ENTRY_COUNT, .row_h = 44.0f,
-        .cursor = s_settings_cursor,
-        .hint = "up / down to choose, enter to open, esc to leave",
-        .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 0.0f,
-    };
-    menu_draw(&m);
-}
+// (The Settings + Audio submenus are now rendered by the engine's se_ui
+// list-menu system directly from their APP_STATE_* cases; their bespoke
+// draw_* builders were retired when they were ported.)
 
 // Controls screen — gyro checkbox + four remappable keybinds.
 static void draw_controls_menu(void) {
@@ -1203,26 +1187,6 @@ static void draw_key_capture(void) {
     draw_left(lx, fbh * 0.56f, 22.0f, MENU_COL_NORMAL, prompt);
     draw_left(lx, fbh * 0.66f, 14.0f, MENU_COL_HINT,
               "the next key you press becomes the binding");
-}
-
-// Audio-settings screen — three checkboxes, toggled with enter / space.
-static void draw_audio_settings(void) {
-    menu_row_t const rows[AUDIO_ENTRY_COUNT] = {
-        [AUDIO_ENTRY_MUSIC] = { .label = "Music", .kind = MENU_VAL_CHECK,
-                                .checked = audio_settings_music_on() },
-        [AUDIO_ENTRY_SFX]   = { .label = "Sound effects", .kind = MENU_VAL_CHECK,
-                                .checked = audio_settings_sfx_on() },
-        [AUDIO_ENTRY_HUM]   = { .label = "Engine hum", .kind = MENU_VAL_CHECK,
-                                .checked = audio_settings_hum_on() },
-    };
-    menu_view_t const m = {
-        .title = "Audio", .title_h = 36.0f, .subtitle = NULL,
-        .rows = rows, .row_count = AUDIO_ENTRY_COUNT, .row_h = 44.0f,
-        .cursor = s_audio_cursor,
-        .hint = "up / down to choose, enter to toggle, esc to leave",
-        .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 230.0f,
-    };
-    menu_draw(&m);
 }
 
 // Seed-input screen — numeric entry, prefilled from last_custom_seed.
@@ -2610,13 +2574,35 @@ static void on_render(pax_buf_t* fb_param, void* user) {
             case APP_STATE_SETTINGS: {
                 draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
-                draw_settings_menu();
-                if (menu_nav != 0) {
-                    s_settings_cursor -= menu_nav;
-                    if (s_settings_cursor < 0)                     s_settings_cursor = 0;
-                    if (s_settings_cursor >= SETTINGS_ENTRY_COUNT)  s_settings_cursor = SETTINGS_ENTRY_COUNT - 1;
+                // Engine-rendered list menu (se_ui). The cursor lives in
+                // s_settings_cursor; we draw with it, then feed this
+                // frame's nav/confirm/cancel as engine menu actions.
+                static char const* const labels[SETTINGS_ENTRY_COUNT] = {
+                    [SETTINGS_ENTRY_CONTROLS] = "Controls",
+                    [SETTINGS_ENTRY_AUDIO]    = "Audio",
+                };
+                se_menu_row_t rows[SETTINGS_ENTRY_COUNT] = {0};
+                for (int i = 0; i < SETTINGS_ENTRY_COUNT; i++) {
+                    rows[i].label = labels[i];
+                    rows[i].kind  = SE_MENU_VAL_NONE;
                 }
-                if (pickup_pressed) {
+                se_menu_def_t const def = {
+                    .title = "Settings", .title_h = 36.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = SETTINGS_ENTRY_COUNT, .row_h = 44.0f,
+                    .hint = "up / down to choose, enter to open, esc to leave",
+                    .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 0.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_settings_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                else if (menu_esc)     res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                s_settings_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_ACTIVATED) {
                     switch (s_settings_cursor) {
                         case SETTINGS_ENTRY_CONTROLS:
                             s_controls_cursor = CONTROLS_ENTRY_GYRO;
@@ -2627,8 +2613,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                             app_state = APP_STATE_AUDIO_SETTINGS;
                             break;
                     }
-                }
-                if (menu_esc) {
+                } else if (res == SE_MENU_RESULT_BACK) {
                     // Back to wherever Settings was opened from — the
                     // main menu or the pause overlay.
                     app_state = s_settings_origin;
@@ -2682,13 +2667,33 @@ static void on_render(pax_buf_t* fb_param, void* user) {
             case APP_STATE_AUDIO_SETTINGS: {
                 draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
-                draw_audio_settings();
-                if (menu_nav != 0) {
-                    s_audio_cursor -= menu_nav;
-                    if (s_audio_cursor < 0)                   s_audio_cursor = 0;
-                    if (s_audio_cursor >= AUDIO_ENTRY_COUNT)  s_audio_cursor = AUDIO_ENTRY_COUNT - 1;
-                }
-                if (pickup_pressed) {
+                // Engine-rendered checkbox menu (se_ui). Rebuilt each
+                // frame so the [X]/[ ] states track the live toggles.
+                se_menu_row_t const rows[AUDIO_ENTRY_COUNT] = {
+                    [AUDIO_ENTRY_MUSIC] = { .label = "Music", .kind = SE_MENU_VAL_CHECK,
+                                            .checked = audio_settings_music_on() },
+                    [AUDIO_ENTRY_SFX]   = { .label = "Sound effects", .kind = SE_MENU_VAL_CHECK,
+                                            .checked = audio_settings_sfx_on() },
+                    [AUDIO_ENTRY_HUM]   = { .label = "Engine hum", .kind = SE_MENU_VAL_CHECK,
+                                            .checked = audio_settings_hum_on() },
+                };
+                se_menu_def_t const def = {
+                    .title = "Audio", .title_h = 36.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = AUDIO_ENTRY_COUNT, .row_h = 44.0f,
+                    .hint = "up / down to choose, enter to toggle, esc to leave",
+                    .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 230.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_audio_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                else if (menu_esc)     res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                s_audio_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_ACTIVATED) {
                     switch (s_audio_cursor) {
                         case AUDIO_ENTRY_MUSIC:
                             audio_settings_set_music_on(!audio_settings_music_on());
@@ -2700,8 +2705,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                             audio_settings_set_hum_on(!audio_settings_hum_on());
                             break;
                     }
-                }
-                if (menu_esc) {
+                } else if (res == SE_MENU_RESULT_BACK) {
                     app_state = APP_STATE_SETTINGS;
                 }
                 break;

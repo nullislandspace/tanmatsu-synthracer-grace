@@ -107,6 +107,45 @@
 #define SE_HW_VOLUME_STEP_PCT  5
 #endif
 
+// ---- UI / menu system (se_ui.h) -------------------------------------
+//
+// Theme colours (ARGB8888) for the list-menu renderer, and the fixed
+// layout geometry of a menu panel. All overridable per game to reskin
+// menus without touching engine code. A selected row changes colour and
+// shows a chevron in a fixed-width gutter; it never moves, so nothing
+// jumps as the cursor travels.
+#ifndef SE_UI_COL_TITLE
+#define SE_UI_COL_TITLE   0xFFFFFF6Bu   // yellow -- screen titles
+#endif
+#ifndef SE_UI_COL_HILITE
+#define SE_UI_COL_HILITE  0xFFFFFF6Bu   // yellow -- selected row
+#endif
+#ifndef SE_UI_COL_NORMAL
+#define SE_UI_COL_NORMAL  0xFFFFFFFFu   // white  -- unselected rows / body
+#endif
+#ifndef SE_UI_COL_HINT
+#define SE_UI_COL_HINT    0xFFA0A0A8u   // grey   -- footer hints
+#endif
+#ifndef SE_UI_COL_SUB
+#define SE_UI_COL_SUB     0xFF808088u   // dim    -- secondary text
+#endif
+
+#ifndef SE_UI_TEXT_INSET
+#define SE_UI_TEXT_INSET      28.0f   // panel edge -> chevron gutter
+#endif
+#ifndef SE_UI_CHEVRON_GUTTER
+#define SE_UI_CHEVRON_GUTTER  22.0f   // gutter width reserved for ">"
+#endif
+#ifndef SE_UI_TOP_PAD
+#define SE_UI_TOP_PAD         40.0f   // panel top -> title baseline
+#endif
+#ifndef SE_UI_FOOTER_PAD
+#define SE_UI_FOOTER_PAD      32.0f   // footer baseline -> panel bottom
+#endif
+#ifndef SE_UI_ROW_TEXT_H
+#define SE_UI_ROW_TEXT_H      28.0f   // row label / value font height
+#endif
+
 // ---- Renderer / pinhole-camera projection ---------------------------
 //
 // Parameters of the software 3D scene's projection (se_scene.h). World

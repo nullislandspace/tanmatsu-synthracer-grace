@@ -4123,3 +4123,51 @@
       the pump + passthrough; `se_hw` code moved out of app_obj into the engine,
       roughly net-neutral). **On-device smoke owed** (volume keys persist to
       launcher, jack hot-swap re-routes, F1 exits, rebind dialog still binds).
+    - *On-device smoke: passed (user, 2026-05-24).*
+
+- 2026-05-24 — **EF sub-step 3: `se_ui` list-menu system (per-frame core).**
+  Lifted the game's data-driven list-menu (`menu_view_t` + `menu_draw`) into
+  the engine as **`se_ui.{c,h}`**, and ported the first two menus onto it.
+    - **API.** `se_menu_def_t` (title/rows/hint/layout) + `se_menu_row_t`
+      (kinds `NONE / CHECK / TEXT / CUSTOM`) describe a menu; `se_menu_t` adds
+      the live cursor. The engine owns the cursor state machine
+      **`se_menu_input(menu, action)`** — `UP/DOWN` move+clamp (no wrap),
+      `ACTIVATE/BACK` return a result — and the renderer **`se_menu_draw(menu,
+      fb)`** (dim panel + title + subtitle + rows + footer hint). The game
+      derives `se_menu_action_t` from whatever input layer it has (RTS maps its
+      consumed menu-nav/confirm/cancel) and acts on `SE_MENU_RESULT_ACTIVATED`
+      (using `menu->cursor`) / `_BACK`. So the engine owns *nav + render*, the
+      game owns *what each row is and does*.
+    - **CUSTOM keeps game logic game-side.** A row needing bespoke value
+      drawing (the keybind icons) uses `SE_MENU_VAL_CUSTOM` + a `draw_value`
+      callback, exactly as planned — the engine never learns about scancodes
+      or icons. (Used when the Controls menu ports; the first two menus use
+      NONE/CHECK only.)
+    - **Render dependencies are engine-only:** `se_text` (vector text) +
+      `se_direct565` (panel dim). Theme `SE_UI_COL_*` + geometry `SE_UI_*` are
+      overridable `#define`s in `se_config.h` (reskin without touching engine
+      code). No game header reached.
+    - **Design choice — action-driven, not raw-event-driven.** The plan
+      sketched `se_menu_handle_event(menu, ev)` mapping raw BSP events via
+      `SE_UI_KEY_*`. But RTS's input layer already maps events → consumed
+      actions (menu_nav / pickup / cancel), so a raw-event menu API would
+      duplicate that and force another `input.c` change. Chose the
+      lower-coupling `se_menu_input(menu, action)`: the engine owns the cursor
+      *semantics*, the host feeds *actions* from whatever input it has. The
+      raw-event mapper (`se_ui_action_from_event` + `SE_UI_KEY_*`) and the
+      blocking `se_ui_run_menu` / `se_ui_capture_key` are deferred to the
+      controls/rebind round, where a blocking "press any key" capture is the
+      natural consumer.
+    - **First consumers:** the **Settings** (2 plain rows → submenus) and
+      **Audio** (3 checkboxes) cases now build an `se_menu_def_t` + `se_menu_t`,
+      draw via `se_menu_draw`, and drive the cursor via `se_menu_input`;
+      pixel- and behaviour-identical (draw-then-move ordering preserved, same
+      clamp, same dispatch). Their bespoke `draw_settings_menu` /
+      `draw_audio_settings` builders were removed. Main / Pause / Controls stay
+      on the game's `menu_draw` for now (next rounds), so `menu_draw` +
+      `menu_view_t` stay until they port.
+    - **Build:** green + `make verify` clean. text 97929→98797 (+868 B) —
+      transient duplication (the engine renderer + the not-yet-retired game
+      `menu_draw` both linked); expected to drop back when the remaining menus
+      port and `menu_draw` is deleted. **On-device smoke owed** (Settings +
+      Audio: nav, checkbox toggles, esc-back, unchanged look).

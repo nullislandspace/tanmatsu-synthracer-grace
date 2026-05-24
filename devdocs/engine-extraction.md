@@ -437,9 +437,24 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   LED brightness + jack routing is engine-owned now.** *Remaining for a later
   sub-step:* the in-game **get/set helpers** the settings menu wires rows to
   (brightness/volume adjustment UI) — added with the `se_ui` menu system.
-- [ ] `se_ui` menu system (`se_menu_t`, per-frame `handle_event`/`draw`,
-  `MENU_VAL_*` incl. `CUSTOM` callback, theme + `SE_UI_KEY_*` nav in
-  `se_config.h`) + `se_ui_run_menu` + `se_ui_capture_key`.
+- [~] `se_ui` menu system — **per-frame core done (sub-step 3, 2026-05-24).**
+  New engine module `se_ui.{c,h}`: `se_menu_def_t` / `se_menu_row_t` /
+  `se_menu_t` (lifted from the game's `menu_view_t`/`menu_draw`), the cursor
+  state machine **`se_menu_input(menu, action)`** (UP/DOWN clamp + ACTIVATE/
+  BACK results), and **`se_menu_draw(menu, fb)`** (dim panel + title + rows +
+  hint, via `se_text` + `se_direct565` only — no game dep). Row kinds
+  `NONE / CHECK / TEXT / CUSTOM` (CUSTOM = a game `draw_value` callback, so the
+  keybind→icon logic stays game-side). Theme `SE_UI_COL_*` + geometry `SE_UI_*`
+  in `se_config.h`. The game maps its consumed menu-nav/confirm/cancel onto
+  `se_menu_action_t` and acts on the result. **Ported the Settings + Audio
+  submenus** onto it as the first consumers (behaviour + pixels identical);
+  their bespoke builders retired. *Remaining:* the blocking convenience
+  **`se_ui_run_menu`** + **`se_ui_capture_key`** + the raw-event→action mapper
+  (`se_ui_action_from_event` / `SE_UI_KEY_*`) — added with the controls/rebind
+  port, where a blocking capture is actually needed. Build green + verify;
+  text 97929→98797 (+868 B = transient duplication: the engine renderer + the
+  game's not-yet-ported `menu_draw` both linked; resolves when Main/Pause/
+  Controls port over and `menu_draw` is deleted).
 - [ ] **Input bindings subsystem** (`se_bindings_*`): game declares controls
   + defaults + NVS namespace; engine owns load/persist + `get`/`set` + the
   remap dialog. Absorbs `controls_settings.c` + the controls menu +
