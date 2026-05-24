@@ -26,6 +26,7 @@
 #include "audio_settings.h"
 #include "controls_settings.h"
 #include "game.h"
+#include "game_ui.h"
 #include "hal/lcd_types.h"
 #include "icons.h"
 #include "input.h"
@@ -115,12 +116,10 @@ static char const TAG[] = "racethesynth";
 // double-buffer swap are owned by the engine's run loop (se_run) now.
 static size_t                       display_h_res        = 0;
 static size_t                       display_v_res        = 0;
-// Current frame's back buffer. The engine owns the two framebuffers and
-// hands the live one to the draw callbacks each frame; on_backdrop /
-// on_render mirror that pointer into this file-scope `fb` so the many
-// in-file draw helpers and the PPA submits can keep referring to `fb`
-// exactly as before the framework migration.
-static pax_buf_t*                   fb                   = NULL;
+// The `fb` framebuffer bridge + the shared draw primitives + menu
+// palette/geometry now live in game_ui.{c,h} (shared with the hud /
+// screens / keybind_ui modules). on_backdrop / on_render set `fb` to the
+// engine's live back buffer each frame.
 
 // Pre-rendered backdrop layers, split into two PPA-driven caches so
 // the sun can move independently of the mountains. The per-frame
@@ -529,27 +528,9 @@ static void ppa_wait_one(void) {
 
 // ---- Menu / dialog rendering --------------------------------------
 //
-// All menus and dialogs are left-aligned. The selection highlight is
-// colour only (yellow): a selected row never changes font size and
-// never shifts position, so nothing jumps as the cursor moves.
-#define MENU_COL_TITLE  0xFFFFFF6Bu   // yellow — screen titles
-#define MENU_COL_HILITE 0xFFFFFF6Bu   // yellow — selected row
-#define MENU_COL_NORMAL 0xFFFFFFFFu   // white  — unselected rows / body
-#define MENU_COL_HINT   0xFFA0A0A8u   // grey   — footer hints
-#define MENU_COL_SUB    0xFF808088u   // dim    — secondary text
-
-// Left content x for a panel centred at width fraction `w_frac`: the
-// panel's left edge plus a fixed text inset.
-static float menu_left_x(float w_frac) {
-    float const fbw = pax_buf_get_widthf(fb);
-    return (fbw - fbw * w_frac) * 0.5f + 28.0f;
-}
-
-// Left-aligned text draw — thin wrapper kept for symmetry with the
-// rest of the menu code (every menu draws its rows through this).
-static void draw_left(float x, float y, float h, pax_col_t color, char const* text) {
-    rendertext_draw(fb, color, NULL, h, x, y, text);
-}
+// The menu palette (MENU_COL_*), the hand-laid screen geometry
+// (MENU_TEXT_INSET etc.), and the shared primitives menu_left_x /
+// draw_left / draw_menu_panel_size / draw_chevron live in game_ui.{c,h}.
 
 // Map a scancode to a key icon, or -1 if none exists. icons.c loads
 // PNGs for Esc and F1..F6 (see icon_filenames[] in icons.c); those
@@ -708,18 +689,6 @@ static uint8_t pct_step(uint8_t cur, int delta) {
     if (n > 100) n = 100;
     return (uint8_t)n;
 }
-
-// ---- Menu / dialog layout shared with the bespoke screens ----------
-//
-// The list menus all moved to the engine's se_ui renderer; these
-// geometry constants remain because the hand-laid screens that are NOT
-// vertical lists (slot-select, seed entry, stats, credits, the "press a
-// key" modal) still position their text with them. The selection chevron
-// (draw_chevron) is likewise shared with those screens.
-#define MENU_TEXT_INSET     28.0f   // panel edge → chevron gutter
-#define MENU_CHEVRON_GUTTER 22.0f   // gutter width reserved for ">"
-#define MENU_TOP_PAD        40.0f   // panel top → title baseline
-#define MENU_FOOTER_PAD     32.0f   // footer baseline → panel bottom
 
 // Top-right readout stack. Slot 0 = score, slot 1 = stage, slot 2 = v,
 // slot 3 = sun. Each line is `text_h + 4` px below the previous.
@@ -895,29 +864,6 @@ static void draw_pause_hint(void) {
         char const* fallback = "F4 to pause";
         rendertext_draw(fb, 0xFFFFFFFF, NULL, prompt_h, x_margin, y, fallback);
     }
-}
-
-// Translucent dim panel behind menu text. Centred rectangle sized by
-// the caller — leaves a synthwave border at the edges so the menu
-// still reads as overlaid on the live scene rather than a context
-// switch. Each menu's draw_*() picks dimensions sized to its text
-// extents (footer hint baseline + title baseline + line spacing).
-static void draw_menu_panel_size(float w_frac, float h_frac) {
-    float const fbw = pax_buf_get_widthf(fb);
-    float const fbh = pax_buf_get_heightf(fb);
-    int   const pw  = (int)(fbw * w_frac);
-    int   const ph  = (int)(fbh * h_frac);
-    int   const px  = (int)((fbw - (float)pw) * 0.5f);
-    int   const py  = (int)((fbh - (float)ph) * 0.5f);
-    uint16_t* const pixels = (uint16_t*)pax_buf_get_pixels(fb);
-    direct_565_dim_rect(pixels, fb->reverse_endianness, px, py, pw, ph);
-}
-
-// Selection chevron, painted into the row's left gutter as a step
-// separate from the label so the label never moves. Shared with the
-// bespoke (non-list) screens; the list menus draw their own chevron.
-static void draw_chevron(float x, float y, float text_h) {
-    draw_left(x, y, text_h, MENU_COL_HILITE, ">");
 }
 
 // (menu_draw retired: every list menu now renders through the engine's

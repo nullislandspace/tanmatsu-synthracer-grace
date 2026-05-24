@@ -10,6 +10,7 @@ project(app C)
 # App source files — add your .c files here
 set(APP_SOURCES
     main/main.c
+    main/game_ui.c
     main/crt0.c
     main/synthwave.c
     main/icons.c
