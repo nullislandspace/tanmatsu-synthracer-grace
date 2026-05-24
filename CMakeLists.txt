@@ -13,6 +13,7 @@ set(APP_SOURCES
     main/game_ui.c
     main/keybind_ui.c
     main/backdrop.c
+    main/hud.c
     main/crt0.c
     main/synthwave.c
     main/icons.c
