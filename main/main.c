@@ -1581,13 +1581,15 @@ static void commit_run_end(game_state_t const* g, world_state_t const* w, bool h
 }
 
 // ---------------------------------------------------------------------
-//  Application framework wiring (EF, sub-step 1).
+//  Application framework wiring (EF).
 //
-//  The engine (se_run) now owns the device + display bootstrap, the two
-//  framebuffers, vsync/blit, the buffer swap and the per-frame delta
-//  time. The game is the four callbacks below plus its content. State the
-//  old monolithic app_main kept as loop locals is promoted to file scope
-//  here so the callbacks share it.
+//  The engine (se_run) owns the device + display bootstrap, the two
+//  framebuffers, the input-queue pump + device-global keys (volume /
+//  audio-jack / F1-exit), vsync/blit, the buffer swap and the per-frame
+//  delta time. The game is the callbacks below plus its content; events
+//  the pump doesn't consume arrive via on_input → input_handle_event.
+//  State the old monolithic app_main kept as loop locals is promoted to
+//  file scope here so the callbacks share it.
 // ---------------------------------------------------------------------
 
 // Game + world simulation state. ~5 KB at the current pool size; static
@@ -1619,10 +1621,11 @@ static float const   title_scroll_speed = 6.0f;
 static float         s_frame_dt = 0.0f;
 
 // ---- Per-frame input snapshot ---------------------------------------
-// The input pump is still game-side this sub-step: on_update drains the
-// queue and consumes every one-shot into these statics, so the physics
-// pass (on_update) and the render switch (on_render) read one consistent
-// snapshot for the frame. (The pump + global keys move into se_run next.)
+// The engine's input pump drains the BSP queue each frame (before
+// on_update) and forwards the events it doesn't consume to on_input →
+// input_handle_event, which latches them. on_update then consumes every
+// one-shot into these statics, so the physics pass (on_update) and the
+// render switch (on_render) read one consistent snapshot for the frame.
 static bool  s_in_pickup      = false;
 static float s_in_steer       = 0.0f;
 static bool  s_in_steer_left  = false;

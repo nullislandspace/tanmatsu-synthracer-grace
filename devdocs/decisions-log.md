@@ -4330,4 +4330,32 @@
       smoke owed** (each brightness slider visibly changes the hardware + survives
       exit-to-launcher; volume slider tracks the volume keys + the audio-jack
       swap; screen brightness can't be driven to black; sliders reachable from
-      both the main menu and the pause menu).
+      both the main menu and the pause menu). *(Smoke passed 2026-05-24.)*
+- 2026-05-24 — **EF wrap — capstone phase code-complete.** All EF sub-steps
+  (run loop · input pump + device-global keys · `se_ui` menu system · all six
+  list menus ported + bespoke `menu_draw` deleted · `se_bindings` + engine-
+  rendered Controls + blocking rebind capture · brightness/volume sliders ·
+  `on_backdrop` hook) are landed, each smoke-tested on device as it shipped.
+    - **Final size accounting.** text **96546→101496 (+4950 vs the E0 baseline)**,
+      dec 363674→368956. The growth is *added framework + new functionality*,
+      not a codegen regression of moved code: the `se_run` loop/pump, `se_hw`,
+      the `se_ui` menu system, `se_bindings`, the blocking rebind dialog, and the
+      brightness/volume adjustment UI — the last two are **features that didn't
+      exist before EF** (the old build had no in-game rebind and deferred
+      brightness UI entirely) — minus the deleted bespoke loop/menus/capture.
+    - **Performance contract intact.** The contract is "hot inline leaves stay
+      inline", not "total size unchanged". EF moved no hot leaf — `se_direct565`
+      / `se_text` were settled at E1/E4 and stayed inline; EF's additions
+      (menu/settings/bindings) all run on menu-state transitions, off the
+      gameplay render path. So the +4950 B is expected and benign.
+    - **Boundary reconfirmed clean.** No engine source/header includes a game
+      header (only `bsp/*`/IDF); no game file references a deleted symbol
+      (`menu_draw` / `menu_view_t` / `APP_STATE_KEY_CAPTURE` /
+      `se_input_set_passthrough`). Swept the last transitional "sub-step N /
+      moves into se_run next" comments out of `main.c` + `se_run.c` so the
+      source reads as the finished design, not a migration diary.
+    - **The one owed item is the user's final full playthrough + on-device FPS
+      reconfirm** vs the ~28.3 baseline (predicted unchanged for the reason
+      above). Next up after sign-off: **E8** (component docs — README / CHANGELOG
+      / docs / examples), then **E9** (final verify + playthrough) and **ER**
+      (deferred render-pipeline pivot); **E2.1** (procedural-music config) parked.

@@ -268,7 +268,7 @@ engine clears to black by default, or calls the game's registered
 `on_backdrop(fb)` (Race the Synth draws its synthwave there). The synthwave
 shapes/PPA code stay game-side, invoked from that hook. See EF.
 
-### EF — Application framework / run loop (inversion of control)  ⬅ the capstone
+### EF — Application framework / run loop (inversion of control)  ⬅ the capstone — ✅ code-complete 2026-05-24 (final on-device playthrough/FPS owed)
 
 > Added 2026-05-24. The deliberate pivot from "engine = toolkit the game
 > calls" to "engine = framework that runs the app and calls the game"
@@ -277,6 +277,15 @@ shapes/PPA code stay game-side, invoked from that hook. See EF.
 > the `se_run` / callback API is designed and signed off **before** any code
 > moves (same discipline as the E3 save API). Subsumes E6 (menu system) and
 > E7 (backdrop hook).
+>
+> **Status:** all sub-steps landed across 2026-05-24 (run loop 1 · input pump
+> + device-global keys 2 · `se_ui` menu system 3 / 4b-i · `se_bindings` +
+> engine-rendered Controls + blocking rebind capture 4a / 4b-i / 4b-ii ·
+> brightness/volume sliders 4b-iii · `on_backdrop` hook). Each was smoke-tested
+> on device as it landed (1–4b-iii: passed). **Wrap (final size + boundary)
+> done; the one remaining item is the user's final full-playthrough + FPS
+> reconfirm vs the E0 baseline** — see the wrap entry in
+> [decisions-log.md](decisions-log.md) (2026-05-24).
 
 **What the engine owns** (the run loop): BSP/device + display + audio
 bootstrap; the framebuffer + double-buffer + tearing-effect/vsync blit; the
@@ -508,7 +517,24 @@ the bespoke menu states from `main.c`. On-device smoke after each.
 - [x] `on_backdrop` hook; synthwave invoked from it — **done in sub-step 1**
   (the engine clears to `backdrop_argb` or calls the game's `on_backdrop`,
   which draws the synthwave PPA composite + floor).
-- [ ] Build + verify + on-device smoke at each sub-step; final FPS vs baseline.
+- [~] Build + verify + on-device smoke at each sub-step; final FPS vs baseline.
+  **Wrap (2026-05-24):** build green + `make verify` clean at every sub-step;
+  sub-steps 1–4b-iii smoke-tested on device (passed). **Final size: text
+  96546→101496 (+4950 vs the E0 baseline), dec 363674→368956.** That growth is
+  *added framework + functionality*, not codegen regression of moved code: the
+  `se_run` loop/pump, `se_hw`, the `se_ui` menu system, `se_bindings`, the
+  blocking rebind dialog, and the brightness/volume adjustment UI (the last two
+  are *new* in-game features that didn't exist before EF), minus the deleted
+  bespoke loop/menus/capture. The performance contract is about hot inline
+  leaves, not total size — those (`se_direct565`/`se_text`) were unchanged by EF
+  and stayed inline (confirmed at E1/E4). **Boundary reconfirmed clean:** no
+  engine source/header includes a game header (only `bsp/*`), no game file
+  references a deleted symbol (`menu_draw`/`APP_STATE_KEY_CAPTURE`/
+  `se_input_set_passthrough`). Transitional sub-step comments swept from
+  `main.c` + `se_run.c`. **Owed:** the user's final full-playthrough smoke + the
+  on-device FPS reconfirm vs the ~28.3 baseline (predicted unchanged — the per-
+  frame render path is the same inline leaves; EF added only menu-state code
+  that runs off the gameplay hot path).
 
 ---
 

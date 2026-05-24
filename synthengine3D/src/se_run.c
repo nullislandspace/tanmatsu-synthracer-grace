@@ -4,16 +4,15 @@
 //  Implements the inversion-of-control entry point declared in
 //  include/se_run.h. The engine owns the device bootstrap (NVS, BSP,
 //  display, double-buffered framebuffers, the 3D scene buffers, the
-//  audio mixer, the vsync/tearing-effect semaphore) and the per-frame
-//  loop (delta-time, callback dispatch, default backdrop clear, blit at
-//  vsync, buffer swap). The game plugs in via se_app_callbacks_t.
-//
-//  STATUS (EF, staged migration): this is sub-step 1 -- the engine now
-//  owns the loop, the framebuffers, blit and vsync. The input-queue pump
-//  and the device-global keys (volume +/-, audio-jack, F1-exit) are NOT
-//  yet consumed here; the game still drains input inside on_update. That
-//  moves into se_run in the next sub-step, at which point on_input and
-//  cfg.f1_exits become live. See ../devdocs/engine-extraction.md (EF).
+//  audio mixer, the vsync/tearing-effect semaphore), the per-frame loop
+//  (delta-time, callback dispatch, default backdrop clear, blit at
+//  vsync, buffer swap), the input-queue pump and the device-global keys
+//  (volume +/-, audio-jack re-route, F1-exit when cfg.f1_exits), and the
+//  blocking se_ui_capture_key rebind modal (it needs the loop's frame
+//  primitives, so it lives here though declared in se_ui.h). Events the
+//  pump does not consume are forwarded to the game's on_input callback.
+//  The game plugs in via se_app_callbacks_t. See
+//  ../devdocs/engine-extraction.md (EF) for the migration history.
 // =====================================================================
 
 #include "se_run.h"
