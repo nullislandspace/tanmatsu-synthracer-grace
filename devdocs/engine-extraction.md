@@ -416,12 +416,27 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   `fgrest` should be unchanged on-device). **F1-exit + the input pump stay
   game-side this sub-step** (`cfg.f1_exits=false`); they move next.
   *(On-device smoke owed: full render/audio/menus/playthrough.)*
-- [ ] Input-queue pump in the engine; consume **only** volume ± + audio-jack
-  (+ F1-exit if `f1_exits`); forward everything else to `on_input`. Power
-  button + F2/F3 left untouched.
-- [ ] Device-global settings API (shared `"system"` NVS, load-at-boot + apply
-  + persist): speaker/hp volume, screen brightness, keyboard backlight, LED
-  brightness — get/set helpers the settings menu wires rows to.
+- [x] Input-queue pump in the engine — **sub-step 2 implemented 2026-05-24.**
+  `se_run` now owns the BSP input queue (acquired in bootstrap) and drains it
+  each frame before `on_update`: it consumes the audio-jack action (always),
+  the volume ± keys (→ `se_hw_step_volume`, step `SE_HW_VOLUME_STEP_PCT`), and
+  F1 (→ launcher, since `cfg.f1_exits=true` now) — and forwards every other
+  event to **`on_input`**, which `main.c` routes into `input_handle_event`.
+  `input.c` lost queue ownership: `input_drain_events()` → `input_handle_event
+  (const bsp_input_event_t*)` (the per-event switch, minus the engine-owned
+  F1/volume/jack), and it keeps only the accelerometer enable + the polled
+  steering. Power button + F2/F3 untouched. A transitional
+  **`se_input_set_passthrough(bool)`** lets the game's rebind capture forward
+  volume/F1 raw (so they can be bound) — it folds away once the rebind dialog
+  is engine-owned. Build green + verify clean; text 97822→97929 (+107 B).
+- [x] Device-global settings — **partly done (sub-step 2).** `hw_settings.{c,h}`
+  moved into the engine as **`se_hw.{c,h}`** (public `se_hw_init` /
+  `se_hw_step_volume` / `se_hw_on_jack_event`); `se_run` bootstrap calls
+  `se_hw_init()` after `audio_mixer_init()`, and the pump drives volume/jack.
+  So **load-at-boot + apply + persist for speaker/hp volume + screen/keyboard/
+  LED brightness + jack routing is engine-owned now.** *Remaining for a later
+  sub-step:* the in-game **get/set helpers** the settings menu wires rows to
+  (brightness/volume adjustment UI) — added with the `se_ui` menu system.
 - [ ] `se_ui` menu system (`se_menu_t`, per-frame `handle_event`/`draw`,
   `MENU_VAL_*` incl. `CUSTOM` callback, theme + `SE_UI_KEY_*` nav in
   `se_config.h`) + `se_ui_run_menu` + `se_ui_capture_key`.

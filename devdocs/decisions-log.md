@@ -4080,3 +4080,46 @@
       regression: the `static inline` rasterizer/DSP leaves are untouched and
       the per-frame work is the same code, so the perf contract holds (confirm
       `fgrest` unchanged on the next on-device flash). **On-device smoke owed.**
+    - *On-device smoke: passed (user, 2026-05-24) — boots/plays normally.*
+
+- 2026-05-24 — **EF sub-step 2: input pump + device-global keys → the engine.**
+  Moved the BSP input-queue pump and the device-global hardware settings into
+  `se_run`, completing the "engine owns the loop *and* its input" half of EF.
+    - **`hw_settings.{c,h}` → engine `se_hw.{c,h}`** (functions `hw_settings_*`
+      → `se_hw_*`). It was already game-agnostic (only `bsp/*` + the upstream
+      `nvs_settings_*` shared-NVS helpers), so it's a clean relocation — it
+      maps exactly onto the EF "device-global settings the engine owns"
+      (speaker/hp volume with jack-selected active output, + display/keyboard/
+      LED brightness). `se_run`'s bootstrap calls `se_hw_init()` right after
+      `audio_mixer_init()` (preserving the "overlay persisted volume on the
+      mixer's raw-jack amp default" ordering). The vestigial `VOLUME_STEP_PCT`
+      + its `_Static_assert` were dropped; the pump's step is the overridable
+      `SE_HW_VOLUME_STEP_PCT` in `se_config.h` (default 5).
+    - **Input-queue pump in `se_run`.** Bootstrap acquires the queue
+      (`bsp_input_get_queue`); each frame, *before* `on_update`,
+      `se_pump_input` drains it. It consumes the **audio-jack** action
+      (always — pure device routing, never bindable), the **volume ±** keys
+      (→ `se_hw_step_volume`), and **F1** (→ `audio_mixer_shutdown` +
+      `bsp_device_restart_to_launcher`, since `cfg.f1_exits=true`). Everything
+      else is forwarded to the new **`on_input(ev,user)`** callback. The
+      **power button** and **F2/F3** are deliberately never touched.
+    - **`input.c` lost queue ownership.** `input_drain_events()` (which owned
+      `bsp_input_get_queue` + the drain loop, and handled F1/volume/jack)
+      became `input_handle_event(const bsp_input_event_t*)` — the per-event
+      switch minus the now-engine-owned keys. `main.c`'s `on_input` routes the
+      engine's forwarded events into it; `input.c` keeps only the accelerometer
+      enable + the polled steering. F1 handling left `on_update` entirely.
+    - **Rebind-capture seam.** During a "press any key" capture the volume keys
+      + F1 must reach the game so they can be *bound*, not acted on. Added a
+      transitional **`se_input_set_passthrough(bool)`**: `input_begin_key_
+      capture()` turns it on, `input_consume_captured_key()` turns it off; while
+      on, the pump forwards volume/F1 raw (jack is still consumed — it's never
+      a bindable key). This preserves the original "bind F1 works, volume is
+      swallowed during capture" behaviour exactly, and folds away once the
+      rebind dialog is engine-owned (`se_ui_capture_key`, a later sub-step).
+    - **Behaviour-identical:** press/release handling, the consume-then-snapshot
+      timing, jack-during-capture, and bind-to-F1 all match the pre-migration
+      `input.c`. Build green + `make verify` clean; text 97822→97929 (+107 B:
+      the pump + passthrough; `se_hw` code moved out of app_obj into the engine,
+      roughly net-neutral). **On-device smoke owed** (volume keys persist to
+      launcher, jack hot-swap re-routes, F1 exits, rebind dialog still binds).

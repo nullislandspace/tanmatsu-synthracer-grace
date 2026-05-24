@@ -100,6 +100,13 @@
 #define SE_FRAME_DT_MAX  0.1f
 #endif
 
+// Percentage step applied to the active output's volume when se_run's
+// input pump sees a VOLUME_UP / VOLUME_DOWN key (matches the launcher's
+// 5%% increment). Override per game if a finer/coarser step is wanted.
+#ifndef SE_HW_VOLUME_STEP_PCT
+#define SE_HW_VOLUME_STEP_PCT  5
+#endif
+
 // ---- Renderer / pinhole-camera projection ---------------------------
 //
 // Parameters of the software 3D scene's projection (se_scene.h). World

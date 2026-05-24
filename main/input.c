@@ -6,17 +6,11 @@
 #include "controls_settings.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "graceloader_imu.h"
-#include "hw_settings.h"
-
-// Volume keys step in 5% increments — matches the launcher and the
-// volume_howto.md guidance.
-#define INPUT_VOLUME_STEP_PERCENT 5
+#include "se_run.h"          // se_input_set_passthrough (rebind capture)
 
 static char const TAG[] = "input";
 
-static QueueHandle_t s_event_queue   = NULL;
 static input_mode_t  s_mode          = INPUT_MODE_TITLE;
 static bool          s_pickup_edge   = false;
 static int           s_speed_delta   = 0;
@@ -59,12 +53,11 @@ static uint16_t nav_to_scancode(bsp_input_navigation_key_t key) {
 }
 
 void input_init(void) {
-    esp_err_t res = bsp_input_get_queue(&s_event_queue);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "bsp_input_get_queue failed: %d", res);
-        s_event_queue = NULL;
-    }
-
+    // The engine (se_run) owns the BSP input queue and pumps it each
+    // frame, forwarding the events it doesn't consume to our
+    // input_handle_event() below. We only bring up the accelerometer
+    // here for optional tilt ("gyroscope") steering.
+    //
     // Bring up the accelerometer for optional tilt ("gyroscope")
     // steering. The BMI270 is already initialized by
     // bsp_device_initialize() (called in main()); we only enable the
@@ -81,117 +74,98 @@ void input_set_mode(input_mode_t mode) {
     s_mode = mode;
 }
 
-bool input_drain_events(void) {
-    bool exit_requested = false;
-    if (s_event_queue == NULL) return false;
+void input_handle_event(bsp_input_event_t const* ev) {
+    if (ev == NULL) return;
+    bsp_input_event_t const event = *ev;
 
-    bsp_input_event_t event;
-    while (xQueueReceive(s_event_queue, &event, 0) == pdTRUE) {
-        switch (event.type) {
-            case INPUT_EVENT_TYPE_NAVIGATION:
-                if (event.args_navigation.state) {
-                    if (s_capturing) {
-                        // Remap dialog open — bind an F-key if this
-                        // navigation event carries one, swallow the
-                        // rest (no exit / nav / volume side effects).
-                        uint16_t sc = nav_to_scancode(event.args_navigation.key);
-                        if (sc != 0 && s_captured == 0) s_captured = sc;
-                        break;
-                    }
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
-                        exit_requested = true;
-                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A) {
-                        s_pickup_edge = true;
-                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_UP) {
-                        s_speed_delta += 1;
-                        s_menu_nav     = +1;
-                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
-                        s_speed_delta -= 1;
-                        s_menu_nav     = -1;
-                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_VOLUME_UP) {
-                        // Master volume — read/write goes straight to
-                        // the launcher-shared NVS via hw_settings.
-                        // No latch + main-loop poll because volume is
-                        // system housekeeping, not gameplay input.
-                        hw_settings_step_volume(+INPUT_VOLUME_STEP_PERCENT);
-                    } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN) {
-                        hw_settings_step_volume(-INPUT_VOLUME_STEP_PERCENT);
-                    }
-                }
-                break;
-            case INPUT_EVENT_TYPE_ACTION:
-                if (event.args_action.type == BSP_INPUT_ACTION_TYPE_AUDIO_JACK) {
-                    // event.args_action.state == true → jack inserted
-                    // → switch the codec to the headphone volume and
-                    // mute the speaker amp.
-                    hw_settings_on_jack_event(event.args_action.state);
-                }
-                break;
-            case INPUT_EVENT_TYPE_SCANCODE: {
-                uint16_t const sc = event.args_scancode.scancode;
+    switch (event.type) {
+        case INPUT_EVENT_TYPE_NAVIGATION:
+            if (event.args_navigation.state) {
                 if (s_capturing) {
-                    // Remap dialog open — latch the first plain key
-                    // press. Skip key-release events (0x80 bit set)
-                    // and escaped multi-byte scancodes (0xe0xx); only
-                    // single-byte presses make sensible bindings.
-                    if (sc != BSP_INPUT_SCANCODE_NONE
-                        && (sc & BSP_INPUT_SCANCODE_RELEASE_MODIFIER) == 0
-                        && sc < 0xE000u
-                        && s_captured == 0) {
-                        s_captured = sc;
-                    }
+                    // Remap dialog open — bind an F-key if this
+                    // navigation event carries one, swallow the rest.
+                    // (The engine forwards volume / F1 here too while
+                    // capture is active, so they can be bound; F1
+                    // resolves to a scancode below, volume to 0 = no
+                    // bind.)
+                    uint16_t sc = nav_to_scancode(event.args_navigation.key);
+                    if (sc != 0 && s_captured == 0) s_captured = sc;
                     break;
                 }
-                // Space (use-pickup / menu-confirm) and the Q/A debug
-                // sun nudge are the queued events we care about
-                // mid-game; ENTER also confirms menus; ESC and
-                // BACKSPACE are menu-cancel / digit-edit when we're
-                // not steering. Steering keys come in through the
-                // polled API.
-                if (sc == BSP_INPUT_SCANCODE_SPACE) {
+                if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A) {
                     s_pickup_edge = true;
-                } else if (sc == BSP_INPUT_SCANCODE_ENTER) {
-                    s_pickup_edge = true;
-                } else if (sc == BSP_INPUT_SCANCODE_ESC) {
-                    if (s_mode != INPUT_MODE_PLAYING) {
-                        s_menu_cancel = true;
-                    }
-                } else if (sc == BSP_INPUT_SCANCODE_BACKSPACE) {
-                    if (s_mode != INPUT_MODE_PLAYING) {
-                        s_backspace = true;
-                    }
-                } else if (sc == BSP_INPUT_SCANCODE_Q) {
-                    s_sun_delta += 1;     // push sun toward sunset
-                } else if (sc == BSP_INPUT_SCANCODE_A) {
-                    s_sun_delta -= 1;     // push sun back toward zenith
-                } else if (sc == BSP_INPUT_SCANCODE_TAB) {
-                    s_force_area = true;  // debug: force next area type
-                } else if (sc == BSP_INPUT_SCANCODE_G) {
-                    s_godmode_edge = true;  // debug: toggle godmode
+                } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_UP) {
+                    s_speed_delta += 1;
+                    s_menu_nav     = +1;
+                } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
+                    s_speed_delta -= 1;
+                    s_menu_nav     = -1;
                 }
-                // Pause is a remappable bind (default F4) — checked
-                // independently of the chain above so a player who
-                // binds pause onto an already-meaningful key still
-                // gets both behaviours.
-                if (sc == controls_settings_key(CONTROL_KEY_PAUSE)) {
-                    s_pause_toggle = true;
+                // F1-exit and the volume keys are consumed by the engine
+                // (se_run's input pump) and never arrive here.
+            }
+            break;
+        case INPUT_EVENT_TYPE_SCANCODE: {
+            uint16_t const sc = event.args_scancode.scancode;
+            if (s_capturing) {
+                // Remap dialog open — latch the first plain key press.
+                // Skip key-release events (0x80 bit set) and escaped
+                // multi-byte scancodes (0xe0xx); only single-byte
+                // presses make sensible bindings.
+                if (sc != BSP_INPUT_SCANCODE_NONE
+                    && (sc & BSP_INPUT_SCANCODE_RELEASE_MODIFIER) == 0
+                    && sc < 0xE000u
+                    && s_captured == 0) {
+                    s_captured = sc;
                 }
                 break;
             }
-            case INPUT_EVENT_TYPE_KEYBOARD:
-                if (s_mode == INPUT_MODE_MENU_SEED) {
-                    char c = event.args_keyboard.ascii;
-                    if (c >= '0' && c <= '9') {
-                        s_digit = c - '0';
-                    }
+            // Space (use-pickup / menu-confirm) and the Q/A debug sun
+            // nudge are the queued events we care about mid-game; ENTER
+            // also confirms menus; ESC and BACKSPACE are menu-cancel /
+            // digit-edit when we're not steering. Steering keys come in
+            // through the polled API.
+            if (sc == BSP_INPUT_SCANCODE_SPACE) {
+                s_pickup_edge = true;
+            } else if (sc == BSP_INPUT_SCANCODE_ENTER) {
+                s_pickup_edge = true;
+            } else if (sc == BSP_INPUT_SCANCODE_ESC) {
+                if (s_mode != INPUT_MODE_PLAYING) {
+                    s_menu_cancel = true;
                 }
-                break;
-            default:
-                break;
+            } else if (sc == BSP_INPUT_SCANCODE_BACKSPACE) {
+                if (s_mode != INPUT_MODE_PLAYING) {
+                    s_backspace = true;
+                }
+            } else if (sc == BSP_INPUT_SCANCODE_Q) {
+                s_sun_delta += 1;     // push sun toward sunset
+            } else if (sc == BSP_INPUT_SCANCODE_A) {
+                s_sun_delta -= 1;     // push sun back toward zenith
+            } else if (sc == BSP_INPUT_SCANCODE_TAB) {
+                s_force_area = true;  // debug: force next area type
+            } else if (sc == BSP_INPUT_SCANCODE_G) {
+                s_godmode_edge = true;  // debug: toggle godmode
+            }
+            // Pause is a remappable bind (default F4) — checked
+            // independently of the chain above so a player who binds
+            // pause onto an already-meaningful key still gets both
+            // behaviours.
+            if (sc == controls_settings_key(CONTROL_KEY_PAUSE)) {
+                s_pause_toggle = true;
+            }
+            break;
         }
+        case INPUT_EVENT_TYPE_KEYBOARD:
+            if (s_mode == INPUT_MODE_MENU_SEED) {
+                char c = event.args_keyboard.ascii;
+                if (c >= '0' && c <= '9') {
+                    s_digit = c - '0';
+                }
+            }
+            break;
+        default:
+            break;
     }
-
-    return exit_requested;
 }
 
 static bool poll_nav(bsp_input_navigation_key_t key) {
@@ -357,6 +331,9 @@ bool input_consume_godmode_toggle(void) {
 void input_begin_key_capture(void) {
     s_capturing = true;
     s_captured  = 0;
+    // Ask the engine to forward every event (including the volume keys
+    // and F1) so the next key press can be bound rather than acted on.
+    se_input_set_passthrough(true);
 }
 
 bool input_consume_captured_key(uint16_t* out_scancode) {
@@ -364,5 +341,7 @@ bool input_consume_captured_key(uint16_t* out_scancode) {
     if (out_scancode) *out_scancode = s_captured;
     s_captured  = 0;
     s_capturing = false;
+    // Restore normal device-global key handling in the engine pump.
+    se_input_set_passthrough(false);
     return true;
 }

@@ -24,6 +24,7 @@
 #include "se_save.h"            // E3  -- file-backed save-slot framework
 #include "se_scene.h"           // E4  -- 3D scene renderer + camera + projection
 #include "se_run.h"             // EF  -- application framework / run loop (API; impl staged in)
+#include "se_hw.h"              // EF  -- device-global hardware settings (volume/brightness)
 
 // Subsystem public headers added as the framework lands (EF):
 //   #include "se_ui.h"          // EF -- menu system (se_menu_t, run_menu, capture_key)

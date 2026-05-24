@@ -18,12 +18,14 @@
 
 #include "se_run.h"
 
-#include "se_config.h"   // SE_FRAME_DT_MAX
-#include "se_audio.h"    // audio_mixer_init
+#include "se_config.h"   // SE_FRAME_DT_MAX, SE_HW_VOLUME_STEP_PCT
+#include "se_audio.h"    // audio_mixer_init, audio_mixer_shutdown
+#include "se_hw.h"       // se_hw_init, se_hw_step_volume, se_hw_on_jack_event
 #include "se_scene.h"    // scene_init
 
 #include "bsp/device.h"
 #include "bsp/display.h"
+#include "bsp/input.h"   // bsp_input_get_queue, event/key enums
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -53,12 +55,72 @@ static SemaphoreHandle_t  s_vsync_sem  = NULL;
 // frame and falls out (firing on_shutdown) when set.
 static volatile bool      s_exit_requested = false;
 
+// ---- Input pump state -----------------------------------------------
+static QueueHandle_t      s_input_queue    = NULL;   // BSP event queue
+static bool               s_f1_exits       = false;  // from se_app_config_t
+// When true, every event is forwarded to on_input and the engine handles
+// no device-global keys (used during a game's rebind capture).
+static bool               s_input_passthrough = false;
+
 void se_request_exit(void) {
     s_exit_requested = true;
 }
 
 void se_display_info(se_display_info_t* out) {
     if (out) *out = s_di;
+}
+
+void se_input_set_passthrough(bool on) {
+    s_input_passthrough = on;
+}
+
+// Drain the BSP input queue once. The engine consumes the device-global
+// keys live -- volume +/- (active output, via se_hw), the audio-jack
+// re-route, and F1-exit when the game opted in -- and forwards every
+// other event to on_input. The power button and F2/F3 are deliberately
+// left untouched (the power button's 2 s-hold power-off lives in the
+// coprocessor; function keys are too valuable to spend). While
+// passthrough is on (rebind capture) the engine consumes nothing and
+// forwards everything.
+static void se_pump_input(se_app_callbacks_t const* cb, void* user) {
+    if (s_input_queue == NULL) return;
+
+    bsp_input_event_t ev;
+    while (xQueueReceive(s_input_queue, &ev, 0) == pdTRUE) {
+        // Audio-jack is pure device routing -- never a bindable key, so
+        // the engine consumes it even during passthrough.
+        if (ev.type == INPUT_EVENT_TYPE_ACTION &&
+            ev.args_action.type == BSP_INPUT_ACTION_TYPE_AUDIO_JACK) {
+            se_hw_on_jack_event(ev.args_action.state);
+            continue;
+        }
+        // Volume +/- and F1-exit are consumed live, except under
+        // passthrough (rebind capture), where they must reach the game
+        // so they can be bound rather than acted on.
+        if (!s_input_passthrough &&
+            ev.type == INPUT_EVENT_TYPE_NAVIGATION && ev.args_navigation.state) {
+            bsp_input_navigation_key_t const key = ev.args_navigation.key;
+            if (key == BSP_INPUT_NAVIGATION_KEY_VOLUME_UP) {
+                se_hw_step_volume(+SE_HW_VOLUME_STEP_PCT);
+                continue;
+            }
+            if (key == BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN) {
+                se_hw_step_volume(-SE_HW_VOLUME_STEP_PCT);
+                continue;
+            }
+            if (key == BSP_INPUT_NAVIGATION_KEY_F1 && s_f1_exits) {
+                // Return to launcher (audio down first). Does not return
+                // under graceloader.
+                audio_mixer_shutdown();
+                bsp_device_restart_to_launcher();
+                continue;
+            }
+        }
+        // Not an engine-consumed event -- hand it to the game.
+        if (cb->on_input) {
+            cb->on_input(&ev, user);
+        }
+    }
 }
 
 // Present the back buffer: hand it to the LCD, wait for the vsync
@@ -167,6 +229,18 @@ static bool se_bootstrap(void) {
         ESP_LOGW(TAG, "audio_mixer_init failed: %d -- audio will be silent", res);
     }
 
+    // Device-global hardware settings (volume / brightness, jack routing).
+    // After audio_mixer_init so its raw-jack amplifier default is overlaid
+    // by the launcher-persisted volume + routing here.
+    se_hw_init();
+
+    // Input event queue (drained each frame by se_pump_input).
+    res = bsp_input_get_queue(&s_input_queue);
+    if (res != ESP_OK) {
+        ESP_LOGW(TAG, "bsp_input_get_queue failed: %d -- input will be dead", res);
+        s_input_queue = NULL;
+    }
+
     // Vsync via the panel tearing-effect line. Optional: without it the
     // loop falls back to a fixed delay (animation may stutter).
     esp_err_t te_err = bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING);
@@ -185,7 +259,9 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
     se_app_config_t lcfg = {0};
     if (cfg) lcfg = *cfg;
 
-    s_exit_requested = false;
+    s_exit_requested    = false;
+    s_input_passthrough = false;
+    s_f1_exits          = lcfg.f1_exits;
 
     if (cb == NULL || cb->on_update == NULL) {
         ESP_LOGE(TAG, "se_run: callbacks (and on_update) are required");
@@ -209,6 +285,11 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
         float         dt      = (float)(now_us - prev_us) / 1e6f;
         prev_us               = now_us;
         if (dt > SE_FRAME_DT_MAX) dt = SE_FRAME_DT_MAX;
+
+        // Drain the input queue first: consume the device-global keys,
+        // forward the rest to on_input so the game's per-frame consume
+        // accessors see this frame's events in on_update below.
+        se_pump_input(cb, user);
 
         // Per-frame game logic / state machine.
         cb->on_update(dt, user);

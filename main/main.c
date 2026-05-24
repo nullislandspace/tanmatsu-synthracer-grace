@@ -27,7 +27,6 @@
 #include "controls_settings.h"
 #include "game.h"
 #include "hal/lcd_types.h"
-#include "hw_settings.h"
 #include "icons.h"
 #include "input.h"
 #include "magicnumbers.h"
@@ -1938,12 +1937,11 @@ static void on_init(void* user) {
     audio_mixer_set_music_enabled(audio_settings_music_on());
     audio_mixer_set_group_enabled(AUDIO_SFX_GROUP_GENERAL, audio_settings_sfx_on());
     audio_mixer_set_group_enabled(AUDIO_SFX_GROUP_HUM, audio_settings_hum_on());
-    // Apply launcher-persisted display/keyboard/LED brightness and
-    // speaker/headphone volume + initial audio-jack routing. Has to
-    // run after audio_mixer_init() because the mixer's own init
-    // sets the amplifier from raw jack state (no NVS); hw_settings
-    // then overlays the persisted volume on top.
-    hw_settings_init();
+    // (Device-global hardware settings — display/keyboard/LED brightness,
+    // speaker/headphone volume + initial audio-jack routing — are now
+    // owned by the engine: se_run's bootstrap calls se_hw_init() after
+    // audio_mixer_init(), and its input pump steps volume / re-routes on
+    // the jack action. Nothing to do here.)
 
     // Layer caches: tight bounding boxes for the sun bands and the
     // visible mountain band. Both live in PSRAM, both are aligned to
@@ -2077,21 +2075,13 @@ static void on_update(float dt, void* user) {
     if (s_prof_fg_end != 0)     prof_present_us  += t_loop_start - s_prof_fg_end;
     if (prof_window_start == 0) prof_window_start = t_loop_start;
 
-        if (input_drain_events()) {
-            // F1 = straight exit to launcher. Per the design: this
-            // is a dev-only escape hatch and explicitly does NOT
-            // save mid-run — losing progress here is by design. The
-            // proper "abort a run" path is the F4 pause menu's
-            // Abort entry, which commits a QUIT run before returning
-            // to the main menu. (EF sub-step 2 moves this into se_run.)
-            audio_mixer_shutdown();
-            bsp_device_restart_to_launcher();
-        }
-
-        // Consume every one-shot input into the per-frame snapshot so
-        // the physics pass below and the render switch (on_render) read
-        // one consistent view of the frame. The queue was drained just
-        // above; these calls only read + clear the latched flags.
+        // The engine's input pump already drained the BSP queue this
+        // frame (before on_update) and forwarded each non-global event to
+        // on_input → input_handle_event, which latched it; it also handled
+        // F1-exit + the volume/jack keys itself. Here we just consume the
+        // latched one-shots into the per-frame snapshot, so the physics
+        // pass below and the render switch (on_render) read one consistent
+        // view of the frame.
         s_in_pickup   = input_consume_pickup();
         s_in_steer    = input_steering();
         input_steer_held(&s_in_steer_left, &s_in_steer_right);
@@ -3068,18 +3058,26 @@ static void on_render(pax_buf_t* fb_param, void* user) {
         }
 }
 
+// on_input — one input event the engine's pump didn't consume itself.
+// Routes it into the game's input module, which latches it for the
+// per-frame consume_* accessors read in on_update / on_render.
+static void on_input(bsp_input_event_t const* ev, void* user) {
+    (void)user;
+    input_handle_event(ev);
+}
+
 // app_main — hand the run loop to the engine. The engine owns the device
-// + display bootstrap, the framebuffers, vsync/blit and the frame loop;
-// the four callbacks above supply the content. f1_exits stays false this
-// sub-step: F1 is still handled inside on_update until EF sub-step 2
-// moves the input pump (and the device-global keys) into se_run.
+// + display bootstrap, the framebuffers, vsync/blit, the input-queue pump
+// (volume/jack + F1-exit) and the frame loop; the callbacks above supply
+// the content. f1_exits=true: the engine returns to the launcher on F1.
 void app_main(void) {
     static se_app_config_t const cfg = {
-        .f1_exits      = false,
+        .f1_exits      = true,
         .backdrop_argb = 0xFF000000u,
     };
     static se_app_callbacks_t const cb = {
         .on_init     = on_init,
+        .on_input    = on_input,
         .on_update   = on_update,
         .on_backdrop = on_backdrop,
         .on_render   = on_render,

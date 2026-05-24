@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bsp/input.h"   // bsp_input_event_t (forwarded by the engine)
+
 // Game state codes that gate the modal steering keys (ESC and Backspace
 // are steering only during STATE_PLAYING; everywhere else they have
 // their conventional cancel/edit roles). Defined here so input.c can
@@ -20,10 +22,13 @@ void input_init(void);
 // Set the current modal mode. Affects which keys count as steering.
 void input_set_mode(input_mode_t mode);
 
-// Drain all queued events. Returns true if the user pressed F1
-// (caller should restart_to_launcher). Other queued events update
-// internal latches that will be observable via the accessors below.
-bool input_drain_events(void);
+// Process one input event forwarded by the engine's input pump
+// (se_run's on_input callback). Updates the internal latches that the
+// consume_* accessors below read. The engine consumes the device-global
+// keys itself (volume +/-, audio-jack, F1-exit), so those never arrive
+// here; everything else (pickup, menu nav, ESC/Backspace, digits, the
+// pause + debug keys, and rebind-capture key presses) does.
+void input_handle_event(bsp_input_event_t const* ev);
 
 // Returns the steering input as a signed value in [-1.0, +1.0]:
 // the D-pad and the remappable Left/Right keys give full-deflection

@@ -44,7 +44,6 @@ set(APP_SOURCES
     main/audio_settings.c
     main/controls_settings.c
     main/attachments.c
-    main/hw_settings.c
     main/sfx/sfx_engine_hum.c
     main/sfx/sfx_pickup_ding.c
     main/sfx/sfx_pickup_plink.c

@@ -1,4 +1,13 @@
-#include "hw_settings.h"
+// =====================================================================
+//  SynthEngine3D  --  device-global hardware settings (see se_hw.h)
+// ---------------------------------------------------------------------
+//  Volume / brightness are global codec / peripheral registers; we set
+//  them once at boot (se_hw_init) per the launcher's persisted values,
+//  then poke them again only on user input (volume keys or audio-jack
+//  hot-swap, both driven by se_run's input pump). No per-frame work.
+// =====================================================================
+
+#include "se_hw.h"
 
 #include "bsp/audio.h"
 #include "bsp/display.h"
@@ -7,10 +16,9 @@
 #include "esp_log.h"
 #include "nvs_settings_hardware.h"
 
-static char const TAG[] = "hw_settings";
+static char const TAG[] = "se_hw";
 
 #define VOLUME_DEFAULT_PERCENT      50
-#define VOLUME_STEP_PERCENT          5
 #define BACKLIGHT_DEFAULT_PERCENT   50
 #define KEYBOARD_BL_DEFAULT_PERCENT 50
 #define LED_BRIGHTNESS_DEFAULT_PCT  50
@@ -24,8 +32,8 @@ static uint8_t clamp_pct_int(int v) {
 }
 
 // Read the active output's persisted volume from the launcher's NVS
-// namespace. Defaults to VOLUME_DEFAULT_PERCENT if the key isn't
-// there yet (fresh device or first-boot launcher).
+// namespace. Defaults to VOLUME_DEFAULT_PERCENT if the key isn't there
+// yet (fresh device or first-boot launcher).
 static uint8_t read_active_volume(void) {
     uint8_t v = VOLUME_DEFAULT_PERCENT;
     if (s_jack_inserted) {
@@ -36,8 +44,8 @@ static uint8_t read_active_volume(void) {
     return v;
 }
 
-// Apply the currently-cached jack state: pick the right NVS value,
-// push to the codec, mute the speaker amp when headphones are in.
+// Apply the currently-cached jack state: pick the right NVS value, push
+// to the codec, mute the speaker amp when headphones are in.
 static void apply_audio_routing(void) {
     uint8_t const v = read_active_volume();
     esp_err_t err = bsp_audio_set_volume((float)v);
@@ -46,9 +54,9 @@ static void apply_audio_routing(void) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "bsp_audio_set_volume(%u) failed: %d", (unsigned)v, err);
     }
-    // Speaker amplifier off when headphones are inserted — the
-    // codec drives both lines but the speaker amp is a separate
-    // chip we don't want driving residual signal into the speaker.
+    // Speaker amplifier off when headphones are inserted -- the codec
+    // drives both lines but the speaker amp is a separate chip we don't
+    // want driving residual signal into the speaker.
     err = bsp_audio_set_amplifier(!s_jack_inserted);
     ESP_LOGI(TAG, "apply_audio_routing: amp=%s set_amp_err=%d",
              s_jack_inserted ? "off" : "on", err);
@@ -57,13 +65,8 @@ static void apply_audio_routing(void) {
     }
 }
 
-// Boot-time: apply the four brightness values + the initial volume.
-// Each setter is independent; we log warnings but don't fail the
-// whole init if one returns an error — graceful degradation matches
-// the launcher behaviour and lets the app run on hardware where one
-// peripheral is misbehaving.
-esp_err_t hw_settings_init(void) {
-    ESP_LOGI(TAG, "hw_settings_init: begin");
+esp_err_t se_hw_init(void) {
+    ESP_LOGI(TAG, "se_hw_init: begin");
 
     // ---- Brightnesses ----
     uint8_t pct;
@@ -102,22 +105,22 @@ esp_err_t hw_settings_init(void) {
     ESP_LOGI(TAG, "audio jack state at boot: %s", s_jack_inserted ? "inserted" : "not inserted");
     apply_audio_routing();
 
-    ESP_LOGI(TAG, "hw_settings_init: done (jack=%s vol=%u)",
+    ESP_LOGI(TAG, "se_hw_init: done (jack=%s vol=%u)",
              s_jack_inserted ? "headphones" : "speaker",
              (unsigned)read_active_volume());
     return ESP_OK;
 }
 
-void hw_settings_on_jack_event(bool jack_inserted) {
+void se_hw_on_jack_event(bool jack_inserted) {
     if (s_jack_inserted == jack_inserted) return;
     s_jack_inserted = jack_inserted;
     apply_audio_routing();
-    ESP_LOGI(TAG, "audio jack %s → vol=%u",
+    ESP_LOGI(TAG, "audio jack %s -> vol=%u",
              jack_inserted ? "inserted" : "removed",
              (unsigned)read_active_volume());
 }
 
-void hw_settings_step_volume(int delta_percent) {
+void se_hw_step_volume(int delta_percent) {
     uint8_t   current = read_active_volume();
     int       next    = (int)current + delta_percent;
     uint8_t   newv    = clamp_pct_int(next);
@@ -139,10 +142,3 @@ void hw_settings_step_volume(int delta_percent) {
         ESP_LOGW(TAG, "bsp_audio_set_volume(%u) failed: %d", (unsigned)newv, apply_err);
     }
 }
-
-// Compile-time sanity: VOLUME_STEP_PERCENT is referenced in the
-// header docs but the actual stepping happens in input.c. Pulling
-// the constant into this translation unit keeps it in one place if
-// we ever switch to a struct-of-settings approach.
-_Static_assert(VOLUME_STEP_PERCENT > 0 && VOLUME_STEP_PERCENT < 100,
-               "VOLUME_STEP_PERCENT out of range");
