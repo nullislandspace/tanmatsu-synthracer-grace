@@ -47,7 +47,7 @@ void play_playing_frame(void)
                 // Shadows are already on the floor (drawn between
                 // the floor base and the lines above); the depth-
                 // buffered scene (obstacles + ship) goes on top.
-                render_run_scene(&world, &game, true);
+                render_rasterize_scene();   // scene prepared in on_backdrop
                 t_after_obs = esp_timer_get_time();
                 game_draw_sparks(fb, &game);
                 // Spark shower from a shield-absorbed hit (Phase 9.2)
@@ -143,7 +143,7 @@ void play_crashing_frame(void)
                 // the ship is gone, replaced by the spark shower.
                 // No pause hint, no input — the physics pass drops
                 // us into GAME_OVER once the sparks burn out.
-                render_run_scene(&world, &game, false);
+                render_rasterize_scene();   // scene prepared in on_backdrop
                 t_after_obs = esp_timer_get_time();
                 game_draw_crash_sparks(fb, &game);
                 if (stage_banner_visible(&world)) {
@@ -178,7 +178,7 @@ void play_stall_out_frame(void)
                 // ship is still drawn — it sat down, it didn't blow
                 // up. No input; the physics pass times out into
                 // GAME_OVER.
-                render_run_scene(&world, &game, true);
+                render_rasterize_scene();   // scene prepared in on_backdrop
                 t_after_obs = esp_timer_get_time();
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
@@ -212,7 +212,7 @@ void play_paused_frame(void)
                 // approach as GAME_OVER — obstacles + ship in their
                 // last positions). The physics step above is gated
                 // on PLAYING so nothing moves.
-                render_run_scene(&world, &game, true);
+                render_rasterize_scene();   // scene prepared in on_backdrop
                 t_after_obs = esp_timer_get_time();
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
@@ -322,7 +322,7 @@ void play_game_over_frame(void)
                 // A crashed ship was blown to sparks during CRASHING
                 // — don't resurrect it under the panel. A stalled
                 // ship is still sitting on the track, so draw it.
-                render_run_scene(&world, &game, !s_run_was_crash);
+                render_rasterize_scene();   // scene prepared in on_backdrop
                 t_after_obs = esp_timer_get_time();
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);
@@ -363,7 +363,7 @@ void play_checkpoint_redo_frame(void)
                 // hold — the restored scene is frozen behind the
                 // dialog (physics is gated on PLAYING), music keeps
                 // playing, the run is NOT committed. Space resumes.
-                render_run_scene(&world, &game, true);
+                render_rasterize_scene();   // scene prepared in on_backdrop
                 t_after_obs = esp_timer_get_time();
                 if (stage_banner_visible(&world)) {
                     draw_stage_banner((int)world.stage + 1);

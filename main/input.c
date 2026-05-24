@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "graceloader_imu.h"
+#include "magicnumbers.h"    // ENABLE_DEBUGKEYS
 #include "se_bindings.h"     // se_bindings_get (remappable keybinds)
 
 static char const TAG[] = "input";
@@ -23,6 +24,8 @@ static int           s_digit         = -1;    // 0..9 if a digit was typed, else
 static bool          s_pause_toggle  = false; // latest pause-key press edge
 static bool          s_force_area    = false; // latest TAB press edge (debug)
 static bool          s_godmode_edge  = false; // latest G press edge (debug)
+static bool          s_depthorder_edge = false; // latest C press edge (debug)
+static bool          s_freeze_edge   = false; // latest V press edge (debug)
 
 // (Key-rebind capture is the engine's now — se_ui_capture_key blocks and
 // drains the queue itself, so input.c no longer has a capture mode.)
@@ -95,15 +98,22 @@ void input_handle_event(bsp_input_event_t const* ev) {
                 if (s_mode != INPUT_MODE_PLAYING) {
                     s_backspace = true;
                 }
-            } else if (sc == BSP_INPUT_SCANCODE_Q) {
+            }
+#if ENABLE_DEBUGKEYS
+            else if (sc == BSP_INPUT_SCANCODE_Q) {
                 s_sun_delta += 1;     // push sun toward sunset
             } else if (sc == BSP_INPUT_SCANCODE_A) {
                 s_sun_delta -= 1;     // push sun back toward zenith
             } else if (sc == BSP_INPUT_SCANCODE_TAB) {
-                s_force_area = true;  // debug: force next area type
+                s_force_area = true;       // debug: force next area type
             } else if (sc == BSP_INPUT_SCANCODE_G) {
-                s_godmode_edge = true;  // debug: toggle godmode
+                s_godmode_edge = true;     // debug: toggle godmode
+            } else if (sc == BSP_INPUT_SCANCODE_C) {
+                s_depthorder_edge = true;  // debug: toggle depth_order pass
+            } else if (sc == BSP_INPUT_SCANCODE_V) {
+                s_freeze_edge = true;      // debug: toggle scene freeze
             }
+#endif
             // Pause is a remappable bind (default F4) — checked
             // independently of the chain above so a player who binds
             // pause onto an already-meaningful key still gets both
@@ -289,5 +299,17 @@ bool input_consume_force_next_area(void) {
 bool input_consume_godmode_toggle(void) {
     bool e          = s_godmode_edge;
     s_godmode_edge = false;
+    return e;
+}
+
+bool input_consume_depthorder_toggle(void) {
+    bool e             = s_depthorder_edge;
+    s_depthorder_edge = false;
+    return e;
+}
+
+bool input_consume_freeze_toggle(void) {
+    bool e        = s_freeze_edge;
+    s_freeze_edge = false;
     return e;
 }

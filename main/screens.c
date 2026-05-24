@@ -45,16 +45,35 @@ static uint8_t pct_step(uint8_t cur, int delta) {
     return (uint8_t)n;
 }
 
-// Render the depth-buffered 3D scene for a run: clear the z-buffer,
-// emit every obstacle and (optionally) the ship, then rasterize the
-// deferred wireframe. The backdrop / floor / shadows must already be
-// in the framebuffer — they are 2D layers drawn before this.
-void render_run_scene(world_state_t const* w, game_state_t const* g,
-                             bool draw_ship) {
+// Prepare the depth-buffered 3D scene WITHOUT painting it: clear the
+// z-buffer (frame-stamp bump), emit every obstacle and (optionally) the
+// ship, and run the cull/order passes. Touches no framebuffer pixels — only
+// the deferred geometry lists (in internal SRAM) — so the game runs it
+// during the PPA backdrop DMA (on_backdrop), in parallel with the sky/sun
+// composite. render_rasterize_scene() then paints it once the backdrop is
+// down.
+void render_prepare_scene(world_state_t const* w, game_state_t const* g,
+                          bool draw_ship) {
     scene_begin(fb);
     render_submit_obstacles(w);
     if (draw_ship) game_submit_ship(g);
-    scene_render(SE_RENDER_ZBUFFER);   // rasterize the accumulated frame
+    scene_prepare(SE_RENDER_ZBUFFER);   // cull + order; no pixels touched
+}
+
+// Rasterize the scene prepared by render_prepare_scene() into the
+// framebuffer. Must run after the backdrop is in place — near obstacles
+// project up into the sky band, so it overwrites backdrop pixels.
+void render_rasterize_scene(void) {
+    scene_rasterize(SE_RENDER_ZBUFFER);
+}
+
+// One-shot prepare + rasterize, for callers that don't overlap the two with
+// anything (kept for back-compat; the gameplay states use the split form,
+// preparing in on_backdrop and rasterizing in on_render).
+void render_run_scene(world_state_t const* w, game_state_t const* g,
+                             bool draw_ship) {
+    render_prepare_scene(w, g, draw_ship);
+    render_rasterize_scene();
 }
 
 // Render the scene behind a settings screen. Opened from the pause
@@ -63,8 +82,9 @@ void render_run_scene(world_state_t const* w, game_state_t const* g,
 // menu there is no run, so this is a no-op and the synthwave
 // backdrop drawn earlier in the frame stands.
 static void draw_settings_scene(world_state_t const* w, game_state_t const* g) {
+    (void)w; (void)g;   // scene was prepared in on_backdrop; just paint it
     if (s_settings_origin != APP_STATE_PAUSED) return;
-    render_run_scene(w, g, true);
+    render_rasterize_scene();
 }
 
 void draw_game_over_overlay(void) {

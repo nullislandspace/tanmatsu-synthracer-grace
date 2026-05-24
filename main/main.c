@@ -12,6 +12,7 @@
 #include "bsp/display.h"
 #include "bsp/input.h"
 #include "se_direct565.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -163,6 +164,12 @@ double s_stall_hold_time = 0.0;
 // Debug godmode (toggled with the G key): crash and stall end-of-run
 // conditions are suppressed so the run can be slowed down / inspected.
 bool   s_godmode         = false;
+
+// Debug scene freeze (toggled with the V key): suspends the world
+// simulation + floor scroll so the scene holds perfectly still, letting
+// the depth_order pass (C key) be measured against identical geometry.
+// No menu and no state change — app_state stays PLAYING, just frozen.
+static bool s_debug_freeze = false;
 
 // Crash spark shower runs until game_crash_tick reports all sparks
 // spent (≈ the crash SFX length); this cap just guards against an
@@ -461,15 +468,16 @@ int64_t t_after_obs = 0;
 // callbacks. blit + vsync + swap belong to the engine now, so they roll
 // up into one "present" bucket measured as the gap between a frame's
 // on_render end and the next frame's on_update start.
-static int64_t s_t_phys_end     = 0;   // on_update end   (-> bgkick start)
-static int64_t s_t_bg_end       = 0;   // on_backdrop end (-> obs start)
+static int64_t s_t_phys_end     = 0;   // on_update end   (-> bgfill start)
+static int64_t s_t_bg_end       = 0;   // on_backdrop end (-> rast start)
 static int64_t s_prof_fg_end    = 0;   // last on_render end
 static int64_t prof_input_us    = 0;
 static int64_t prof_phys_us     = 0;
-static int64_t prof_bgkick_us   = 0;
-static int64_t prof_bgflr_us    = 0;
-static int64_t prof_bgwait_us   = 0;
-static int64_t prof_obs_us      = 0;
+static int64_t prof_bgfill_us   = 0;   // stage 1: FILL sky  ‖ scene prepare
+static int64_t prof_bgsun_us    = 0;   // stage 2: SRM sun (residual exposed wait)
+static int64_t prof_bgmtn_us    = 0;   // stage 3: BLEND mtn ‖ floor paint
+static int64_t prof_emit_us     = 0;   // scene emit+cull+order (⊆ bgfill, overlapped)
+static int64_t prof_obs_us      = 0;   // scene rasterize (logged as "rast")
 static int64_t prof_fgrest_us   = 0;
 static int64_t prof_present_us  = 0;
 static int     prof_frames      = 0;
@@ -622,6 +630,18 @@ static void on_update(float dt, void* user) {
         if (input_consume_godmode_toggle()) {
             s_godmode = !s_godmode;
         }
+        // Debug: C toggles the scene depth-order (early-z) pass live for
+        // A/B perf measurement; V freezes the world so the comparison is
+        // against identical static geometry. Both no-op unless a debug
+        // key actually fired (gated by ENABLE_DEBUGKEYS in input.c).
+        if (input_consume_depthorder_toggle()) {
+            se_scene_options_t o = scene_get_options();
+            o.depth_order = !o.depth_order;
+            scene_set_options(&o);
+        }
+        if (input_consume_freeze_toggle()) {
+            s_debug_freeze = !s_debug_freeze;
+        }
 
         int64_t const t_after_input = esp_timer_get_time();
         // End-of-run signals for this frame, kept separate so the
@@ -631,8 +651,9 @@ static void on_update(float dt, void* user) {
         bool stalled = false;
 
         // Physics pass — only meaningful in PLAYING; the other states
-        // record zero physics time so the breakdown stays honest.
-        if (app_state == APP_STATE_PLAYING) {
+        // record zero physics time so the breakdown stays honest. The
+        // V-key debug freeze suspends it too, holding the scene still.
+        if (app_state == APP_STATE_PLAYING && !s_debug_freeze) {
             // 0. Use-item button triggers a jump (Phase 9.1 — still
             //    ungated; the jump-pickup inventory gate lands in
             //    9.1f). game_jump only fires if the ship is grounded;
@@ -862,44 +883,32 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
     // on_backdrop has no dt parameter; use the value on_update published.
     float const dt = s_frame_dt;
 
-        // Background pass — FILL → SRM → BLEND, explicitly serialised.
-        // PPA's dispatch order across different clients is *not*
-        // guaranteed to match submission order: empirically the SRM
-        // (sun) and BLEND (mountain) ops raced and the sun
-        // overwrote the mountains in some frames. Adding a wait
-        // between each submit pins the order at the cost of losing
-        // CPU/PPA parallelism for the first two ops. The CPU floor
-        // work still runs in parallel with the BLEND (the longest
-        // single op besides the CPU work itself), so the bg-phase
-        // wallclock is FILL + SRM + max(BLEND, floor).
+        // Background pass — the PPA sky composite (FILL → SRM → BLEND,
+        // serialised by a wait between each: PPA does not order ops across
+        // its FILL/SRM/BLEND clients and they overlap in pixels) interleaved
+        // with the CPU work that does NOT touch the framebuffer:
+        //   - Stage 1 (FILL):  PREPARE the 3D scene — emit geometry + cull +
+        //     order. That writes only the deferred geometry lists (in
+        //     internal SRAM), so it runs in true parallel with the FILL DMA
+        //     on the PSRAM framebuffer: no bus contention, no shared cache
+        //     line. The rasterize (which DOES write the fb) stays in
+        //     on_render, after the backdrop is complete.
+        //   - Stage 3 (BLEND): the CPU floor paint, overlapping the mountain
+        //     blend exactly as before — the one fb/PPA overlap that's safe,
+        //     since the floor owns rows [HORIZON+1..] and the blend owns the
+        //     sky band.
+        // Stage 2 (SRM sun) has no non-fb CPU work left, so its DMA is the
+        // residual exposed wait. FILL also guarantees no stale obstacle pixel
+        // from the previous frame survives in the sky band.
+
+        // --- Flag + camera setup. Hoisted above the first submit because
+        //     BOTH the scene prepare (stage 1) and the floor paint (stage 3)
+        //     need it; none of the PPA submits depend on it.
         //
-        // FILL is the per-frame guarantee that no stale obstacle
-        // pixel from the previous frame remains in the sky band.
-        backdrop_submit_fill_sky();
-        se_ppa_wait_one();
-        // PPA SRM destination Y comes from game.sun_y, which the
-        // physics step integrates each frame. In TITLE / GAME_OVER
-        // states sun_y is wherever the last run left it (0 at start,
-        // frozen at end of run).
-        backdrop_submit_sun((int)game.sun_y);
-        se_ppa_wait_one();
-        backdrop_submit_mountains();
-        int64_t const t_after_bgkick = esp_timer_get_time();
-        // Floor paint is split in three so the obstacle-shadow pass
-        // can sit between the floor base and the grid lines:
-        //   1. synthwave_step_base   — solid floor rectangle
-        //   2. render_shadows        — darker quads where obstacles
-        //                              cast shadows
-        //   3. synthwave_step_lines  — magenta lane lines + stripes
-        //                              on top of both
-        // Lines on top of shadows keeps them visible in shadowed
-        // regions without per-pixel blend math — much cheaper than
-        // detecting per-pixel "am I in a shadow" while drawing the
-        // grid.
-        // The settings family counts as a "menu state" (scrolling
-        // menu floor, no shadows) only when it was opened from the
-        // main menu. Opened from the pause menu it renders like
-        // PAUSED instead — frozen floor, frozen scene behind.
+        // The settings family counts as a "menu state" (scrolling menu floor,
+        // no shadows, no 3D scene) only when opened from the main menu. Opened
+        // from the pause menu it renders like PAUSED — frozen floor + frozen
+        // scene behind.
         bool const in_settings_family = (app_state == APP_STATE_SETTINGS
                                          || app_state == APP_STATE_CONTROLS
                                          || app_state == APP_STATE_DISPLAY
@@ -913,57 +922,80 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
                                     || app_state == APP_STATE_CREDITS
                                     || (in_settings_family
                                         && s_settings_origin != APP_STATE_PAUSED));
-        // PAUSED freezes the world but keeps the existing scene
-        // visible behind the overlay — same render path as
-        // GAME_OVER (obstacles + shadows in their last positions,
-        // but no scrolling and no fresh shadows).
-        // CRASHING keeps the world advancing (the wreck's momentum),
-        // so its floor scrolls like PLAYING; STALL_OUT / PAUSED /
-        // GAME_OVER hold the floor still.
+        // PAUSED freezes the world but keeps the existing scene visible behind
+        // the overlay — same render path as GAME_OVER. CRASHING keeps the
+        // world advancing (the wreck's momentum), so its floor scrolls like
+        // PLAYING; STALL_OUT / PAUSED / GAME_OVER hold the floor still.
         bool const world_is_live = (app_state == APP_STATE_PLAYING
-                                    || app_state == APP_STATE_CRASHING);
+                                    || app_state == APP_STATE_CRASHING)
+                                   && !s_debug_freeze;   // V-key freeze stops the floor too
         float const floor_scroll = is_menu_state    ? title_scroll_speed * dt
                                    : world_is_live  ? game.ship_speed_z * dt
                                                     : 0.0f;
         float const floor_cam_x      = is_menu_state ? 0.0f : game.cam_x;
         // Camera Y follows a fraction of the ship's jump altitude
-        // (GAME_CAM_Y_FOLLOW) so the ship stays in frame without the
-        // world lurching; menu states sit at the resting height.
-        // Publish the camera to the render module now — *before*
-        // anything projects (render_shadows, the floor, obstacles
-        // and the ship all read render_project's camera global).
+        // (GAME_CAM_Y_FOLLOW) so the ship stays in frame; menu states sit at
+        // the resting height. Publish the camera now — *before* anything
+        // projects (the scene prepare's emit, render_shadows, the floor and
+        // the ship all read render_project's camera global). Eye on the z = 0
+        // plane looking straight down +z — the engine's 6-DOF camera matching
+        // the original fixed pinhole exactly.
         float const cam_y = is_menu_state
                               ? RENDER_CAM_Y
                               : RENDER_CAM_Y + GAME_CAM_Y_FOLLOW * game.ship_y;
-        // Eye on the z = 0 plane, looking straight down +z (zero
-        // orientation) — the engine's 6-DOF camera configured to match
-        // the original fixed pinhole exactly. z / yaw / pitch / roll are
-        // available here if the game ever wants to bank, dive or pull the
-        // eye back.
         render_set_camera_6dof(floor_cam_x, cam_y, 0.0f, 0.0f, 0.0f, 0.0f);
         bool  const fully_shadowed   = !is_menu_state
                                        && (game.sun_y >= GAME_SUN_SINK_RANGE_PX);
+
+        // The scene-bearing states are exactly the non-menu states (PLAYING,
+        // CRASHING, STALL_OUT, PAUSED, GAME_OVER, CHECKPOINT_REDO, and
+        // settings opened from pause). draw_ship matches the old per-state
+        // render_run_scene call sites: the ship is hidden during CRASHING
+        // (sparks replace it) and during a crash-caused GAME_OVER.
+        bool const scene_active = !is_menu_state;
+        bool       draw_ship    = true;
+        if (app_state == APP_STATE_CRASHING)       draw_ship = false;
+        else if (app_state == APP_STATE_GAME_OVER) draw_ship = !s_run_was_crash;
+
+        // --- Stage 1: FILL sky  ‖  scene prepare (emit + cull + order) ---
+        backdrop_submit_fill_sky();
+        int64_t const t_emit0 = esp_timer_get_time();
+        if (scene_active) {
+            render_prepare_scene(&world, &game, draw_ship);
+        }
+        int64_t const t_emit1 = esp_timer_get_time();
+        se_ppa_wait_one();
+        int64_t const t_after_fill = esp_timer_get_time();
+
+        // --- Stage 2: SRM sun. The SRM destination Y is game.sun_y, which
+        //     the physics step integrates each frame (frozen in TITLE /
+        //     GAME_OVER). No non-fb CPU work left, so this wait is exposed.
+        backdrop_submit_sun((int)game.sun_y);
+        se_ppa_wait_one();
+        int64_t const t_after_sun = esp_timer_get_time();
+
+        // --- Stage 3: BLEND mountains  ‖  floor paint ---
+        // Floor paint is three passes so the obstacle-shadow quads sit between
+        // the floor base and the grid lines (lines on top keep them visible in
+        // shadow without per-pixel blend math). (Phase 9.1d: the old floor-
+        // pixel in_shadow sampler is gone — game_collide derives the gameplay
+        // shadow flag from geometry; render_shadows is now a pure visual cue.)
+        backdrop_submit_mountains();
         synthwave_step_base(fb, fully_shadowed);
         if (!is_menu_state) {
             render_shadows(fb, &world, game.cam_x, game.sun_y);
         }
-        // (Phase 9.1d: the floor-pixel in_shadow sampler that used to
-        // live here is gone. game_collide's shadow ray now computes
-        // the gameplay shadow flag directly from geometry — no render
-        // dependency, no one-frame lag, and it works at any altitude.
-        // render_shadows above still paints the floor-shadow quads,
-        // purely as a visual cue now.)
         synthwave_step_lines(fb, floor_scroll, floor_cam_x, cam_y);
-        int64_t const t_after_bgflr = esp_timer_get_time();
-        // Wait for the BLEND op to finish — obstacles and HUD text
-        // can both write into the sky region, so the backdrop must
-        // be in place before any foreground render touches it.
+        // Wait for the BLEND to finish — obstacles + HUD write into the sky
+        // band, so the backdrop must be down before any foreground render.
         se_ppa_wait_one();
-        int64_t const t_after_bg = esp_timer_get_time();
-        prof_bgkick_us += t_after_bgkick - s_t_phys_end;
-        prof_bgflr_us  += t_after_bgflr  - t_after_bgkick;
-        prof_bgwait_us += t_after_bg     - t_after_bgflr;
-        s_t_bg_end      = t_after_bg;
+        int64_t const t_after_mtn = esp_timer_get_time();
+
+        prof_bgfill_us += t_after_fill - s_t_phys_end;
+        prof_bgsun_us  += t_after_sun  - t_after_fill;
+        prof_bgmtn_us  += t_after_mtn  - t_after_sun;
+        prof_emit_us   += t_emit1      - t_emit0;   // ⊆ bgfill (overlapped w/ FILL)
+        s_t_bg_end      = t_after_mtn;
 }
 
 // on_render — the foreground: the 3D scene + HUD + menus + state
@@ -1011,19 +1043,42 @@ static void on_render(pax_buf_t* fb_param, void* user) {
         if (window_us >= 1000000) {
             float const fps    = prof_frames * 1e6f / (float)window_us;
             float const inv_fr = 1.0f / (float)prof_frames;
+            // Last frame's rasterize split (counts post-cull + tri/line
+            // wallclock). Instantaneous, not windowed — freeze (V) for a
+            // stable read; in a frozen scene it holds steady.
+            int     rs_tri_n  = 0, rs_line_n = 0;
+            int64_t rs_tri_us = 0, rs_line_us = 0;
+            scene_raster_stats(&rs_tri_n, &rs_line_n, &rs_tri_us, &rs_line_us);
             ESP_LOGI(TAG,
-                     "FPS=%.1f  in=%.2f phys=%.2f bgkick=%.2f bgflr=%.2f bgwait=%.2f obs=%.2f fgrest=%.2f present=%.2f ms",
+                     "FPS=%.1f  in=%.2f phys=%.2f bgfill=%.2f bgsun=%.2f bgmtn=%.2f emit=%.2f rast=%.2f fgrest=%.2f present=%.2f ms  tris=%d lines=%d rtri=%.2f rline=%.2f  dord=%d frz=%d  intfree=%uKB intblk=%uKB",
                      fps,
                      (float)prof_input_us   * inv_fr / 1000.0f,
                      (float)prof_phys_us    * inv_fr / 1000.0f,
-                     (float)prof_bgkick_us  * inv_fr / 1000.0f,
-                     (float)prof_bgflr_us   * inv_fr / 1000.0f,
-                     (float)prof_bgwait_us  * inv_fr / 1000.0f,
+                     (float)prof_bgfill_us  * inv_fr / 1000.0f,
+                     (float)prof_bgsun_us   * inv_fr / 1000.0f,
+                     (float)prof_bgmtn_us   * inv_fr / 1000.0f,
+                     // emit is the geometry prepare; it overlaps the FILL DMA
+                     // so it is ⊆ bgfill, NOT additive to the frame total.
+                     (float)prof_emit_us    * inv_fr / 1000.0f,
                      (float)prof_obs_us     * inv_fr / 1000.0f,
                      (float)prof_fgrest_us  * inv_fr / 1000.0f,
-                     (float)prof_present_us * inv_fr / 1000.0f);
-            prof_input_us  = prof_phys_us = prof_bgkick_us = prof_bgflr_us = 0;
-            prof_bgwait_us = prof_obs_us = prof_fgrest_us = prof_present_us = 0;
+                     (float)prof_present_us * inv_fr / 1000.0f,
+                     // Rasterize split: tri/line counts + per-phase ms (last frame).
+                     rs_tri_n, rs_line_n,
+                     (float)rs_tri_us  / 1000.0f,
+                     (float)rs_line_us / 1000.0f,
+                     // depth_order pass on/off + V-key scene freeze on/off.
+                     (int)scene_get_options().depth_order,
+                     (int)s_debug_freeze,
+                     // Free internal SRAM: total, and the largest contiguous
+                     // block (the figure that gates a single s_tris/s_lines
+                     // SRAM allocation — total can be ample while no one hole
+                     // is big enough). Both in KiB.
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                     (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+            prof_input_us  = prof_phys_us = prof_bgfill_us = prof_bgsun_us = 0;
+            prof_bgmtn_us  = prof_emit_us = prof_obs_us = 0;
+            prof_fgrest_us = prof_present_us = 0;
             prof_frames    = 0;
             prof_window_start = t_after_fg;
         }

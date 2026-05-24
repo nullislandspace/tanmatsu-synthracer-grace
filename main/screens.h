@@ -26,9 +26,14 @@ void screen_upgrade_pick_frame(void);
 void screen_credits_frame(void);
 
 // Shared draw helpers reused by the gameplay states (play_states.c).
-// render_run_scene rasterises the depth-buffered 3D scene (obstacles +
-// optionally the ship); the two overlays are the GAME_OVER and Re-Do
-// dialogs drawn over a frozen run.
+// The 3D scene is drawn in two phases so the geometry-only prepare can
+// overlap the PPA backdrop DMA: render_prepare_scene() (emit + cull + order,
+// no framebuffer access) runs in on_backdrop; render_rasterize_scene()
+// paints it in on_render after the backdrop is down. render_run_scene() is
+// the one-shot prepare+rasterize, kept for non-overlapping callers. The two
+// overlays are the GAME_OVER and Re-Do dialogs drawn over a frozen run.
+void render_prepare_scene(world_state_t const* w, game_state_t const* g, bool draw_ship);
+void render_rasterize_scene(void);
 void render_run_scene(world_state_t const* w, game_state_t const* g, bool draw_ship);
 void draw_game_over_overlay(void);
 void draw_checkpoint_redo_overlay(void);

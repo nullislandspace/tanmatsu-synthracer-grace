@@ -104,6 +104,12 @@ bool input_consume_force_next_area(void);
 // toggling godmode (crash / stall end-of-run disabled). Self-clears.
 bool input_consume_godmode_toggle(void);
 
+// True if C (depth-order pass) / V (scene freeze) was pressed since
+// last call. Debug-only A/B-measurement hooks; both self-clear and
+// only fire when ENABLE_DEBUGKEYS is set.
+bool input_consume_depthorder_toggle(void);
+bool input_consume_freeze_toggle(void);
+
 // (Key-rebind capture moved into the engine: the Controls menu calls the
 // engine's blocking se_ui_capture_key(), which drains the input queue
 // itself, so input.c no longer exposes a capture mode.)

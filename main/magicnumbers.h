@@ -27,6 +27,22 @@
 
 
 // =============================================================
+// Debug keys — master switch for all on-device debug hotkeys:
+//   G   godmode (suppress crash / stall end-of-run)
+//   Q/A nudge the sun toward sunset / zenith
+//   TAB force the next world area to a fixed type
+//   C   toggle the scene depth-order (early-z) pass live
+//   V   freeze the world (static scenery) for A/B comparison
+// Set to 0 to compile every debug hotkey out for a release build;
+// the normal game controls (steering, pickup, pause, volume) are
+// unaffected. Override by defining before this header is reached.
+// =============================================================
+#ifndef ENABLE_DEBUGKEYS
+#define ENABLE_DEBUGKEYS 1
+#endif
+
+
+// =============================================================
 // Gameplay tuning — Phase 5 sun / shadow / stall mechanic.
 // =============================================================
 //
