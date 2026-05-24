@@ -674,53 +674,29 @@ static void draw_keybind_value(float x, float y, float text_h, pax_col_t col, ui
     draw_left(x, y, text_h, col, buf);
 }
 
-// ---- Generic list-menu renderer -----------------------------------
+// se_ui SE_MENU_VAL_CUSTOM value drawer for the Controls keybind rows:
+// renders the bound key as an icon/label. `ctx` carries the scancode
+// (packed as the pointer value). The engine passes its current back
+// buffer in `fb_cb`, which during on_render is the same buffer the
+// in-file `fb` global points at, so draw_keybind_value (which uses the
+// global) targets the right buffer.
+static void controls_keybind_draw(pax_buf_t* fb_cb, float x, float y,
+                                  float h, pax_col_t col, void* ctx) {
+    (void)fb_cb;
+    draw_keybind_value(x, y, h, col, (uint16_t)(uintptr_t)ctx);
+}
+
+// ---- Menu / dialog layout shared with the bespoke screens ----------
 //
-// Most menus (main, settings, controls, audio, pause) are the same
-// shape: a dim panel, a title, an optional subtitle, a column of
-// rows, and a footer hint. `menu_draw()` renders all of them from a
-// `menu_view_t` description so each menu is just data, not a bespoke
-// draw loop.
-//
-// The selection chevron is painted as a *separate step* from the row
-// text: every row's label starts at the same `text_x` whether or not
-// it is selected, and the ">" marker is drawn into a fixed-width
-// gutter to its left only for the selected row. Selecting a row thus
-// changes its colour and shows the chevron, but never moves the text.
+// The list menus all moved to the engine's se_ui renderer; these
+// geometry constants remain because the hand-laid screens that are NOT
+// vertical lists (slot-select, seed entry, stats, credits, the "press a
+// key" modal) still position their text with them. The selection chevron
+// (draw_chevron) is likewise shared with those screens.
 #define MENU_TEXT_INSET     28.0f   // panel edge → chevron gutter
 #define MENU_CHEVRON_GUTTER 22.0f   // gutter width reserved for ">"
 #define MENU_TOP_PAD        40.0f   // panel top → title baseline
 #define MENU_FOOTER_PAD     32.0f   // footer baseline → panel bottom
-#define MENU_ROW_TEXT_H     28.0f   // row label / value font height
-
-typedef enum {
-    MENU_VAL_NONE = 0,   // plain label row
-    MENU_VAL_CHECK,      // label + [X] / [ ]
-    MENU_VAL_KEYBIND,    // label + function-key icon / key name
-    MENU_VAL_TEXT,       // label + free string in the value column
-} menu_val_kind_t;
-
-typedef struct {
-    char const*     label;
-    menu_val_kind_t kind;
-    bool            checked;   // MENU_VAL_CHECK
-    uint16_t        scancode;  // MENU_VAL_KEYBIND
-    char const*     value;     // MENU_VAL_TEXT
-} menu_row_t;
-
-typedef struct {
-    char const*       title;
-    float             title_h;
-    char const*       subtitle;   // NULL → no subtitle line
-    menu_row_t const* rows;
-    int               row_count;
-    float             row_h;
-    int               cursor;     // selected row index
-    char const*       hint;       // footer hint, NULL → none
-    float             panel_w;    // panel width  fraction
-    float             panel_h;    // panel height fraction
-    float             value_dx;   // x offset of the value column
-} menu_view_t;
 
 // Top-right readout stack. Slot 0 = score, slot 1 = stage, slot 2 = v,
 // slot 3 = sun. Each line is `text_h + 4` px below the previous.
@@ -915,67 +891,15 @@ static void draw_menu_panel_size(float w_frac, float h_frac) {
 }
 
 // Selection chevron, painted into the row's left gutter as a step
-// separate from the label so the label never moves (see menu_view_t).
+// separate from the label so the label never moves. Shared with the
+// bespoke (non-list) screens; the list menus draw their own chevron.
 static void draw_chevron(float x, float y, float text_h) {
     draw_left(x, y, text_h, MENU_COL_HILITE, ">");
 }
 
-// Render a whole list menu from its description. See menu_view_t.
-static void menu_draw(menu_view_t const* m) {
-    draw_menu_panel_size(m->panel_w, m->panel_h);
-    float const fbw     = pax_buf_get_widthf(fb);
-    float const fbh     = pax_buf_get_heightf(fb);
-    float const panel_x = (fbw - fbw * m->panel_w) * 0.5f;
-    float const panel_y = (fbh - fbh * m->panel_h) * 0.5f;
-    float const panel_h = fbh * m->panel_h;
-
-    float const chevron_x = panel_x + MENU_TEXT_INSET;
-    float const text_x    = chevron_x + MENU_CHEVRON_GUTTER;
-    float const value_x   = text_x + m->value_dx;
-
-    float y = panel_y + MENU_TOP_PAD;
-    draw_left(text_x, y, m->title_h, MENU_COL_TITLE, m->title);
-    y += m->title_h + 14.0f;
-    if (m->subtitle) {
-        draw_left(text_x, y, 18.0f, MENU_COL_NORMAL, m->subtitle);
-        y += 18.0f + 16.0f;
-    } else {
-        y += 14.0f;
-    }
-
-    for (int i = 0; i < m->row_count; i++) {
-        menu_row_t const* r   = &m->rows[i];
-        bool const        sel = (i == m->cursor);
-        pax_col_t  const  col = sel ? MENU_COL_HILITE : MENU_COL_NORMAL;
-        float const       ry  = y + (float)i * m->row_h;
-        if (sel) {
-            draw_chevron(chevron_x, ry, MENU_ROW_TEXT_H);
-        }
-        draw_left(text_x, ry, MENU_ROW_TEXT_H, col, r->label);
-        switch (r->kind) {
-            case MENU_VAL_CHECK:
-                draw_left(value_x, ry, MENU_ROW_TEXT_H, col,
-                          r->checked ? "[X]" : "[ ]");
-                break;
-            case MENU_VAL_KEYBIND:
-                draw_keybind_value(value_x, ry, MENU_ROW_TEXT_H, col, r->scancode);
-                break;
-            case MENU_VAL_TEXT:
-                if (r->value) {
-                    draw_left(value_x, ry, MENU_ROW_TEXT_H, col, r->value);
-                }
-                break;
-            case MENU_VAL_NONE:
-            default:
-                break;
-        }
-    }
-
-    if (m->hint) {
-        draw_left(text_x, panel_y + panel_h - MENU_FOOTER_PAD, 14.0f,
-                  MENU_COL_HINT, m->hint);
-    }
-}
+// (menu_draw retired: every list menu now renders through the engine's
+// se_ui se_menu_draw. draw_keybind_value lives on as the game's CUSTOM
+// value drawer for the Controls keybind rows.)
 
 // Render the depth-buffered 3D scene for a run: clear the z-buffer,
 // emit every obstacle and (optionally) the ship, then rasterize the
@@ -1111,35 +1035,13 @@ static void draw_slot_select(void) {
               "up / down to choose, enter to confirm, F1 to exit");
 }
 
-// (The main menu, pause overlay, and the Settings + Audio submenus are now
-// rendered by the engine's se_ui list-menu system directly from their
-// APP_STATE_* cases; their bespoke draw_* builders were retired when they
-// were ported. The Controls menu below still uses the game's menu_draw
-// until se_bindings + the engine rebind dialog land.)
-
-// Controls screen — gyro checkbox + four remappable keybinds.
-static void draw_controls_menu(void) {
-    menu_row_t const rows[CONTROLS_ENTRY_COUNT] = {
-        [CONTROLS_ENTRY_GYRO]  = { .label = "Gyroscope", .kind = MENU_VAL_CHECK,
-                                   .checked = controls_settings_gyro_on() },
-        [CONTROLS_ENTRY_LEFT]  = { .label = "Left", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = se_bindings_get(CONTROL_KEY_LEFT) },
-        [CONTROLS_ENTRY_RIGHT] = { .label = "Right", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = se_bindings_get(CONTROL_KEY_RIGHT) },
-        [CONTROLS_ENTRY_ITEM]  = { .label = "Use item", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = se_bindings_get(CONTROL_KEY_ITEM) },
-        [CONTROLS_ENTRY_PAUSE] = { .label = "Pause", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = se_bindings_get(CONTROL_KEY_PAUSE) },
-    };
-    menu_view_t const m = {
-        .title = "Controls", .title_h = 36.0f, .subtitle = NULL,
-        .rows = rows, .row_count = CONTROLS_ENTRY_COUNT, .row_h = 46.0f,
-        .cursor = s_controls_cursor,
-        .hint = "up / down to choose, enter to change, esc to leave",
-        .panel_w = 0.74f, .panel_h = 0.86f, .value_dx = 250.0f,
-    };
-    menu_draw(&m);
-}
+// (Every list menu — main, settings, controls, audio, pause, upgrade
+// slots + picker — is now rendered by the engine's se_ui directly from
+// its APP_STATE_* case, so the game's bespoke menu_draw / menu_view_t are
+// gone. The Controls keybind rows use se_ui's CUSTOM kind + the
+// controls_keybind_draw callback above to keep the key-icon logic
+// game-side. What remains below are the hand-laid NON-list screens:
+// slot-select, seed entry, stats, credits, the "press a key" modal.)
 
 // "Press a key" modal shown while a keybind is being remapped.
 static void draw_key_capture(void) {
@@ -1255,67 +1157,8 @@ static int upgrade_slot_count(void) {
     return n;
 }
 
-// Slot list — one MENU_VAL_TEXT row per slot showing the fitted
-// attachment's name (or "[empty]").
-static void draw_upgrade_slots(void) {
-    int const slots = upgrade_slot_count();
-    if (slots == 0) {
-        draw_menu_panel_size(0.60f, 0.50f);
-        float const fbh = pax_buf_get_heightf(fb);
-        float const lx  = menu_left_x(0.60f);
-        draw_left(lx, fbh * 0.34f, 40.0f, MENU_COL_TITLE, "Upgrade Ship");
-        draw_left(lx, fbh * 0.52f, 20.0f, MENU_COL_NORMAL, "No attachment slots yet.");
-        draw_left(lx, fbh * 0.90f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
-        return;
-    }
-    char       labels[2][16];
-    menu_row_t rows[2] = {0};
-    for (int i = 0; i < slots; i++) {
-        snprintf(labels[i], sizeof(labels[i]), "Slot %d", i + 1);
-        rows[i].label = labels[i];
-        rows[i].kind  = MENU_VAL_TEXT;
-        rows[i].value = attachment_name((attachment_id_t)*upgrade_slot_ptr(i));
-    }
-    menu_view_t const m = {
-        .title = "Upgrade Ship", .title_h = 36.0f, .subtitle = NULL,
-        .rows = rows, .row_count = slots, .row_h = 46.0f,
-        .cursor = s_upgrade_cursor,
-        .hint = "up / down to choose a slot, enter to change, esc to leave",
-        .panel_w = 0.70f, .panel_h = 0.62f, .value_dx = 180.0f,
-    };
-    menu_draw(&m);
-}
-
-// Attachment picker for the slot being edited (s_upgrade_slot). Lists
-// every catalogued attachment plus "[empty]"; the one already fitted in
-// the other slot is tagged "(in slot N)" and blocked from selection.
-static void draw_upgrade_picker(void) {
-    int     const other_slot = (s_upgrade_slot == 0) ? 1 : 0;
-    bool    const other_used = (other_slot < upgrade_slot_count());
-    int32_t const other_val  = other_used ? *upgrade_slot_ptr(other_slot) : ATTACH_NONE;
-
-    char       annot[ATTACH_ID_COUNT][24];
-    menu_row_t rows[ATTACH_ID_COUNT] = {0};
-    for (int i = 0; i < ATTACH_ID_COUNT; i++) {
-        rows[i].label = attachment_name((attachment_id_t)i);
-        rows[i].kind  = MENU_VAL_NONE;
-        if (i != ATTACH_NONE && i == other_val) {
-            snprintf(annot[i], sizeof(annot[i]), "(in slot %d)", other_slot + 1);
-            rows[i].kind  = MENU_VAL_TEXT;
-            rows[i].value = annot[i];
-        }
-    }
-    char title[24];   // "Slot " + worst-case int + NUL (value is only 1-2)
-    snprintf(title, sizeof(title), "Slot %d", s_upgrade_slot + 1);
-    menu_view_t const m = {
-        .title = title, .title_h = 36.0f, .subtitle = NULL,
-        .rows = rows, .row_count = ATTACH_ID_COUNT, .row_h = 44.0f,
-        .cursor = s_upgrade_pick_cursor,
-        .hint = "up / down to choose, enter to equip, esc to cancel",
-        .panel_w = 0.66f, .panel_h = 0.66f, .value_dx = 170.0f,
-    };
-    menu_draw(&m);
-}
+// (The Upgrade slot list + attachment picker are now rendered by the
+// engine's se_ui from their APP_STATE_* cases.)
 
 // ---- Credits ------------------------------------------------------
 // The credits text is taller than the panel, so it is scrolled by
@@ -2604,13 +2447,43 @@ static void on_render(pax_buf_t* fb_param, void* user) {
             case APP_STATE_CONTROLS: {
                 draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
-                draw_controls_menu();
-                if (menu_nav != 0) {
-                    s_controls_cursor -= menu_nav;
-                    if (s_controls_cursor < 0)                     s_controls_cursor = 0;
-                    if (s_controls_cursor >= CONTROLS_ENTRY_COUNT)  s_controls_cursor = CONTROLS_ENTRY_COUNT - 1;
-                }
-                if (pickup_pressed) {
+                // Engine-rendered Controls menu (se_ui): a gyro checkbox +
+                // four keybind rows. The keybind value (a key icon/label)
+                // is drawn by a game CUSTOM callback so the icon logic
+                // stays game-side; the scancode rides in the row `ctx`.
+                se_menu_row_t const rows[CONTROLS_ENTRY_COUNT] = {
+                    [CONTROLS_ENTRY_GYRO]  = { .label = "Gyroscope", .kind = SE_MENU_VAL_CHECK,
+                                               .checked = controls_settings_gyro_on() },
+                    [CONTROLS_ENTRY_LEFT]  = { .label = "Left", .kind = SE_MENU_VAL_CUSTOM,
+                                               .draw_value = controls_keybind_draw,
+                                               .ctx = (void*)(uintptr_t)se_bindings_get(CONTROL_KEY_LEFT) },
+                    [CONTROLS_ENTRY_RIGHT] = { .label = "Right", .kind = SE_MENU_VAL_CUSTOM,
+                                               .draw_value = controls_keybind_draw,
+                                               .ctx = (void*)(uintptr_t)se_bindings_get(CONTROL_KEY_RIGHT) },
+                    [CONTROLS_ENTRY_ITEM]  = { .label = "Use item", .kind = SE_MENU_VAL_CUSTOM,
+                                               .draw_value = controls_keybind_draw,
+                                               .ctx = (void*)(uintptr_t)se_bindings_get(CONTROL_KEY_ITEM) },
+                    [CONTROLS_ENTRY_PAUSE] = { .label = "Pause", .kind = SE_MENU_VAL_CUSTOM,
+                                               .draw_value = controls_keybind_draw,
+                                               .ctx = (void*)(uintptr_t)se_bindings_get(CONTROL_KEY_PAUSE) },
+                };
+                se_menu_def_t const def = {
+                    .title = "Controls", .title_h = 36.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = CONTROLS_ENTRY_COUNT, .row_h = 46.0f,
+                    .hint = "up / down to choose, enter to change, esc to leave",
+                    .panel_w = 0.74f, .panel_h = 0.86f, .value_dx = 250.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_controls_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                else if (menu_esc)     res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                s_controls_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_ACTIVATED) {
                     if (s_controls_cursor == CONTROLS_ENTRY_GYRO) {
                         controls_settings_set_gyro_on(!controls_settings_gyro_on());
                     } else {
@@ -2621,8 +2494,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                         input_begin_key_capture();
                         app_state = APP_STATE_KEY_CAPTURE;
                     }
-                }
-                if (menu_esc) {
+                } else if (res == SE_MENU_RESULT_BACK) {
                     app_state = APP_STATE_SETTINGS;
                 }
                 break;
@@ -2702,14 +2574,46 @@ static void on_render(pax_buf_t* fb_param, void* user) {
 
             case APP_STATE_UPGRADE: {
                 t_after_obs = esp_timer_get_time();
-                draw_upgrade_slots();
                 int const slots = upgrade_slot_count();
-                if (menu_nav != 0 && slots > 0) {
-                    s_upgrade_cursor -= menu_nav;
-                    if (s_upgrade_cursor < 0)        s_upgrade_cursor = 0;
-                    if (s_upgrade_cursor >= slots)   s_upgrade_cursor = slots - 1;
+                if (slots == 0) {
+                    // No attachment slots yet — bespoke message panel
+                    // (not a list), enter/esc returns to the main menu.
+                    draw_menu_panel_size(0.60f, 0.50f);
+                    float const fbh = pax_buf_get_heightf(fb);
+                    float const lx  = menu_left_x(0.60f);
+                    draw_left(lx, fbh * 0.34f, 40.0f, MENU_COL_TITLE, "Upgrade Ship");
+                    draw_left(lx, fbh * 0.52f, 20.0f, MENU_COL_NORMAL, "No attachment slots yet.");
+                    draw_left(lx, fbh * 0.90f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
+                    if (pickup_pressed || menu_esc) app_state = APP_STATE_MENU;
+                    break;
                 }
-                if (pickup_pressed && slots > 0) {
+                // Engine-rendered slot list (se_ui): one TEXT row per slot
+                // showing the fitted attachment's name.
+                char          labels[2][16];
+                se_menu_row_t rows[2] = {0};
+                for (int i = 0; i < slots; i++) {
+                    snprintf(labels[i], sizeof(labels[i]), "Slot %d", i + 1);
+                    rows[i].label = labels[i];
+                    rows[i].kind  = SE_MENU_VAL_TEXT;
+                    rows[i].value = attachment_name((attachment_id_t)*upgrade_slot_ptr(i));
+                }
+                se_menu_def_t const def = {
+                    .title = "Upgrade Ship", .title_h = 36.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = slots, .row_h = 46.0f,
+                    .hint = "up / down to choose a slot, enter to change, esc to leave",
+                    .panel_w = 0.70f, .panel_h = 0.62f, .value_dx = 180.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_upgrade_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                else if (menu_esc)     res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                s_upgrade_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_ACTIVATED) {
                     // Open the picker for the selected slot, starting on
                     // whatever it currently holds.
                     s_upgrade_slot        = s_upgrade_cursor;
@@ -2719,8 +2623,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                         s_upgrade_pick_cursor = 0;
                     }
                     app_state = APP_STATE_UPGRADE_PICK;
-                } else if (pickup_pressed || menu_esc) {
-                    // No slots, or esc — back to the main menu.
+                } else if (res == SE_MENU_RESULT_BACK) {
                     app_state = APP_STATE_MENU;
                 }
                 break;
@@ -2728,16 +2631,42 @@ static void on_render(pax_buf_t* fb_param, void* user) {
 
             case APP_STATE_UPGRADE_PICK: {
                 t_after_obs = esp_timer_get_time();
-                draw_upgrade_picker();
-                if (menu_nav != 0) {
-                    s_upgrade_pick_cursor -= menu_nav;
-                    if (s_upgrade_pick_cursor < 0)                 s_upgrade_pick_cursor = 0;
-                    if (s_upgrade_pick_cursor >= ATTACH_ID_COUNT)  s_upgrade_pick_cursor = ATTACH_ID_COUNT - 1;
+                // Engine-rendered attachment picker (se_ui): every
+                // catalogued attachment + "[empty]"; the one fitted in the
+                // OTHER slot is tagged "(in slot N)" and blocked below.
+                int     const other_slot = (s_upgrade_slot == 0) ? 1 : 0;
+                bool    const other_used = (other_slot < upgrade_slot_count());
+                int32_t const other_val  = other_used ? *upgrade_slot_ptr(other_slot) : ATTACH_NONE;
+                char          annot[ATTACH_ID_COUNT][24];
+                se_menu_row_t rows[ATTACH_ID_COUNT] = {0};
+                for (int i = 0; i < ATTACH_ID_COUNT; i++) {
+                    rows[i].label = attachment_name((attachment_id_t)i);
+                    rows[i].kind  = SE_MENU_VAL_NONE;
+                    if (i != ATTACH_NONE && i == other_val) {
+                        snprintf(annot[i], sizeof(annot[i]), "(in slot %d)", other_slot + 1);
+                        rows[i].kind  = SE_MENU_VAL_TEXT;
+                        rows[i].value = annot[i];
+                    }
                 }
-                if (pickup_pressed) {
-                    int     const other_slot = (s_upgrade_slot == 0) ? 1 : 0;
-                    bool    const other_used = (other_slot < upgrade_slot_count());
-                    int32_t const other_val  = other_used ? *upgrade_slot_ptr(other_slot) : ATTACH_NONE;
+                char title[24];
+                snprintf(title, sizeof(title), "Slot %d", s_upgrade_slot + 1);
+                se_menu_def_t const def = {
+                    .title = title, .title_h = 36.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = ATTACH_ID_COUNT, .row_h = 44.0f,
+                    .hint = "up / down to choose, enter to equip, esc to cancel",
+                    .panel_w = 0.66f, .panel_h = 0.66f, .value_dx = 170.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_upgrade_pick_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                else if (menu_esc)     res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                s_upgrade_pick_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_ACTIVATED) {
                     // Block equipping a (non-empty) attachment already in
                     // the other slot — no duplicates. Ignore the press.
                     if (s_upgrade_pick_cursor != ATTACH_NONE
@@ -2747,7 +2676,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                     *upgrade_slot_ptr(s_upgrade_slot) = s_upgrade_pick_cursor;
                     save_write_slot(s_active_slot, &s_save);
                     app_state = APP_STATE_UPGRADE;
-                } else if (menu_esc) {
+                } else if (res == SE_MENU_RESULT_BACK) {
                     app_state = APP_STATE_UPGRADE;
                 }
                 break;

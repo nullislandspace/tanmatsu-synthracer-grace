@@ -446,18 +446,19 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   `NONE / CHECK / TEXT / CUSTOM` (CUSTOM = a game `draw_value` callback, so the
   keybind→icon logic stays game-side). Theme `SE_UI_COL_*` + geometry `SE_UI_*`
   in `se_config.h`. The game maps its consumed menu-nav/confirm/cancel onto
-  `se_menu_action_t` and acts on the result. **Ported the Settings + Audio
-  submenus** first, then the **Main menu + Pause overlay** (2026-05-24, same
-  pattern — Pause keeps its F4-resume + abort-commit, just on `se_ui` now); all
-  four behaviour + pixel identical, bespoke builders retired. The game's
-  `menu_draw` / `menu_view_t` now serve only the **Controls** menu + the
-  non-list screens (slot-select, seed entry, stats, upgrade, credits,
-  overlays). *Remaining:* the blocking convenience **`se_ui_run_menu`** +
+  `se_menu_action_t` and acts on the result. Ported every list menu in order:
+  Settings + Audio (3), Main + Pause (3 cont.), then **Controls + Upgrade
+  slots + Upgrade picker (4b-i, 2026-05-24)** — Controls exercises the
+  `CUSTOM` row kind (gyro = CHECK, the 4 keybinds = CUSTOM rows drawn by the
+  game's `controls_keybind_draw`, scancode via row `ctx`). With the last
+  list menu ported, **the game's `menu_draw` / `menu_view_t` / `menu_row_t` /
+  `menu_val_kind_t` were deleted** (the bespoke list renderer is gone; the
+  shared chevron + panel-dim + `MENU_COL_*` + a few geometry consts stay for
+  the non-list screens). text 99303→98717 (the transient duplication is
+  resolved). *Remaining:* the blocking convenience **`se_ui_run_menu`** +
   **`se_ui_capture_key`** + the raw-event→action mapper
-  (`se_ui_action_from_event` / `SE_UI_KEY_*`) — added with the controls/rebind
-  port, where a blocking capture is actually needed. Build green + verify;
-  text 98797→98783 after the Main/Pause port (the big drop comes when Controls
-  ports and `menu_draw` is finally deleted).
+  (`se_ui_action_from_event` / `SE_UI_KEY_*`) — added with the rebind-capture
+  port (4b-ii).
 - [~] **Input bindings subsystem** (`se_bindings_*`) — **storage half done
   (sub-step 4a, 2026-05-24).** New engine module `se_bindings.{c,h}`: the game
   declares its controls (`se_binding_def_t {id, label, nvs_key, default_sc}`)
@@ -468,16 +469,22 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   and now declares the binding table + calls `se_bindings_init` from its
   loader; `input.c` + `main.c` query `se_bindings_get`/`set`. **Same NVS
   namespace + keys + defaults** (`synthracer` / `ctl_k_*` / ESC·Backspace·
-  Space·F4), so existing remapped keys carry over. *Remaining (sub-step 4b):*
-  the **engine-rendered remap dialog** — port the Controls menu onto `se_ui`
-  (`CUSTOM` keybind rows via a game `draw_value` callback) + `se_ui_capture_key`,
-  retire `APP_STATE_KEY_CAPTURE` + the game's `menu_draw`, and resolve the
-  gyro-toggle-row placement. Build green + verify; text 98783→99173 (+390 B,
-  the generic bindings layer; binding `get` is a tiny linear scan, not a hot
-  path).
-- [ ] Port `main.c`'s list menus + rebind capture; retire the bespoke states;
-  add the brightness rows (screen / keyboard / LED) to the settings menu.
-- [ ] `on_backdrop` hook; synthwave invoked from it.
+  Space·F4), so existing remapped keys carry over. **Controls menu now
+  engine-rendered (4b-i):** the Controls screen reads `se_bindings_get` into
+  `se_ui` CUSTOM keybind rows + a CHECK gyro row — and the **gyro-row question
+  is settled**: gyro stays a *game* CHECK row in the (engine-rendered) menu,
+  not part of `se_bindings`. *Remaining (4b-ii):* the rebind **capture** — a
+  blocking `se_ui_capture_key` to retire the bespoke `APP_STATE_KEY_CAPTURE` +
+  `input_begin_key_capture`/`input_consume_captured_key` (the game's input.c
+  capture latch + `nav_to_scancode`). text 98783→99173 (4a) → 98717 (4b-i,
+  after `menu_draw` deletion).
+- [~] Port `main.c`'s list menus + rebind capture; retire the bespoke states —
+  **all list menus ported (4b-i); `menu_draw` deleted.** Remaining: the rebind
+  capture (`APP_STATE_KEY_CAPTURE` → `se_ui_capture_key`, 4b-ii) + the
+  brightness rows (screen / keyboard / LED) on the settings menu.
+- [x] `on_backdrop` hook; synthwave invoked from it — **done in sub-step 1**
+  (the engine clears to `backdrop_argb` or calls the game's `on_backdrop`,
+  which draws the synthwave PPA composite + floor).
 - [ ] Build + verify + on-device smoke at each sub-step; final FPS vs baseline.
 
 ---

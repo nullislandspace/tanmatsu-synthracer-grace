@@ -4213,3 +4213,37 @@
       `make verify` clean; text 98783→99173 (+390 B: the generic bindings
       layer + config indirection; not a hot path). **On-device smoke owed**
       (steering keys work, remap a key → persists across reboot, gyro toggle).
+    - *On-device smoke: passed (user, 2026-05-24).*
+
+- 2026-05-24 — **EF sub-step 4b-i: last list menus → `se_ui`; `menu_draw`
+  deleted.** Ported the final three list menus — **Controls**, **Upgrade
+  slots**, **Upgrade picker** — onto the engine's `se_ui`, completing the
+  list-menu migration.
+    - **Controls exercises the `CUSTOM` row kind** (untested until now): the
+      gyro is a `CHECK` row; the four keybinds are `CUSTOM` rows whose value
+      column is drawn by a game callback (`controls_keybind_draw`, wrapping the
+      existing keybind icon/label renderer), with the scancode passed in the
+      row `ctx`. The keybind *value* (from `se_bindings_get`) and its icon
+      logic stay game-side; the engine owns the menu frame + cursor. This
+      settles the long-open **gyro-row question**: gyro is a game `CHECK` row
+      inside the engine-rendered menu, not part of `se_bindings`.
+    - **Upgrade slots / picker** are plain `TEXT`/`NONE` rows; the "no
+      attachment slots yet" message stays a bespoke panel (it's not a list),
+      and the duplicate-attachment block stays in the activate handler.
+    - **`menu_draw` + `menu_view_t` + `menu_row_t` + `menu_val_kind_t` deleted**
+      — every list menu now renders through `se_menu_draw`. Kept (shared with
+      the remaining hand-laid NON-list screens — slot-select, seed entry,
+      stats, credits, the "press a key" modal): `draw_chevron`,
+      `draw_menu_panel_size`, `draw_left`, `MENU_COL_*`, and a few panel
+      geometry consts; plus `draw_keybind_value` + the scancode→icon/name/glyph
+      helpers (now the Controls `CUSTOM` drawer). text 99303→98717 (the
+      transient duplication is gone).
+    - **Still bespoke (4b-ii):** the rebind **capture** — `APP_STATE_KEY_CAPTURE`
+      + `draw_key_capture` + `input.c`'s capture latch (`input_begin_key_capture`
+      / `input_consume_captured_key` / `nav_to_scancode`) — to be replaced by a
+      blocking engine `se_ui_capture_key`.
+    - **Behaviour + pixel identical** for all three (same draw-then-move, clamp,
+      dispatch; the no-slots panel + duplicate block preserved). Build green +
+      `make verify` clean. **On-device smoke owed** (Controls: nav, keybind
+      icons, rebind, gyro toggle; Upgrade: slots/picker/equip + no-slots +
+      duplicate-block; regression check on main/settings/audio/pause).
