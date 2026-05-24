@@ -12,9 +12,6 @@
 #include "bsp/display.h"
 #include "bsp/input.h"
 #include "se_direct565.h"
-#include "driver/ppa.h"
-#include "esp_cache.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -45,6 +42,7 @@
 #include "save.h"
 #include "se_bindings.h"
 #include "se_hw.h"
+#include "se_ppa.h"
 #include "se_run.h"
 #include "se_scene.h"
 #include "se_ui.h"
@@ -483,12 +481,6 @@ static int64_t prof_window_start = 0;
 static void on_init(void* user) {
     (void)user;
 
-    // The engine owns the display + framebuffers; pull the geometry it
-    // resolved so backdrop_init can match the framebuffers' format /
-    // endianness / orientation exactly.
-    se_display_info_t di;
-    se_display_info(&di);
-
     synthwave_init();
     icons_load();
     input_init();
@@ -521,12 +513,12 @@ static void on_init(void* user) {
     // audio_mixer_init(), and its input pump steps volume / re-routes on
     // the jack action. Nothing to do here.)
 
-    // Bring up the PPA synthwave compositor: allocate + render the sun /
-    // mountain layer caches in PSRAM and register the FILL/SRM/BLEND
-    // clients. Must follow synthwave_init() above (the cache drawing uses
-    // the pre-triangulated shapes); the band math uses the engine's raw
-    // framebuffer geometry from `di`.
-    backdrop_init(di.width, di.height, di.pax_format, di.reversed, di.orientation);
+    // Bring up the synthwave backdrop: it inits the engine PPA compositor,
+    // allocates + renders the sun / mountain layer caches in PSRAM (matching
+    // the engine framebuffers via se_display_info) and flushes them. Must
+    // follow synthwave_init() above (the cache drawing uses the
+    // pre-triangulated shapes).
+    backdrop_init();
 
     // Engine scene optimizations (both output-neutral — they change only
     // draw speed, never the pixels). On-device A/B (2026-05-24) on frozen
@@ -884,13 +876,13 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         // FILL is the per-frame guarantee that no stale obstacle
         // pixel from the previous frame remains in the sky band.
         backdrop_submit_fill_sky();
-        backdrop_wait_one();
+        se_ppa_wait_one();
         // PPA SRM destination Y comes from game.sun_y, which the
         // physics step integrates each frame. In TITLE / GAME_OVER
         // states sun_y is wherever the last run left it (0 at start,
         // frozen at end of run).
         backdrop_submit_sun((int)game.sun_y);
-        backdrop_wait_one();
+        se_ppa_wait_one();
         backdrop_submit_mountains();
         int64_t const t_after_bgkick = esp_timer_get_time();
         // Floor paint is split in three so the obstacle-shadow pass
@@ -966,7 +958,7 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         // Wait for the BLEND op to finish — obstacles and HUD text
         // can both write into the sky region, so the backdrop must
         // be in place before any foreground render touches it.
-        backdrop_wait_one();
+        se_ppa_wait_one();
         int64_t const t_after_bg = esp_timer_get_time();
         prof_bgkick_us += t_after_bgkick - s_t_phys_end;
         prof_bgflr_us  += t_after_bgflr  - t_after_bgkick;

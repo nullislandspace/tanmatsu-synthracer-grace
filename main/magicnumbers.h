@@ -406,9 +406,8 @@
 // live here with the rest of the layout tunables rather than buried in
 // the backdrop translation unit.
 
-// ESP32-P4 PSRAM L2 cache line size. Used for the aligned allocation
-// of the layer caches and for `esp_cache_msync` operations.
-#define PPA_PSRAM_CACHE_LINE 128
+// (The PSRAM cache-line size for the PPA layer caches now lives in the
+// engine as SE_PPA_CACHE_LINE -- se_ppa allocates + flushes the caches.)
 
 // Sky region in logical coordinates. `synthwave_draw_top_grid` paints
 // the magenta line at y = HORIZON_LOGICAL_Y; `synthwave_step` paints

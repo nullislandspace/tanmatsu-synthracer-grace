@@ -5,6 +5,15 @@
 > on the **`engine_extraction`** branch. This is the authoritative checklist
 > for the effort — flip `- [ ]` → `- [x]` as steps land. The design
 > rationale is logged in [decisions-log.md](decisions-log.md) (2026-05-23).
+>
+> **STATUS — COMPLETE (2026-05-24).** All phases (E0–E9, ER / ER.2, E2.1 /
+> E2.2, EF, E7 / E7.1) have landed and every checklist box is closed per the
+> maintainer's sign-off. The E7.1 backdrop on-device smoke is closed with
+> hardware verification deferred to ad-hoc (the refactor is behaviorally
+> identical by construction); any drift is dealt with if/when it surfaces. The
+> one item parked for later — outside the extraction — is the post-v1
+> native-vs-graceloader `#ifdef` question. Engine lives at `synthengine3D/`,
+> version 0.2.0; further work accumulates under CHANGELOG `[Unreleased]`.
 
 ## Goal
 
@@ -236,7 +245,7 @@ detune/LFO). Supporting public types added (`se_music_chord_t` /
 - [x] **Game side stays, thinner:** `save_nbt.c` dropped `write_peek`/`read_peek`; `save_write_state`/`save_read_state` are now the two callbacks (they skip the engine's `se_peek` as an unknown tag). `save.c` builds the config + the `info` summary string (`"best… stage… runs…"`) and delegates to `se_save_*`; `save_data_t` lost its 4 peek-mirror fields and `save_peek_info_t`/`save_slot_peek` are gone. `main.c` slot-select reads `se_save_peek_t` (timestamp + `info`).
 - [x] **Deviation from the original sketch:** day-rollover stayed game-side (it's daily-challenge *policy*, not generic persistence), and there's no opaque handle (the slot manager is a configured singleton). Recorded in decisions-log.
 - [x] Build + verify: **All symbols satisfied.** Size text 96662→97063 (+401 B: the generic peek + config + callback layer — added functionality, not a hot path; save runs on menu transitions). Boundary clean: engine save sources include no game headers; no stale peek refs in the game.
-- [ ] **On-device smoke still needed (format changed):** confirm (a) a pre-existing slot still loads its progress and shows blank date/info until re-saved, then re-saves correctly; (b) a fresh save writes → loads → peeks round-trip. *(Can't be done from the build host.)*
+- [x] **On-device save-format smoke done 2026-05-24:** confirmed (a) a pre-existing slot still loads its progress and shows blank date/info until re-saved, then re-saves correctly; (b) a fresh save writes → loads → peeks round-trip.
 
 ### E4 — 3D scene renderer + invert the world dependency ✅ 2026-05-23
 - [x] `scene.{c,h}` → `se_scene.{c,h}` (rasterizer + camera + projection; symbol names kept — `scene_init/begin/tri/line/flush`, `render_camera_t`, `render_set_camera`/`render_camera`/`render_project`). Banner added; `#include "magicnumbers.h"` → `se_config.h`.
@@ -464,7 +473,7 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   setter clamps up to `SE_HW_DISPLAY_BRIGHTNESS_MIN` so a slider sweep can't
   black the screen out; `se_hw_step_volume` now just delegates to
   `se_hw_set_volume` (one persist/apply path).
-- [~] `se_ui` menu system — **per-frame core done (sub-step 3, 2026-05-24).**
+- [x] `se_ui` menu system — **done (per-frame core, sub-step 3, 2026-05-24).**
   New engine module `se_ui.{c,h}`: `se_menu_def_t` / `se_menu_row_t` /
   `se_menu_t` (lifted from the game's `menu_view_t`/`menu_draw`), the cursor
   state machine **`se_menu_input(menu, action)`** (UP/DOWN clamp + ACTIVATE/
@@ -489,10 +498,11 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   resolved). **`se_ui_capture_key` added (4b-ii):** a blocking "press a key"
   modal that pumps engine frames over the backdrop hook, drains the input
   queue itself (so any key — incl. F-keys and the normally-consumed volume/F1
-  — can be bound), and returns the scancode. *Remaining (optional, as-needed):*
-  the blocking list-menu convenience **`se_ui_run_menu`** + the raw-event→action
-  mapper (`se_ui_action_from_event` / `SE_UI_KEY_*`) — no consumer needs them
-  yet (RTS's menus compose per-frame with its state machine).
+  — can be bound), and returns the scancode. *Closed: the optional blocking
+  list-menu convenience **`se_ui_run_menu`** + the raw-event→action mapper
+  (`se_ui_action_from_event` / `SE_UI_KEY_*`) were intentionally not built — no
+  consumer needs them (RTS's menus compose per-frame with its state machine);
+  a future game wanting the blocking-menu pattern adds them then.*
 - [x] **Input bindings subsystem** (`se_bindings_*`) — **done (4a storage +
   4b engine-rendered dialog + capture, 2026-05-24).** New engine module
   `se_bindings.{c,h}`: the game
@@ -530,7 +540,7 @@ the bespoke menu states from `main.c`. On-device smoke after each.
 - [x] `on_backdrop` hook; synthwave invoked from it — **done in sub-step 1**
   (the engine clears to `backdrop_argb` or calls the game's `on_backdrop`,
   which draws the synthwave PPA composite + floor).
-- [~] Build + verify + on-device smoke at each sub-step; final FPS vs baseline.
+- [x] Build + verify + on-device smoke at each sub-step; final FPS vs baseline.
   **Wrap (2026-05-24):** build green + `make verify` clean at every sub-step;
   sub-steps 1–4b-iii smoke-tested on device (passed). **Final size: text
   96546→101496 (+4950 vs the E0 baseline), dec 363674→368956.** That growth is
@@ -544,10 +554,11 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   engine source/header includes a game header (only `bsp/*`), no game file
   references a deleted symbol (`menu_draw`/`APP_STATE_KEY_CAPTURE`/
   `se_input_set_passthrough`). Transitional sub-step comments swept from
-  `main.c` + `se_run.c`. **Owed:** the user's final full-playthrough smoke + the
-  on-device FPS reconfirm vs the ~28.3 baseline (predicted unchanged — the per-
-  frame render path is the same inline leaves; EF added only menu-state code
-  that runs off the gameplay hot path).
+  `main.c` + `se_run.c`. **Confirmed 2026-05-24:** the user's final
+  full-playthrough smoke passed (also recorded at E9) and the on-device FPS
+  reconfirmed unchanged vs the ~28.3 baseline (as predicted — the per-frame
+  render path is the same inline leaves; EF added only menu-state code that runs
+  off the gameplay hot path).
 
 ---
 
@@ -676,13 +687,14 @@ call sites.
   TODO). The whole-triangle near-clip guard stays in `scene_tri` (projection
   guard, not the central cull).
 - [x] Order seam (`scene_order_pass`, front-to-back sort) wired as a **no-op**.
-- [ ] **On-device A/B owed** (FPS vs the immediate-mode baseline; output is
-  expected pixel-identical since same tris, same order, same z-buffer — the
-  only delta is the buffering pass's PSRAM traffic).
-- [ ] Renderer doc: no `synthengine3D/docs/` yet, so the deferred contract
-  gets written correctly when **E8** authors `docs/renderer.md` (the header
-  comment in `se_scene.h` already describes it). Build green + verify clean;
-  text 105144 → 105286 (+142 B scaffolding).
+- [x] **On-device A/B — superseded by ER.2** (2026-05-24): the first-cut no-op
+  passes became the real `frustum_cull`/`depth_order` passes, which were measured
+  on device (see the ER.2 table). Output stayed pixel-identical; the deferred
+  buffering pass showed no FPS regression against the immediate-mode baseline.
+- [x] Renderer doc — **done**: E8 authored `synthengine3D/docs/renderer.md`
+  with the deferred contract, and ER.2 added the camera + optional-passes
+  sections. Build green + verify clean; text 105144 → 105286 (+142 B
+  scaffolding).
 
 ### ER.2 — real cull/order passes + 6-DOF camera (landed 2026-05-24, post-0.2.0)
 
@@ -777,18 +789,65 @@ need: an integrated MIDI player must drive the same voices.
 - [x] Docs: `se_voice.h`, `docs/audio.md` (Voices section + per-role config),
   README + umbrella header, CHANGELOG `[Unreleased]`. Build green + verify
   clean; text 106284 → 107086 (+802 B).
-- [ ] **On-device audio smoke owed:** confirm the synthwave music still sounds
-  right (the pad restructure shifts it only within float rounding).
+- [x] **On-device audio smoke done 2026-05-24:** user confirmed the synthwave
+  music still sounds right after the per-role-voice restructure (the pad shift
+  is within float rounding).
+
+### E7.1 — generic PPA blit helper (landed 2026-05-24, post-0.2.0)
+
+Resolves the E7 "extract the blit helper vs defer entirely" open decision in
+favour of **extract**. (The backdrop *hook* shipped with EF; this is the PPA
+*mechanism* underneath it.) Content + choreography stay game-side.
+
+- [x] **`se_ppa.{c,h}`** — a generic ESP32-P4 PPA compositor: FILL/SRM/BLEND
+  client lifecycle, an async counting-semaphore completion latch
+  (`wait_one`/`wait_all`/`pending`), the logical→raw orientation transform
+  (`PAX_O_UPRIGHT` + `PAX_O_ROT_CW` implemented/verified; others refused, not
+  mis-blitted), and cache-line-aligned PSRAM layer caches (`se_ppa_layer_t` +
+  alloc/flush/free). Submits return `bool`; a refused submit (in-flight cap,
+  driver-busy, out-of-range band) queues nothing, so the latch never desyncs.
+- [x] **Knobs** in `se_config.h`: `SE_PPA_MAX_PENDING` (sizes the semaphore AND
+  the submit guard from one value, so they can't drift), `SE_PPA_CLIENT_QUEUE_DEPTH`,
+  `SE_PPA_CACHE_LINE` (retires the game's `PPA_PSRAM_CACHE_LINE`).
+- [x] **Game refactor.** `main/backdrop.{c,h}` dropped its ~300 lines of PPA
+  mechanics → a thin synthwave wrapper: it keeps the artwork (sun/mountain layer
+  caches), the band constants and the colour-key; the submits are one-liners
+  over `se_ppa_fill/blit/blend_key`. The submit *order + waits* are `main.c`'s
+  `on_backdrop` (calling `se_ppa_wait_one()` directly), and `backdrop_init()`
+  now self-resolves geometry via `se_display_info()`. `main.c` no longer
+  includes `driver/ppa.h` / `esp_cache.h` / `esp_heap_caps.h`.
+- [x] **Boundary + behaviour.** Engine includes no game header (only `bsp/*`,
+  `driver/ppa.h`, `esp_*`, PAX); the composite is behaviorally identical (same
+  three ops, order and colour-key window). The IDF component now `REQUIRES …
+  esp_driver_ppa esp_mm`. Build green + verify clean; text 107086 → 108788
+  (+1702 B: the engine version's bounds-checks, refusal/error paths and the
+  `pending`/`wait_all`/`layer_free` surface — once-per-frame submit code, not a
+  hot path).
+- [x] Docs: README capability row + `docs/ppa.md` + `examples/backdrop/`,
+  `docs/configuration.md` (the three knobs), `docs/integration.md` (the P4-only
+  PPA dependency), CHANGELOG `[Unreleased]`. **No version bump** (stays 0.2.0).
+- [x] **On-device smoke — closed 2026-05-24 per user direction** (hardware
+  verification deferred to ad-hoc, not independently run from the build host):
+  the refactored path is behaviorally identical by construction — same three
+  ops, submission order and colour-key window — so the composite (sky / sun /
+  mountain; the sun sinking behind the silhouette) is expected unchanged. Any
+  drift handled if/when it crops up.
 
 ---
 
 ## Open decisions (resolve as we reach them)
 
-- **SFX ownership** (E2): framework engine-side, recipes game-side — confirm
-  on contact.
+- ~~**SFX ownership** (E2): framework engine-side, recipes game-side — confirm
+  on contact.~~ — RESOLVED in E2 (2026-05-23): the mixer / source / DSP /
+  procedural-music framework is engine-side; the specific sound recipes stay
+  game-side and call the engine DSP. See E2.
 - ~~**Object struct visibility** (E5)~~ — RESOLVED 2026-05-24: defer the whole
   object framework (keep `obstacle.{c,h}` game-side); the reuse leverage is
   the render pipeline (ER), not the pool. See E5.
-- **Backdrop / PPA** (E7): extract the blit helper vs. defer entirely.
+- ~~**Backdrop / PPA** (E7): extract the blit helper vs. defer entirely.~~ —
+  RESOLVED 2026-05-24: **extracted** as the generic `se_ppa` compositor (the
+  backdrop *hook* shipped with EF; `se_ppa` is the PPA mechanism underneath).
+  See E7.1.
 - **Native-app vs graceloader `#ifdef`s** inside the engine — explicitly
-  deferred past v1.
+  deferred past v1. Not part of the (now-complete) extraction; revisit only if a
+  native (non-graceloader) port is actually pursued.
