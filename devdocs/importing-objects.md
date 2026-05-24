@@ -4,6 +4,14 @@ How to turn an OpenSCAD model into an in-game world object, end to end,
 using `tools/object_3mf_to_header.py`. The rest-area marker
 (`objects/restarea_marker.c`) is the worked example throughout.
 
+> **This is the game's modelling pipeline** (OpenSCAD → C header → an
+> obstacle-pool `emit` callback) — it is game-side, not part of the engine.
+> The **engine-facing geometry-submission contract** it builds on (the
+> `scene_tri` / `scene_line` rules: coordinate system, CCW-outward winding,
+> back-face culling, per-face shading, Hershey-text-as-lines) is documented
+> on the engine side at `../synthengine3D/docs/objects.md`. Read that for the
+> "what the renderer expects"; read this for the "how we author models."
+
 > This is the path for **world objects** — things placed by an obstacle
 > `emit` callback (pickups, scenery, markers). The **ship** has its own
 > near-identical tool (`tools/ship_3mf_to_header.py`); the two could be

@@ -28,8 +28,8 @@
 #include "se_ui.h"              // EF  -- UI / list-menu system
 #include "se_bindings.h"        // EF  -- input bindings (remap + persistence)
 
-// Still to land as the framework completes (EF):
-//   (se_ui.h gains the blocking run-menu + key-capture helpers, and
-//    se_bindings.h its engine-rendered remap dialog, when the
-//    controls/rebind screen is ported.)
-//   (se_object.h: not extracted -- E5 deferred, object pool stays game-side)
+// Deliberately NOT here:
+//   * No se_object.h -- there is no object/world framework (E5 deferred):
+//     a game owns its object pool and submits world-space geometry via
+//     se_scene's scene_tri / scene_line. See docs/objects.md.
+//   * Internal headers (src/internal/) are private and never reachable here.

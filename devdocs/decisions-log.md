@@ -4430,3 +4430,29 @@
       path + the two seam stubs). Output expected pixel-identical (same tris,
       same order, same z-buffer). **On-device A/B owed** (FPS vs baseline; the
       scene must look unchanged in a run — obstacles, ship, wireframes).
+      *(A/B confirmed neutral on device 2026-05-24: every stage matched
+      baseline; obs scaled 8→28 ms with density, no raised floor.)*
+- 2026-05-24 — **E8 — engine documentation (first-class deliverable).** Wrote
+  the consumable doc suite for `synthengine3D/`: `README.md` (pitch + capability
+  table + hello-triangle-and-sound quick start + both build modes + the
+  stability/performance policy), `CHANGELOG.md`, and nine `docs/` guides
+  (getting-started, architecture, renderer, audio, ui, save, objects,
+  configuration, integration) + a commented `examples/minimal/` app (run loop +
+  spinning triangle + procedural music). The docs are written from the *user's*
+  side (how to consume the engine), distinct from `devdocs/engine-extraction.md`
+  which is the *builder's* extraction history.
+    - **Version bumped 0.0.0 → 0.1.0** so the CHANGELOG has a real anchor: first
+      documented release, still pre-1.0 (surface documented + semver-tracked but
+      not yet frozen). `se_version_string()` returns "0.1.0".
+    - **objects.md deviation (per E5-defer):** the engine has no object
+      framework, so the engine doc covers the **geometry-submission contract**
+      (the scene_tri/scene_line rules — coords, CCW-outward winding, back-face
+      cull, per-face shading, Hershey-text-as-lines), not the game's
+      OpenSCAD→header tooling. The game's `importing-objects.md` keeps the
+      modelling pipeline and now cross-links the engine contract.
+    - Swept stale transitional comments from the public headers (`se_run.h`'s
+      "STATUS: in progress", `synthengine3d.h`'s "still to land (EF)") so the
+      header docs read as the finished surface. Build green + verify clean
+      (only `se_version.h` is a compiled change). Remaining: **E9** (final
+      verify + full-playthrough smoke); **E2.1** parked; ER cull/order seams
+      a later measured cut.

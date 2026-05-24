@@ -7,13 +7,8 @@
 //  input-queue pump, the device-global keys, vsync/blit, and the backdrop
 //  clear. The game plugs in via the callbacks below — it is content +
 //  per-frame logic, not loop plumbing. Part of the semver'd public surface
-//  (see se_version.h). Full design: ../devdocs/engine-extraction.md (EF).
-//
-//  STATUS: API contract laid down (EF, in progress). The implementation
-//  (migrating main.c's bootstrap + the ~960-line frame loop onto se_run,
-//  the input-pump/global split, and the se_ui menu system) is staged in
-//  after this header; until then se_run() has no definition and nothing
-//  calls it, so the build stays green.
+//  (see se_version.h). Overview + the frame lifecycle: docs/architecture.md;
+//  quick start: docs/getting-started.md.
 // =====================================================================
 
 #include <stdbool.h>

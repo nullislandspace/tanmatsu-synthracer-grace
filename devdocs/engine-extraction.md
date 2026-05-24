@@ -538,13 +538,32 @@ the bespoke menu states from `main.c`. On-device smoke after each.
 
 ---
 
-### E8 — Documentation (first-class deliverable)
-- [ ] `README.md` — pitch, capabilities, "hello triangle + sound" quick start, both build modes, version/stability policy, links into `docs/`.
-- [ ] `CHANGELOG.md` — semver'd (companion to `se_version.h`).
-- [ ] `docs/`: `getting-started.md`, `architecture.md` (subsystems, frame lifecycle, callback/IoC model, public vs internal), `renderer.md`, `audio.md`, `ui.md`, `save.md`, `objects.md`, `configuration.md`, `integration.md`.
-- [ ] Migrate the game's `devdocs/importing-objects.md` content → `synthengine3D/docs/objects.md`; leave a pointer in the game docs.
-- [ ] `examples/minimal/` — smallest documented app.
-- [ ] Document the public/internal boundary, the semver contract, and the inline-leaf / opaque-coarse performance rule for engine users.
+### E8 — Documentation (first-class deliverable) ✅ 2026-05-24
+- [x] `README.md` — pitch, capability table, "hello triangle + sound" quick
+  start, both build modes, version/stability policy, links into `docs/`.
+- [x] `CHANGELOG.md` — Keep-a-Changelog format, semver'd; anchored a first
+  documented release. **Bumped `se_version.h` 0.0.0 → 0.1.0** (`se_version_string()`
+  now returns "0.1.0") to give the CHANGELOG a real anchor — first documented,
+  still pre-1.0/unstable.
+- [x] `docs/`: `getting-started.md`, `architecture.md` (subsystems, frame
+  lifecycle, IoC model, public-vs-internal, the **performance contract**),
+  `renderer.md` (the **deferred** ER contract), `audio.md`, `ui.md`, `save.md`,
+  `objects.md`, `configuration.md`, `integration.md`.
+- [x] **objects doc — deviation from the original sketch (E5 defer):** the
+  engine has no object framework, so `docs/objects.md` documents the engine's
+  **geometry-submission contract** (scene_tri/scene_line rules: coords,
+  CCW-outward winding, back-face cull, per-face shading, Hershey-text-as-lines)
+  rather than verbatim-migrating the game's OpenSCAD→header tooling. The game's
+  `devdocs/importing-objects.md` stays (it's the game's modelling pipeline) and
+  now points at the engine contract; the engine doc points back for the
+  "how we author" half.
+- [x] `examples/minimal/` — smallest documented app (`main.c` + `README.md`):
+  run loop + spinning triangle + procedural music, ~50 lines.
+- [x] Documented the public/internal boundary, the semver contract, and the
+  inline-leaf / opaque-coarse performance rule (README + architecture.md).
+- [x] Swept the stale "still to land (EF)" / "STATUS: in progress" notes out of
+  `synthengine3d.h` + `se_run.h` (the framework is complete). Build green +
+  verify clean (only `se_version.h` changed in compiled terms).
 
 ### E9 — Final verification & polish
 - [ ] Full `make clean build` + `make verify` (all symbols satisfied).
