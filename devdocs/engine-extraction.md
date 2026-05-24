@@ -216,11 +216,13 @@ detune/LFO). Supporting public types added (`se_music_chord_t` /
 `se_music_progression_t` / `se_music_arp_pattern_t` / `se_music_drum_pattern_t`
 / `se_music_env_t` / `se_music_filter_t`) + the grid constants
 `SE_MUSIC_TICKS_PER_BAR` / `SE_MUSIC_CHORDS_PER_SECTION`.
-- **Scope boundary (deliberate):** the six-voice **synth topology** (saw bass /
+- **Scope boundary (at the time):** the six-voice **synth topology** (saw bass /
   square arp / 3-saw pad / sine kick / noise snare+hat) and the fixed 4/4
-  16th-note, eight-chord-section **grid** stay shared structure — they're the
-  "engine"; everything *musical* is now data. Making the voice waveforms
-  pluggable too is noted as a possible future step (not needed yet).
+  16th-note, eight-chord-section **grid** stayed shared structure — they're the
+  "engine"; everything *musical* became data. Making the voice waveforms
+  pluggable too was noted as a possible future step. **→ Done post-0.2.0 (see
+  E2.2 below): voices are now pluggable per role via `se_voice.h`.** Only the
+  *arrangement* (the six roles + the grid) remains fixed structure.
 - The old synthwave banks/params became the static `se_music_synthwave_preset()`
   data; RTS passes `NULL` so its sound is byte-for-byte unchanged. Invalid/empty
   configs fall back to the preset (logged). **Version bumped 0.1.0 → 0.2.0** (a
@@ -743,6 +745,40 @@ The no-op seams are now real, opt-in passes, and the camera became full 6-DOF.
     the floor compositor, not the z-buffer passes.
 - [x] 6-DOF migration visually confirmed unchanged (identity pose; byte-for-byte
   projection as argued).
+
+### E2.2 — pluggable synth voices (landed 2026-05-24, post-0.2.0)
+
+Completes the E2.1 "pluggable waveforms" future step, shaped by a stated future
+need: an integrated MIDI player must drive the same voices.
+
+- [x] **`se_voice.h`** — a voice is *one playing note* behind a vtable
+  (`note_on(freq,vel)` / `note_off` / `render(mix,frames)` adds into a mono
+  float accumulator / `active`). One voice = one note; chords/polyphony = many
+  voices — the MIDI-native model. Block render = one indirect call per voice per
+  chunk (cheap on the dedicated audio task).
+- [x] **Built-in `se_voice_synth_t`** (from `se_voice_spec_t`): osc (sine/saw/
+  square/triangle/noise) ×1..3 detuned → optional filter → ADSR → gain, +
+  optional pitch-env (kick) + amp-LFO (pad). Embeddable, no heap.
+- [x] **Config: per-role voices.** `se_music_config_t` swaps its `*_amp`/`*_env`/
+  `*_lpf…` fields for a `se_voice_spec_t` per role + optional `*_voice` custom
+  overrides (mono roles; pad is spec-only, being a 3-voice chord) + `pad_detune`.
+  `se_music_env_t`/`se_music_filter_t` removed (→ `se_env_t` + the spec).
+  Breaking config change (pre-1.0); **no version bump** — sits under
+  CHANGELOG `[Unreleased]`. The game only uses `NULL` (preset), so game code is
+  untouched.
+- [x] **Procedural generator refactor.** Six hardcoded voices → `se_voice_t`s
+  triggered via note-on; the pad is now 3 voices (root/third/fifth). Sonically
+  equivalent by filter linearity (3 filtered saws summed == old summed-then-
+  filtered), with the pad gain split `/3`. Block renderer replaces the
+  per-sample path; tick scheduler unchanged (sub-sample-accurate).
+- [x] **MIDI-ready, no MIDI yet.** A future MIDI player allocates a pool of
+  `se_voice_t` and routes note-on/off with stealing via `active()`. Nothing
+  MIDI-specific was built — just the interface it will reuse.
+- [x] Docs: `se_voice.h`, `docs/audio.md` (Voices section + per-role config),
+  README + umbrella header, CHANGELOG `[Unreleased]`. Build green + verify
+  clean; text 106284 → 107086 (+802 B).
+- [ ] **On-device audio smoke owed:** confirm the synthwave music still sounds
+  right (the pad restructure shifts it only within float rounding).
 
 ---
 
