@@ -529,14 +529,15 @@ static void on_init(void* user) {
     backdrop_init();
 
     // Engine scene optimizations (both output-neutral — they change only
-    // draw speed, never the pixels). On-device A/B (2026-05-24) on frozen
-    // scenes showed frustum cull a strict win (obs −6% heavy, −6% light;
-    // FPS up in both), while depth order is overdraw-dependent (−3% heavy
-    // but +8% on light scenes where the per-frame sort outweighs the
-    // early-z savings). So: cull on, order off. See devdocs ER.2.
+    // draw speed, never the pixels). Frustum cull is a strict win in every
+    // scene. Depth order (front-to-back sort → early-z) measured roughly
+    // neutral on-device — the per-frame qsort offsets the skipped occluded
+    // writes — but it's enabled here for headroom: it can only help as
+    // overdraw grows, and the sort now runs in scene_prepare during the PPA
+    // backdrop DMA rather than serially. Toggle live with the C debug key.
     scene_set_options(&(se_scene_options_t){
         .frustum_cull = true,
-        .depth_order  = false,
+        .depth_order  = true,
     });
 
     game_init(&game);
