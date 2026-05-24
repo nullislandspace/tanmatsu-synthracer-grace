@@ -184,9 +184,15 @@
 // the packed value of this constant to set `game.in_shadow` — if
 // the floor base ever collapses to the same 565 word, the sampler
 // silently reads "always in shadow". Same caveat applies if anything
-// new in synthwave_step_base paints with a colour that quantises
-// to 0x284A.
+// paints the floor base (now the PPA floor FILL, FLOOR_BASE_PAX_COL)
+// with a colour that quantises to 0x284A.
 #define GAME_SHADOW_FLOOR_COLOR           0xFF2D0855u
+
+// Floor base colour (regular, not shadowed). Painted across the whole
+// below-horizon region by the PPA floor FILL (backdrop_submit_fill_floor);
+// see the quantisation caveat above (must stay distinct from
+// GAME_SHADOW_FLOOR_COLOR in RGB565).
+#define FLOOR_BASE_PAX_COL                0xFF5D0B8Bu
 
 // Multiplier applied to each RGB channel of the ship sprite when
 // the ship is in shadow. 0.7 = ~30% darker. Drives only the
@@ -432,11 +438,23 @@
 #define HORIZON_LOGICAL_Y 256
 #define SKY_ROWS          (HORIZON_LOGICAL_Y + 1)
 
+// Floor band the PPA floor FILL paints: the whole below-horizon region,
+// rows [SKY_ROWS, DISPLAY_LOG_H) — disjoint from the sky band [0, SKY_ROWS).
+#define FLOOR_FILL_TOP    SKY_ROWS
+#define FLOOR_FILL_ROWS   (DISPLAY_LOG_H - SKY_ROWS)
+
 // Sun cache: tight bounding box of the sun bands at their canonical
 // baseline. Bands span fb logical y = -4 (off-screen above) to ~174;
 // we render with y_bias = +4 so the topmost band lands at cache y=0
 // and the cache is exactly tall enough to hold the whole sun.
-#define SUN_CACHE_LOG_W   DISPLAY_LOG_W
+// The sun disc spans only logical x ~[294, 506] (centered on x=400), so the
+// cache holds just its bounding box instead of the full screen width — the
+// PPA sprite-blits it to SUN_CACHE_LOG_X. ~73% less SRM read+write than a
+// full-width cache, and ~76 KB instead of ~281 KB of PSRAM. SUN_CACHE_LOG_X
+// is the disc's left edge (294) minus a few px margin; the width covers the
+// disc (~212 px) plus margin.
+#define SUN_CACHE_LOG_X   290
+#define SUN_CACHE_LOG_W   220
 #define SUN_CACHE_LOG_H   180
 #define SUN_RENDER_Y_BIAS 4.0f
 

@@ -263,13 +263,13 @@ void synthwave_draw_sky(pax_buf_t* fb) {
     pax_background(fb, 0xFF552075);
 }
 
-void synthwave_draw_sun(pax_buf_t* fb, float dy) {
+void synthwave_draw_sun(pax_buf_t* fb, float dx, float dy) {
     pax_vec2f scratch[SUN_MAX_PTS];
 
     for (size_t i = 0; i < SUN_BAND_COUNT; i++) {
         sun_band_t const* band = &sun_bands[i];
         for (size_t p = 0; p < band->npts; p++) {
-            scratch[p].x = band->pts[p].x;
+            scratch[p].x = band->pts[p].x + dx;
             scratch[p].y = band->pts[p].y + dy - SUN_LIFT_PX;
         }
         if (sun_idx[i] != NULL) {
@@ -334,21 +334,11 @@ void synthwave_draw_top_grid(pax_buf_t* fb, float y_bias) {
 // aligned with obstacle bases at those world-z positions.
 #define FLOOR_HSTRIPE_DRAW_EVERY  3
 
-void synthwave_step_base(pax_buf_t* fb, bool fully_shadowed) {
-    float const horizon_y   = GRID_HORIZON_Y_BASE - GRID_LIFT_PX;
-    float const rect_top_y  = horizon_y + 1.0f;
-    float const rect_height = GRID_BOTTOM_Y - rect_top_y;
-
-    // Floor base color — full-width rect, stays on PAX since
-    // pax_range_setter_16bpp is already a tight halfword memset
-    // for horizontal runs (faster than a generic Bresenham would be).
-    // Once the sun has fully set the world is uniformly in shadow,
-    // so we just paint the floor base with the shadow colour
-    // instead of running per-obstacle shadow quads on top of the
-    // normal purple base.
-    pax_col_t const floor_base_col = fully_shadowed ? GAME_SHADOW_FLOOR_COLOR : 0xFF5D0B8Bu;
-    pax_simple_rect(fb, floor_base_col, 0, rect_top_y, DISPLAY_LOG_W, rect_height);
-}
+// (The floor base rect is no longer painted here — it moved to the engine
+// PPA floor FILL, backdrop_submit_fill_floor(), which runs alongside the
+// sky FILL during the geometry-prepare. synthwave_step_lines draws the grid
+// lines on top of that PPA-filled base; render_shadows draws the shadow
+// quads between them.)
 
 void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x, float cam_y) {
     // Camera's absolute world-z position. Mirrors how `world_advance`

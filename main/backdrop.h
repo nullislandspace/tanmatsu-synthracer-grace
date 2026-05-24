@@ -10,18 +10,20 @@
 //  completion latch, the logical->raw orientation maths, the aligned
 //  PSRAM allocation -- live in the engine (se_ppa.h).
 //
-//  The floor grid + obstacle shadows are NOT here -- main.c's on_backdrop
-//  draws them (on the CPU) after these submits, in parallel with the
-//  mountain BLEND. The submit *order* and the waits between them are the
-//  on_backdrop choreography, not this module: PPA does not order ops
-//  across clients, so the sun (SRM) and mountains (BLEND) must be
-//  serialised against the sky (FILL) by the caller via se_ppa_wait_one().
+//  The floor *base* IS here now (backdrop_submit_fill_floor — a PPA FILL of
+//  the below-horizon band, on the same FILL client as the sky). The floor
+//  grid lines + obstacle shadows are NOT -- main.c's on_backdrop draws those
+//  (on the CPU) on top of the filled base, in parallel with the mountain
+//  BLEND. Each submit is tagged with a job id and the engine pump runs them
+//  in submission order, so on_backdrop owns only the *choreography*: which id
+//  each step gets and where it se_ppa_wait_job()s for a result the CPU needs.
 //
 //  Layout constants (cache sizes, y-biases, sky/key colours, the horizon
 //  row) live in magicnumbers.h.
 // =====================================================================
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // One-time setup, called from on_init after synthwave_init(). Brings up
 // the engine PPA compositor (se_ppa_init), allocates the sun + mountain
@@ -31,11 +33,15 @@
 // failed init just leaves the per-frame submits as no-ops.
 void backdrop_init(void);
 
-// Per-frame composite steps (non-blocking PPA submits onto the game_ui
-// `fb` bridge). FILL paints the sky band; SUN copies the sun cache with
-// its top at `dest_top_log_y` (logical); BLEND composites the mountain
-// cache with a green colour-key. Each returns false (and logs) if the
-// submit was refused or failed. Serialise them with se_ppa_wait_one().
-bool backdrop_submit_fill_sky(void);
-bool backdrop_submit_sun(int dest_top_log_y);
-bool backdrop_submit_mountains(void);
+// Per-frame composite steps (non-blocking PPA enqueues onto the game_ui
+// `fb` bridge, each tagged with the caller's `job_id`). FILL_SKY paints the
+// sky band; FILL_FLOOR paints the below-horizon base (`fully_shadowed` picks
+// the shadow colour after full sunset); SUN sprite-blits the sun's bounding
+// box with its top at `dest_top_log_y` (logical), clipped at the horizon;
+// BLEND composites the mountain cache with a green colour-key. Each returns
+// false (and logs) if the submit was refused. The engine pump runs them in
+// submission order; wait for a step with se_ppa_wait_job(job_id).
+bool backdrop_submit_fill_sky(uint32_t job_id);
+bool backdrop_submit_fill_floor(uint32_t job_id, bool fully_shadowed);
+bool backdrop_submit_sun(uint32_t job_id, int dest_top_log_y);
+bool backdrop_submit_mountains(uint32_t job_id);

@@ -473,9 +473,8 @@ static int64_t s_t_bg_end       = 0;   // on_backdrop end (-> rast start)
 static int64_t s_prof_fg_end    = 0;   // last on_render end
 static int64_t prof_input_us    = 0;
 static int64_t prof_phys_us     = 0;
-static int64_t prof_bgfill_us   = 0;   // stage 1: FILL sky  ‖ scene prepare
-static int64_t prof_bgsun_us    = 0;   // stage 2: SRM sun (residual exposed wait)
-static int64_t prof_bgmtn_us    = 0;   // stage 3: BLEND mtn ‖ floor paint
+static int64_t prof_bgfill_us   = 0;   // sky+floor+sun fills, scene-prepare overlapped
+static int64_t prof_bgmtn_us    = 0;   // BLEND mtn ‖ floor grid + shadows
 static int64_t prof_emit_us     = 0;   // scene emit+cull+order (⊆ bgfill, overlapped)
 static int64_t prof_obs_us      = 0;   // scene rasterize (logged as "rast")
 static int64_t prof_fgrest_us   = 0;
@@ -958,44 +957,56 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         if (app_state == APP_STATE_CRASHING)       draw_ship = false;
         else if (app_state == APP_STATE_GAME_OVER) draw_ship = !s_run_was_crash;
 
-        // --- Stage 1: FILL sky  ‖  scene prepare (emit + cull + order) ---
-        backdrop_submit_fill_sky();
+        // The PPA pump runs jobs in submission order; we tag each with an id
+        // and wait_job() only where the CPU needs the result. (Per-frame ids;
+        // waiting for J_MTN at the end drains the queue so they reuse cleanly.)
+        enum { J_SKY = 0, J_FLOOR, J_SUN, J_MTN };
+
+        // --- Stage 1: enqueue FILL sky + FILL floor  ‖  scene prepare ---
+        // Two FILL jobs back to back; the pump runs them while the CPU
+        // geometry-prepare (emit + cull + order — touches no framebuffer
+        // pixels) overlaps. The floor base used to be a CPU rect in stage 3;
+        // as a FILL job it costs no CPU and hides under the prepare.
+        backdrop_submit_fill_sky(J_SKY);
+        backdrop_submit_fill_floor(J_FLOOR, fully_shadowed);
         int64_t const t_emit0 = esp_timer_get_time();
         if (scene_active) {
             render_prepare_scene(&world, &game, draw_ship);
         }
         int64_t const t_emit1 = esp_timer_get_time();
-        se_ppa_wait_one();
-        int64_t const t_after_fill = esp_timer_get_time();
 
-        // --- Stage 2: SRM sun. The SRM destination Y is game.sun_y, which
-        //     the physics step integrates each frame (frozen in TITLE /
-        //     GAME_OVER). No non-fb CPU work left, so this wait is exposed.
-        backdrop_submit_sun((int)game.sun_y);
-        se_ppa_wait_one();
+        // --- Stage 2: enqueue SRM sun (small, horizon-clipped sprite). Dest Y
+        //     is game.sun_y, integrated each frame by physics (frozen in
+        //     TITLE / GAME_OVER).
+        backdrop_submit_sun(J_SUN, (int)game.sun_y);
+        // Wait for sky+floor+sun (all done in order by J_SUN): the CPU floor
+        // grid/shadows below write the floor, whose top rows share a cache
+        // line with the sky the FILL/SUN just wrote — so they can't overlap.
+        se_ppa_wait_job(J_SUN);
         int64_t const t_after_sun = esp_timer_get_time();
 
-        // --- Stage 3: BLEND mountains  ‖  floor paint ---
-        // Floor paint is three passes so the obstacle-shadow quads sit between
-        // the floor base and the grid lines (lines on top keep them visible in
-        // shadow without per-pixel blend math). (Phase 9.1d: the old floor-
-        // pixel in_shadow sampler is gone — game_collide derives the gameplay
-        // shadow flag from geometry; render_shadows is now a pure visual cue.)
-        backdrop_submit_mountains();
-        synthwave_step_base(fb, fully_shadowed);
+        // --- Stage 3: BLEND mountains  ‖  floor grid + shadows ---
+        // The floor base is already down. The CPU now paints the obstacle-
+        // shadow quads then the grid lines on top of it, in parallel with the
+        // mountain BLEND — the one PPA op safe to overlap with CPU floor work
+        // (sparse colour-keyed blend; the dense sky/sun fills are not, hence
+        // they're done before this). (Phase 9.1d: the old floor-pixel in_shadow
+        // sampler is gone — game_collide derives the gameplay shadow flag from
+        // geometry; render_shadows is now a visual cue.)
+        backdrop_submit_mountains(J_MTN);
         if (!is_menu_state) {
             render_shadows(fb, &world, game.cam_x, game.sun_y);
         }
         synthwave_step_lines(fb, floor_scroll, floor_cam_x, cam_y);
-        // Wait for the BLEND to finish — obstacles + HUD write into the sky
-        // band, so the backdrop must be down before any foreground render.
-        se_ppa_wait_one();
+        // Wait for the BLEND — obstacles + HUD write into the sky band, so the
+        // backdrop must be fully down before any foreground render. This also
+        // drains the queue (J_MTN is the last job), so ids reset cleanly.
+        se_ppa_wait_job(J_MTN);
         int64_t const t_after_mtn = esp_timer_get_time();
 
-        prof_bgfill_us += t_after_fill - s_t_phys_end;
-        prof_bgsun_us  += t_after_sun  - t_after_fill;
-        prof_bgmtn_us  += t_after_mtn  - t_after_sun;
-        prof_emit_us   += t_emit1      - t_emit0;   // ⊆ bgfill (overlapped w/ FILL)
+        prof_bgfill_us += t_after_sun - s_t_phys_end;   // sky+floor+sun fills, prepare overlapped
+        prof_bgmtn_us  += t_after_mtn - t_after_sun;    // mountain ‖ floor grid + shadows
+        prof_emit_us   += t_emit1     - t_emit0;        // ⊆ bgfill (overlapped with the fills)
         s_t_bg_end      = t_after_mtn;
 }
 
@@ -1051,12 +1062,11 @@ static void on_render(pax_buf_t* fb_param, void* user) {
             int64_t rs_tri_us = 0, rs_line_us = 0;
             scene_raster_stats(&rs_tri_n, &rs_line_n, &rs_tri_us, &rs_line_us);
             ESP_LOGI(TAG,
-                     "FPS=%.1f  in=%.2f phys=%.2f bgfill=%.2f bgsun=%.2f bgmtn=%.2f emit=%.2f rast=%.2f fgrest=%.2f present=%.2f ms  tris=%d lines=%d rtri=%.2f rline=%.2f  dord=%d frz=%d  intfree=%uKB intblk=%uKB",
+                     "FPS=%.1f  in=%.2f phys=%.2f bgfill=%.2f bgmtn=%.2f emit=%.2f rast=%.2f fgrest=%.2f present=%.2f ms  tris=%d lines=%d rtri=%.2f rline=%.2f  dord=%d frz=%d  intfree=%uKB intblk=%uKB",
                      fps,
                      (float)prof_input_us   * inv_fr / 1000.0f,
                      (float)prof_phys_us    * inv_fr / 1000.0f,
                      (float)prof_bgfill_us  * inv_fr / 1000.0f,
-                     (float)prof_bgsun_us   * inv_fr / 1000.0f,
                      (float)prof_bgmtn_us   * inv_fr / 1000.0f,
                      // emit is the geometry prepare; it overlaps the FILL DMA
                      // so it is ⊆ bgfill, NOT additive to the frame total.
@@ -1077,9 +1087,8 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                      // is big enough). Both in KiB.
                      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                      (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
-            prof_input_us  = prof_phys_us = prof_bgfill_us = prof_bgsun_us = 0;
-            prof_bgmtn_us  = prof_emit_us = prof_obs_us = 0;
-            prof_fgrest_us = prof_present_us = 0;
+            prof_input_us  = prof_phys_us = prof_bgfill_us = prof_bgmtn_us = 0;
+            prof_emit_us   = prof_obs_us = prof_fgrest_us = prof_present_us = 0;
             prof_frames    = 0;
             prof_window_start = t_after_fg;
         }
