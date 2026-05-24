@@ -4402,3 +4402,31 @@
       **On-device smoke owed** (every screen + transition still works: slot
       select → menu → daily/seeded run → pause → settings family → upgrade →
       stats → credits → game-over/checkpoint-redo).
+- 2026-05-24 — **ER first cut: se_scene immediate → deferred (architecture
+  only).** `scene_tri` no longer rasterizes on call — it projects with the
+  current camera and **accumulates** into a per-frame PSRAM triangle list
+  (`SCENE_TRI_CAP 4096`, ~160 KB, overflow-drops like the existing edge
+  list). New **`scene_render(se_render_mode_t mode)`** rasterizes the whole
+  accumulated frame — tris in submission order (per-pixel z-test, so order is
+  irrelevant) then edges — and empties the lists. `scene_flush()` is now an
+  alias for `scene_render(SE_RENDER_ZBUFFER)`; the one call site
+  (`render_run_scene`) uses `scene_render` directly. `se_render_mode_t`
+  (`SE_RENDER_ZBUFFER` / `SE_RENDER_DEFAULT`) is the algorithm-selection hook;
+  only the z-buffer ships.
+    - **The point is the architecture, not a behaviour change:** the engine
+      now holds the whole frame, so it can later own the algorithm + cull +
+      order centrally (against FOV/resolution) with no game call-site change.
+      The **cull + order passes ship as no-ops** (`scene_cull_pass` /
+      `scene_order_pass`, TODO frustum/back-face + front-to-back sort) — RTS
+      pre-culls in how `world.c` builds the object list, so the first cut is
+      behaviour-identical. The whole-tri near-clip guard stays in `scene_tri`
+      (a projection guard, not the central cull).
+    - **Likely future win** (when the order pass stops being a no-op):
+      front-to-back sort gives early-z rejection on a fill-bound, GPU-less
+      device — RTS's frame is dominated by fill (`obs`/`bgflr` 14–40 ms).
+      Net is an **on-device A/B question** (buffering adds PSRAM traffic; the
+      sort removes fill) — the regression gate becomes a *win* gate.
+    - Build green + verify clean; text 105144 → 105286 (+142 B: the deferred
+      path + the two seam stubs). Output expected pixel-identical (same tris,
+      same order, same z-buffer). **On-device A/B owed** (FPS vs baseline; the
+      scene must look unchanged in a run — obstacles, ship, wireframes).

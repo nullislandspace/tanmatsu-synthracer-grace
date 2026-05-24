@@ -33,33 +33,57 @@
 // pixel reads as infinitely far and scene_begin costs one counter
 // increment instead of a full-screen memset.
 //
-// Triangles are rasterized immediately on submit — the z-buffer makes
-// their order irrelevant. Wireframe edges are deferred and drawn by
-// scene_flush() after every triangle, depth-tested with a small bias
-// so an edge wins against the coplanar face it outlines but still
-// loses to genuinely nearer geometry.
+// Deferred submission (ER): scene_tri / scene_line do NOT draw on call.
+// They project the world-space geometry with the current camera and
+// accumulate it into per-frame triangle / edge lists. scene_render()
+// then rasterizes the whole frame at once: triangles first (per-pixel
+// z-tested, so their order is irrelevant), then wireframe edges (z-tested
+// with a small bias so an edge wins against the coplanar face it outlines
+// but still loses to genuinely nearer geometry). Holding the whole frame
+// lets the engine own the algorithm (z-buffer today; painter's / sorted /
+// tiled later) and, in future, cull + order centrally against the FOV /
+// resolution — without any game call site changing. Those cull/order
+// passes ship as no-ops first (the renderer is otherwise behaviour-
+// identical to the old hybrid-immediate pipeline).
 
-// Allocate the depth buffer, frame-stamp plane and deferred-edge
-// buffer (all PSRAM). Call once at boot, before the first frame.
+// Which rasterization algorithm scene_render() uses. Only the per-pixel
+// z-buffer ships today; the enum exists so a game can select a different
+// pipeline later (painter's, tiled, ...) with no change to its submit
+// calls. SE_RENDER_DEFAULT is the engine's recommended choice.
+typedef enum {
+    SE_RENDER_ZBUFFER = 0,           // per-pixel reciprocal-z depth test
+    SE_RENDER_DEFAULT = SE_RENDER_ZBUFFER,
+} se_render_mode_t;
+
+// Allocate the depth buffer, frame-stamp plane and the deferred triangle
+// + edge buffers (all PSRAM). Call once at boot, before the first frame.
 void scene_init(void);
 
 // Begin a frame's 3D pass: bind the framebuffer, advance the frame
-// stamp (logically emptying the depth buffer), reset the deferred-
-// edge buffer. Call once per frame before any scene_tri / scene_line.
+// stamp (logically emptying the depth buffer), reset the deferred
+// triangle + edge lists. Call once per frame before any scene_tri /
+// scene_line.
 void scene_begin(pax_buf_t* fb);
 
-// Submit a world-space triangle. Projected and rasterized immediately
-// with a per-pixel depth test + write. `argb` is an ARGB8888 colour.
+// Submit a world-space triangle. Projected with the current camera and
+// accumulated; rasterized at scene_render(). `argb` is ARGB8888.
 void scene_tri(float x0, float y0, float z0,
                float x1, float y1, float z1,
                float x2, float y2, float z2, uint32_t argb);
 
-// Submit a world-space wireframe edge. Deferred until scene_flush().
+// Submit a world-space wireframe edge. Projected + accumulated; drawn at
+// scene_render() after every triangle.
 void scene_line(float x0, float y0, float z0,
                 float x1, float y1, float z1, uint32_t argb);
 
-// Rasterize every deferred edge. Call once after all triangles and
-// edges for the frame have been submitted.
+// Rasterize the whole accumulated frame (triangles then edges) with the
+// chosen algorithm, then empty the lists. Call once after all geometry
+// for the frame has been submitted. Central cull + order passes run here
+// (no-ops in the current cut). SE_RENDER_ZBUFFER reproduces the legacy
+// per-pixel-depth output exactly.
+void scene_render(se_render_mode_t mode);
+
+// Back-compat alias for scene_render(SE_RENDER_ZBUFFER).
 void scene_flush(void);
 
 // --- Camera & projection ---------------------------------------------

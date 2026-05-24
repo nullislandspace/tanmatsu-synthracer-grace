@@ -54,7 +54,7 @@ void render_run_scene(world_state_t const* w, game_state_t const* g,
     scene_begin(fb);
     render_submit_obstacles(w);
     if (draw_ship) game_submit_ship(g);
-    scene_flush();
+    scene_render(SE_RENDER_ZBUFFER);   // rasterize the accumulated frame
 }
 
 // Render the scene behind a settings screen. Opened from the pause

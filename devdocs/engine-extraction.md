@@ -614,17 +614,26 @@ call sites.
   (so games that pre-cull aren't double-charged). Deferred to when the cull
   stops being a dummy.
 
-**Checklist (when scheduled):**
-- [ ] `scene_tri` accumulates into a per-frame PSRAM triangle list (cap +
-  overflow-drop like edges).
-- [ ] `scene_render(se_render_mode_t mode)` — rasterize the accumulated tris
-  + edges; default `SE_RENDER_ZBUFFER` reproduces today's output exactly.
-  `scene_flush` folds in (or stays as an alias).
-- [ ] Cull seam (`se_render` frustum + back-face) wired as a **no-op**
-  pass-through initially.
-- [ ] Order seam (front-to-back sort) wired as a **no-op** initially.
-- [ ] Build + verify + **on-device A/B** (FPS vs the immediate-mode baseline).
-- [ ] Revise `synthengine3D/docs/renderer.md` for the deferred contract.
+**Checklist — first cut landed 2026-05-24 (architecture only; cull/order are no-ops):**
+- [x] `scene_tri` accumulates into a per-frame PSRAM triangle list
+  (`SCENE_TRI_CAP 4096`, ~40 B/tri ≈ 160 KB; overflow-drops like edges).
+  Projection happens at submit (current camera), rasterization at render.
+- [x] `scene_render(se_render_mode_t mode)` — rasterizes the accumulated tris
+  (submission order, per-pixel z-test) then the edges. `se_render_mode_t`
+  added (`SE_RENDER_ZBUFFER` / `SE_RENDER_DEFAULT`); only the z-buffer ships.
+  `scene_flush()` is now an alias for `scene_render(SE_RENDER_ZBUFFER)`; the
+  one game call site (`render_run_scene`) calls `scene_render` directly.
+- [x] Cull seam (`scene_cull_pass`) wired as a **no-op** (frustum/back-face
+  TODO). The whole-triangle near-clip guard stays in `scene_tri` (projection
+  guard, not the central cull).
+- [x] Order seam (`scene_order_pass`, front-to-back sort) wired as a **no-op**.
+- [ ] **On-device A/B owed** (FPS vs the immediate-mode baseline; output is
+  expected pixel-identical since same tris, same order, same z-buffer — the
+  only delta is the buffering pass's PSRAM traffic).
+- [ ] Renderer doc: no `synthengine3D/docs/` yet, so the deferred contract
+  gets written correctly when **E8** authors `docs/renderer.md` (the header
+  comment in `se_scene.h` already describes it). Build green + verify clean;
+  text 105144 → 105286 (+142 B scaffolding).
 
 ---
 

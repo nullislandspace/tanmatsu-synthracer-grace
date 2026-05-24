@@ -69,13 +69,21 @@ void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_s
 
 #define SCENE_PIXELS  (DISPLAY_LOG_W * DISPLAY_RAW_STRIDE)
 
-// Deferred wireframe edges. ~80 obstacles * ~14 edges + the ship
-// leaves generous headroom; overflow silently drops extra edges.
+// Deferred geometry caps. ~80 obstacles * (a few faces * 2 tris) + the
+// ship + pickups stays well under the triangle cap; ~80 * ~14 edges fits
+// the edge cap. Overflow silently drops extra geometry (see scene_tri /
+// scene_line). At ~40 B/tri the triangle buffer is ~160 KB of PSRAM.
+#define SCENE_TRI_CAP   4096
 #define SCENE_LINE_CAP  4096
 
 typedef struct {
     float sx, sy, w;   // projected screen x/y + 1/z depth
 } scene_vtx_t;
+
+typedef struct {
+    scene_vtx_t v[3];
+    uint16_t    packed;
+} scene_tri_t;
 
 typedef struct {
     scene_vtx_t v[2];
@@ -84,7 +92,9 @@ typedef struct {
 
 static uint16_t*    s_depth   = NULL;   // encoded 1/z, indexed like the fb
 static uint8_t*     s_stamp   = NULL;   // frame tag per pixel
-static scene_seg_t* s_lines   = NULL;
+static scene_tri_t* s_tris    = NULL;   // accumulated triangles (this frame)
+static int          s_tri_n   = 0;
+static scene_seg_t* s_lines   = NULL;   // accumulated wireframe edges
 static int          s_line_n  = 0;
 
 static uint16_t*    s_fb      = NULL;
@@ -94,10 +104,11 @@ static uint8_t      s_frame   = 0;      // current frame tag (never 0 while live
 void scene_init(void) {
     s_depth = heap_caps_malloc(SCENE_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     s_stamp = heap_caps_malloc(SCENE_PIXELS * sizeof(uint8_t),  MALLOC_CAP_SPIRAM);
+    s_tris  = heap_caps_malloc(SCENE_TRI_CAP  * sizeof(scene_tri_t), MALLOC_CAP_SPIRAM);
     s_lines = heap_caps_malloc(SCENE_LINE_CAP * sizeof(scene_seg_t), MALLOC_CAP_SPIRAM);
-    if (!s_depth || !s_stamp || !s_lines) {
-        ESP_LOGE(TAG, "scene buffer allocation failed (depth=%p stamp=%p lines=%p)",
-                 s_depth, s_stamp, s_lines);
+    if (!s_depth || !s_stamp || !s_tris || !s_lines) {
+        ESP_LOGE(TAG, "scene buffer allocation failed (depth=%p stamp=%p tris=%p lines=%p)",
+                 s_depth, s_stamp, s_tris, s_lines);
         return;
     }
     // One-time stamp clear so no garbage cell matches the first
@@ -109,6 +120,7 @@ void scene_init(void) {
 void scene_begin(pax_buf_t* fb) {
     s_fb     = (uint16_t*)pax_buf_get_pixels(fb);
     s_rev    = fb->reverse_endianness;
+    s_tri_n  = 0;
     s_line_n = 0;
     // Advance the frame tag; skip 0 so a zero-initialised stamp cell
     // is never mistaken for "written this frame".
@@ -282,18 +294,21 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
 void scene_tri(float x0, float y0, float z0,
                float x1, float y1, float z1,
                float x2, float y2, float z2, uint32_t argb) {
-    if (!s_depth) return;
+    if (!s_tris) return;
     // Whole-triangle near cull: drop it only if every vertex is
     // behind the near plane (otherwise the per-vertex clamp in
-    // scene_project keeps the projection bounded).
+    // scene_project keeps the projection bounded). This is a
+    // projection guard, not the central frustum cull (that is the
+    // no-op seam in scene_render).
     if (z0 < RENDER_NEAR_CLIP_Z && z1 < RENDER_NEAR_CLIP_Z && z2 < RENDER_NEAR_CLIP_Z) {
         return;
     }
-    scene_vtx_t a, b, c;
-    scene_project(x0, y0, z0, &a);
-    scene_project(x1, y1, z1, &b);
-    scene_project(x2, y2, z2, &c);
-    scene_raster_tri(a, b, c, direct_565_pack(argb, s_rev));
+    if (s_tri_n >= SCENE_TRI_CAP) return;   // overflow: drop extra tris
+    scene_tri_t* t = &s_tris[s_tri_n++];
+    scene_project(x0, y0, z0, &t->v[0]);
+    scene_project(x1, y1, z1, &t->v[1]);
+    scene_project(x2, y2, z2, &t->v[2]);
+    t->packed = direct_565_pack(argb, s_rev);
 }
 
 void scene_line(float x0, float y0, float z0,
@@ -307,9 +322,42 @@ void scene_line(float x0, float y0, float z0,
     seg->packed = direct_565_pack(argb, s_rev);
 }
 
-void scene_flush(void) {
+// --- Deferred render: cull -> order -> rasterize ------------------------------
+//
+// Central cull / order seams. No-ops in this cut: Race the Synth pre-culls
+// in how world.c generates the object list and submits naive geometry, so
+// the first ER cut is behaviour-identical to the old hybrid-immediate
+// pipeline. Real work goes here later (frustum + back-face rejection tuned
+// to FOV/resolution; front-to-back ordering for early-z on the fill-bound
+// device) WITHOUT touching any game submit call site.
+static void scene_cull_pass(void) {
+    // TODO(ER): frustum + back-face cull of s_tris / s_lines in place.
+}
+static void scene_order_pass(void) {
+    // TODO(ER): front-to-back sort of s_tris so occluded fragments fail
+    // early-z without being written (the likely win on a fill-bound GPU-less
+    // device). Edges stay drawn after tris regardless of order.
+}
+
+void scene_render(se_render_mode_t mode) {
+    (void)mode;   // only SE_RENDER_ZBUFFER ships today
+
+    scene_cull_pass();    // no-op seam
+    scene_order_pass();   // no-op seam
+
+    // Triangles first (per-pixel z-test makes their order irrelevant), in
+    // submission order -- identical to the old immediate path.
+    for (int i = 0; i < s_tri_n; i++) {
+        scene_raster_tri(s_tris[i].v[0], s_tris[i].v[1], s_tris[i].v[2], s_tris[i].packed);
+    }
+    // Then the wireframe edges, z-tested against the depth the tris wrote.
     for (int i = 0; i < s_line_n; i++) {
         scene_raster_line(s_lines[i].v[0], s_lines[i].v[1], s_lines[i].packed);
     }
+    s_tri_n  = 0;
     s_line_n = 0;
+}
+
+void scene_flush(void) {
+    scene_render(SE_RENDER_ZBUFFER);
 }
