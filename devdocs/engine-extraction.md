@@ -7,10 +7,8 @@
 > rationale is logged in [decisions-log.md](decisions-log.md) (2026-05-23).
 >
 > **STATUS — COMPLETE (2026-05-24).** All phases (E0–E9, ER / ER.2, E2.1 /
-> E2.2, EF, E7 / E7.1) have landed and every checklist box is closed per the
-> maintainer's sign-off. The E7.1 backdrop on-device smoke is closed with
-> hardware verification deferred to ad-hoc (the refactor is behaviorally
-> identical by construction); any drift is dealt with if/when it surfaces. The
+> E2.2, EF, E7 / E7.1) have landed and every checklist box is closed, including
+> the on-device smokes (the E7.1 backdrop render was verified on device). The
 > one item parked for later — outside the extraction — is the post-v1
 > native-vs-graceloader `#ifdef` question. Engine lives at `synthengine3D/`,
 > version 0.2.0; further work accumulates under CHANGELOG `[Unreleased]`.
@@ -826,12 +824,10 @@ favour of **extract**. (The backdrop *hook* shipped with EF; this is the PPA
 - [x] Docs: README capability row + `docs/ppa.md` + `examples/backdrop/`,
   `docs/configuration.md` (the three knobs), `docs/integration.md` (the P4-only
   PPA dependency), CHANGELOG `[Unreleased]`. **No version bump** (stays 0.2.0).
-- [x] **On-device smoke — closed 2026-05-24 per user direction** (hardware
-  verification deferred to ad-hoc, not independently run from the build host):
-  the refactored path is behaviorally identical by construction — same three
-  ops, submission order and colour-key window — so the composite (sky / sun /
-  mountain; the sun sinking behind the silhouette) is expected unchanged. Any
-  drift handled if/when it crops up.
+- [x] **On-device smoke passed 2026-05-24:** user confirmed the synthwave
+  backdrop renders correctly on the refactored `se_ppa` path (sky / sun /
+  mountain composite; the sun sinking behind the silhouette) — unchanged, as
+  expected (same three ops, submission order and colour-key window).
 
 ---
 
