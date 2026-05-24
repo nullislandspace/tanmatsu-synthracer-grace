@@ -4505,7 +4505,8 @@
       boundary" section with a moved-vs-stayed table; flagged the design-era
       module sections as historical). `devdocs/README.md` status table E-row
       flipped to "essentially complete."
-    - **Owed:** one on-device full playthrough of the branch (render / audio /
-      save / menus / objects) as the final sign-off. The extraction (E0–E9 + ER
-      first cut + E2.1) is otherwise done; deferred follow-ons: ER's real
-      cull/order passes (a measured cut) and pluggable music voice waveforms.
+    - **On-device full playthrough passed 2026-05-24** (render / audio / save /
+      menus / objects) — the final sign-off. **The engine extraction (E0–E9 +
+      ER first cut + E2.1) is COMPLETE.** Deferred-by-design follow-ons remain
+      (not needed by this game): ER's real cull/order passes (a measured cut)
+      and pluggable music voice waveforms.

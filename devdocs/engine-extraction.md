@@ -593,8 +593,8 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   "hershey" grep hit was the *comment* on a public `se_text.h` include in
   `objects/synthengine_sign.c`, which uses the public `simplex[]` table).
   Nothing in `main/` reaches into `synthengine3D/src/`.
-- [ ] **On-device full-playthrough smoke owed** (render / audio / save / menus /
-  objects) — the one item that needs the device.
+- [x] **On-device full-playthrough smoke passed 2026-05-24** (render / audio /
+  save / menus / objects) — the final sign-off. **Engine extraction complete.**
 - [x] Updated the game docs to the engine boundary: top-level `README.md` (built
   on SynthEngine3D + the split), and `devdocs/architecture.md` (fixed the stale
   "unmodified template" intro; added an "Engine / game boundary" section with
