@@ -417,11 +417,23 @@ void synthwave_step_lines(pax_buf_t* fb, float dz_world, float cam_x, float cam_
     int const kx_min = (int)ceilf (-FLOOR_PLAYFIELD_HALF_W / FLOOR_LANE_L);
     int const kx_max = (int)floorf( FLOOR_PLAYFIELD_HALF_W / FLOOR_LANE_L);
 
+    // The lanes converge on the vanishing point (FLOOR_HALF_W, horizon_y),
+    // but that point sits on row horizon_y — the bottom row of the PPA sky
+    // band [0..HORIZON]. The backdrop (sky / sun / mountains, including the
+    // baked-in magenta horizon line) owns that band and takes precedence, so
+    // the floor must not write into it. Start each lane one row below the
+    // horizon, stepping along the same ray so the vanishing-point alignment
+    // (an obstacle at a given world-X lands exactly on its lane) is preserved.
+    float const lane_top_y = horizon_y + 1.0f;
+    float const lane_span  = sy_bot - horizon_y;
+    float const lane_t_top = (lane_span > 1.0f) ? (1.0f / lane_span) : 0.0f;
+
     for (int k = kx_min; k <= kx_max; k++) {
         float const X     = (float)k * FLOOR_LANE_L;
         float const dx    = X - cam_x;
         float const x_bot = FLOOR_HALF_W + FLOOR_F * dx / FLOOR_Z_NEAR;
-        direct_565_line(fb_pixels, (int)FLOOR_HALF_W, (int)horizon_y, (int)x_bot, (int)sy_bot, grid_packed);
+        float const x_top = FLOOR_HALF_W + (x_bot - FLOOR_HALF_W) * lane_t_top;
+        direct_565_line(fb_pixels, (int)x_top, (int)lane_top_y, (int)x_bot, (int)sy_bot, grid_packed);
     }
 
     // Horizontal scanlines anchored to absolute world-z positions
