@@ -26,9 +26,10 @@
 #include "se_run.h"             // EF  -- application framework / run loop (API; impl staged in)
 #include "se_hw.h"              // EF  -- device-global hardware settings (volume/brightness)
 #include "se_ui.h"              // EF  -- UI / list-menu system
+#include "se_bindings.h"        // EF  -- input bindings (remap + persistence)
 
-// Subsystem public headers added as the framework lands (EF):
-//   #include "se_bindings.h"    // EF -- input remap dialog + persistence (forthcoming)
-//   (se_ui.h gains the blocking run-menu + key-capture helpers when the
-//    controls/rebind screens are ported.)
+// Still to land as the framework completes (EF):
+//   (se_ui.h gains the blocking run-menu + key-capture helpers, and
+//    se_bindings.h its engine-rendered remap dialog, when the
+//    controls/rebind screen is ported.)
 //   (se_object.h: not extracted -- E5 deferred, object pool stays game-side)

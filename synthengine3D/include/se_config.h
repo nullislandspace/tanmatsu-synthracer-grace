@@ -107,6 +107,13 @@
 #define SE_HW_VOLUME_STEP_PCT  5
 #endif
 
+// Maximum number of remappable controls the bindings subsystem
+// (se_bindings.h) tracks. The game declares up to this many; raise it for
+// a game with a larger control set.
+#ifndef SE_BINDINGS_MAX
+#define SE_BINDINGS_MAX  16
+#endif
+
 // ---- UI / menu system (se_ui.h) -------------------------------------
 //
 // Theme colours (ARGB8888) for the list-menu renderer, and the fixed

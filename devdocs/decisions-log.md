@@ -4180,3 +4180,36 @@
       Controls ports onto `se_bindings` + the engine rebind dialog. text
       98797→98783. **On-device smoke owed** (main menu nav + all entries; pause
       F4-resume, Resume/Settings/Abort rows, Settings-from-pause).
+    - *On-device smoke: passed (user, 2026-05-24) — Main + Pause.*
+
+- 2026-05-24 — **EF sub-step 4a: `se_bindings` (the binding-storage half).**
+  New engine module `se_bindings.{c,h}` owns remappable key bindings +
+  their persistence; the game *declares* its controls, the engine *stores*
+  them. This is the storage foundation for the engine-owned remap dialog
+  (sub-step 4b).
+    - **API.** The game passes a `se_bindings_config_t` (NVS namespace +
+      a `se_binding_def_t[]` of `{id, label, nvs_key, default_sc}`) to
+      `se_bindings_init`; then `se_bindings_get(id)` (current scancode,
+      polled for steering) / `se_bindings_set(id, sc)` (set + persist). A
+      tiny linear scan maps the game's control id → slot (≤ `SE_BINDINGS_MAX`,
+      a `se_config.h` cap); no malloc.
+    - **Game side thinned.** `controls_settings.c` kept only the **gyro** flag
+      (a toggle, not a binding — answers the long-open gyro-row question: it
+      stays a game setting) and now declares the binding table + calls
+      `se_bindings_init` from `controls_settings_load`, so `main.c`'s boot path
+      didn't change. `controls_settings_key`/`set_key` + the keybind array were
+      deleted; `input.c` (steering + pause-key match) and `main.c` (Controls
+      menu rows + capture write) now call `se_bindings_get`/`set`.
+    - **Migration-safe:** same NVS namespace (`synthracer`), same keys
+      (`ctl_k_left/right/item/pause`), same defaults (ESC / Backspace / Space /
+      F4) — a player's already-remapped keys load unchanged.
+    - **Deferred to 4b:** the engine-*rendered* remap dialog — the Controls
+      menu still uses the game's `menu_draw` (KEYBIND rows) and the bespoke
+      `APP_STATE_KEY_CAPTURE`; they port onto `se_ui` (`CUSTOM` rows) +
+      `se_ui_capture_key` next, which also lets `menu_draw`/`menu_view_t` finally
+      be deleted. The `label` field in `se_binding_def_t` is carried now for
+      that dialog (unused so far).
+    - **Behaviour-identical** (storage semantics unchanged). Build green +
+      `make verify` clean; text 98783→99173 (+390 B: the generic bindings
+      layer + config indirection; not a hot path). **On-device smoke owed**
+      (steering keys work, remap a key → persists across reboot, gyro toggle).

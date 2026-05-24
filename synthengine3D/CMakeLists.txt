@@ -25,6 +25,7 @@ set(SE_SRCS
     src/se_run.c           # EF: application framework / run loop
     src/se_hw.c            # EF: device-global hardware settings (volume/brightness)
     src/se_ui.c            # EF: UI / list-menu system
+    src/se_bindings.c      # EF: input bindings (remap + persistence)
 )
 
 if(COMMAND idf_component_register)

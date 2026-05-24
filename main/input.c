@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "graceloader_imu.h"
+#include "se_bindings.h"     // se_bindings_get (remappable keybinds)
 #include "se_run.h"          // se_input_set_passthrough (rebind capture)
 
 static char const TAG[] = "input";
@@ -150,7 +151,7 @@ void input_handle_event(bsp_input_event_t const* ev) {
             // independently of the chain above so a player who binds
             // pause onto an already-meaningful key still gets both
             // behaviours.
-            if (sc == controls_settings_key(CONTROL_KEY_PAUSE)) {
+            if (sc == se_bindings_get(CONTROL_KEY_PAUSE)) {
                 s_pause_toggle = true;
             }
             break;
@@ -239,9 +240,9 @@ void input_steer_held(bool* out_left, bool* out_right) {
     // LEFT/RIGHT above always steers and is not remappable.
     if (s_mode == INPUT_MODE_PLAYING) {
         left  = left  || poll_scancode(
-                    (bsp_input_scancode_t)controls_settings_key(CONTROL_KEY_LEFT));
+                    (bsp_input_scancode_t)se_bindings_get(CONTROL_KEY_LEFT));
         right = right || poll_scancode(
-                    (bsp_input_scancode_t)controls_settings_key(CONTROL_KEY_RIGHT));
+                    (bsp_input_scancode_t)se_bindings_get(CONTROL_KEY_RIGHT));
     }
     *out_left  = left;
     *out_right = right;

@@ -458,10 +458,23 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   port, where a blocking capture is actually needed. Build green + verify;
   text 98797→98783 after the Main/Pause port (the big drop comes when Controls
   ports and `menu_draw` is finally deleted).
-- [ ] **Input bindings subsystem** (`se_bindings_*`): game declares controls
-  + defaults + NVS namespace; engine owns load/persist + `get`/`set` + the
-  remap dialog. Absorbs `controls_settings.c` + the controls menu +
-  `APP_STATE_KEY_CAPTURE`; resolve the gyro-toggle-row detail.
+- [~] **Input bindings subsystem** (`se_bindings_*`) — **storage half done
+  (sub-step 4a, 2026-05-24).** New engine module `se_bindings.{c,h}`: the game
+  declares its controls (`se_binding_def_t {id, label, nvs_key, default_sc}`)
+  + an NVS namespace via `se_bindings_config_t`; the engine owns
+  `se_bindings_init` (load persisted, else defaults), `se_bindings_get(id)`
+  (polled for steering), `se_bindings_set(id, sc)` (set + persist). The game's
+  `controls_settings.c` kept only the **gyro** flag (a toggle, not a binding)
+  and now declares the binding table + calls `se_bindings_init` from its
+  loader; `input.c` + `main.c` query `se_bindings_get`/`set`. **Same NVS
+  namespace + keys + defaults** (`synthracer` / `ctl_k_*` / ESC·Backspace·
+  Space·F4), so existing remapped keys carry over. *Remaining (sub-step 4b):*
+  the **engine-rendered remap dialog** — port the Controls menu onto `se_ui`
+  (`CUSTOM` keybind rows via a game `draw_value` callback) + `se_ui_capture_key`,
+  retire `APP_STATE_KEY_CAPTURE` + the game's `menu_draw`, and resolve the
+  gyro-toggle-row placement. Build green + verify; text 98783→99173 (+390 B,
+  the generic bindings layer; binding `get` is a tiny linear scan, not a hot
+  path).
 - [ ] Port `main.c`'s list menus + rebind capture; retire the bespoke states;
   add the brightness rows (screen / keyboard / LED) to the settings menu.
 - [ ] `on_backdrop` hook; synthwave invoked from it.

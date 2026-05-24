@@ -36,6 +36,7 @@
 #include "render.h"
 #include "se_text.h"
 #include "save.h"
+#include "se_bindings.h"
 #include "se_run.h"
 #include "se_scene.h"
 #include "se_ui.h"
@@ -1122,13 +1123,13 @@ static void draw_controls_menu(void) {
         [CONTROLS_ENTRY_GYRO]  = { .label = "Gyroscope", .kind = MENU_VAL_CHECK,
                                    .checked = controls_settings_gyro_on() },
         [CONTROLS_ENTRY_LEFT]  = { .label = "Left", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = controls_settings_key(CONTROL_KEY_LEFT) },
+                                   .scancode = se_bindings_get(CONTROL_KEY_LEFT) },
         [CONTROLS_ENTRY_RIGHT] = { .label = "Right", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = controls_settings_key(CONTROL_KEY_RIGHT) },
+                                   .scancode = se_bindings_get(CONTROL_KEY_RIGHT) },
         [CONTROLS_ENTRY_ITEM]  = { .label = "Use item", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = controls_settings_key(CONTROL_KEY_ITEM) },
+                                   .scancode = se_bindings_get(CONTROL_KEY_ITEM) },
         [CONTROLS_ENTRY_PAUSE] = { .label = "Pause", .kind = MENU_VAL_KEYBIND,
-                                   .scancode = controls_settings_key(CONTROL_KEY_PAUSE) },
+                                   .scancode = se_bindings_get(CONTROL_KEY_PAUSE) },
     };
     menu_view_t const m = {
         .title = "Controls", .title_h = 36.0f, .subtitle = NULL,
@@ -2637,7 +2638,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                 draw_key_capture();
                 uint16_t captured = 0;
                 if (input_consume_captured_key(&captured)) {
-                    controls_settings_set_key(s_capture_target, captured);
+                    se_bindings_set(s_capture_target, captured);
                     app_state = APP_STATE_CONTROLS;
                 }
                 break;
