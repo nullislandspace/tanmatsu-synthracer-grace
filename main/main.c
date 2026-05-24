@@ -37,6 +37,7 @@
 #include "se_text.h"
 #include "save.h"
 #include "se_bindings.h"
+#include "se_hw.h"
 #include "se_run.h"
 #include "se_scene.h"
 #include "se_ui.h"
@@ -150,11 +151,12 @@ typedef enum {
     APP_STATE_UPGRADE,          // equip screen: slot list, shows what's fitted
     APP_STATE_UPGRADE_PICK,     // attachment picker for the selected slot
     APP_STATE_CREDITS,          // auto-scrolling credits roll
-    APP_STATE_SETTINGS,         // settings submenu: Controls / Audio
+    APP_STATE_SETTINGS,         // settings submenu: Controls / Display / Audio
     APP_STATE_CONTROLS,         // controls list: gyro checkbox + 4 keybinds
                                 // (the keybind "press a key" capture is a
                                 // blocking engine call, not a state)
-    APP_STATE_AUDIO_SETTINGS,   // three-checkbox panel: music / SFX / hum
+    APP_STATE_DISPLAY,          // brightness sliders: screen / keyboard / LEDs
+    APP_STATE_AUDIO_SETTINGS,   // volume slider + three checkboxes: music/SFX/hum
     APP_STATE_PLAYING,
     APP_STATE_PAUSED,           // pause overlay: Resume / Abort run
     APP_STATE_CRASHING,         // post-crash: ship → spark shower, world still flows
@@ -186,6 +188,7 @@ enum {
 // Settings submenu entries (STATE_SETTINGS).
 enum {
     SETTINGS_ENTRY_CONTROLS = 0,
+    SETTINGS_ENTRY_DISPLAY,
     SETTINGS_ENTRY_AUDIO,
     SETTINGS_ENTRY_COUNT,
 };
@@ -211,14 +214,26 @@ enum {
 };
 static int s_controls_cursor = CONTROLS_ENTRY_GYRO;
 
-// Audio-settings cursor entries (STATE_AUDIO_SETTINGS).
+// Display-settings cursor entries (STATE_DISPLAY): three device-global
+// brightness sliders, adjusted LEFT/RIGHT, persisted + applied by se_hw.
 enum {
-    AUDIO_ENTRY_MUSIC = 0,
+    DISPLAY_ENTRY_SCREEN = 0,
+    DISPLAY_ENTRY_KEYBOARD,
+    DISPLAY_ENTRY_LEDS,
+    DISPLAY_ENTRY_COUNT,
+};
+static int s_display_cursor = DISPLAY_ENTRY_SCREEN;
+
+// Audio-settings cursor entries (STATE_AUDIO_SETTINGS). Volume is a
+// device-global slider (se_hw, active output); the rest are app toggles.
+enum {
+    AUDIO_ENTRY_VOLUME = 0,
+    AUDIO_ENTRY_MUSIC,
     AUDIO_ENTRY_SFX,
     AUDIO_ENTRY_HUM,
     AUDIO_ENTRY_COUNT,
 };
-static int s_audio_cursor = AUDIO_ENTRY_MUSIC;
+static int s_audio_cursor = AUDIO_ENTRY_VOLUME;
 
 // Persistence state owned by main. The active slot is sticky for the
 // app lifetime; we load on slot select and write after every run.
@@ -681,6 +696,17 @@ static void controls_keybind_draw(pax_buf_t* fb_cb, float x, float y,
                                   float h, pax_col_t col, void* ctx) {
     (void)fb_cb;
     draw_keybind_value(x, y, h, col, (uint16_t)(uintptr_t)ctx);
+}
+
+// Apply a signed step to a percentage and clamp to [0,100] — used by the
+// brightness/volume settings sliders' get-step-set. Clamping in `int`
+// before the uint8_t cast is the point: a downward step past 0 must land
+// on 0, not wrap to ~250 (which se_hw would then clamp up to 100).
+static uint8_t pct_step(uint8_t cur, int delta) {
+    int n = (int)cur + delta;
+    if (n < 0)   n = 0;
+    if (n > 100) n = 100;
+    return (uint8_t)n;
 }
 
 // ---- Menu / dialog layout shared with the bespoke screens ----------
@@ -1602,6 +1628,7 @@ static float s_in_steer       = 0.0f;
 static bool  s_in_steer_left  = false;
 static bool  s_in_steer_right = false;
 static int   s_in_menu_nav    = 0;
+static int   s_in_menu_horiz  = 0;
 static bool  s_in_menu_esc    = false;
 static bool  s_in_menu_bs     = false;
 static bool  s_in_pause       = false;
@@ -1822,7 +1849,8 @@ static void on_update(float dt, void* user) {
         s_in_pickup   = input_consume_pickup();
         s_in_steer    = input_steering();
         input_steer_held(&s_in_steer_left, &s_in_steer_right);
-        s_in_menu_nav = input_consume_menu_nav();
+        s_in_menu_nav   = input_consume_menu_nav();
+        s_in_menu_horiz = input_consume_menu_horiz();
         s_in_menu_esc = input_consume_menu_cancel();
         s_in_menu_bs  = input_consume_backspace();
         s_in_pause    = input_consume_pause_toggle();
@@ -2152,6 +2180,7 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         // PAUSED instead — frozen floor, frozen scene behind.
         bool const in_settings_family = (app_state == APP_STATE_SETTINGS
                                          || app_state == APP_STATE_CONTROLS
+                                         || app_state == APP_STATE_DISPLAY
                                          || app_state == APP_STATE_AUDIO_SETTINGS);
         bool const is_menu_state = (app_state == APP_STATE_SLOT_SELECT
                                     || app_state == APP_STATE_MENU
@@ -2224,6 +2253,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
         // Input was drained + snapshotted in on_update; read the frame's
         // values back into the names the switch already refers to.
         int  const menu_nav       = s_in_menu_nav;
+        int  const menu_horiz     = s_in_menu_horiz;
         bool const menu_esc       = s_in_menu_esc;
         bool const menu_bs        = s_in_menu_bs;
         bool const pause_toggle   = s_in_pause;
@@ -2378,6 +2408,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                 // frame's nav/confirm/cancel as engine menu actions.
                 static char const* const labels[SETTINGS_ENTRY_COUNT] = {
                     [SETTINGS_ENTRY_CONTROLS] = "Controls",
+                    [SETTINGS_ENTRY_DISPLAY]  = "Display",
                     [SETTINGS_ENTRY_AUDIO]    = "Audio",
                 };
                 se_menu_row_t rows[SETTINGS_ENTRY_COUNT] = {0};
@@ -2407,8 +2438,12 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                             s_controls_cursor = CONTROLS_ENTRY_GYRO;
                             app_state = APP_STATE_CONTROLS;
                             break;
+                        case SETTINGS_ENTRY_DISPLAY:
+                            s_display_cursor = DISPLAY_ENTRY_SCREEN;
+                            app_state = APP_STATE_DISPLAY;
+                            break;
                         case SETTINGS_ENTRY_AUDIO:
-                            s_audio_cursor = AUDIO_ENTRY_MUSIC;
+                            s_audio_cursor = AUDIO_ENTRY_VOLUME;
                             app_state = APP_STATE_AUDIO_SETTINGS;
                             break;
                     }
@@ -2478,33 +2513,97 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                 break;
             }
 
+            case APP_STATE_DISPLAY: {
+                draw_settings_scene(&world, &game);
+                t_after_obs = esp_timer_get_time();
+                // Engine-rendered brightness sliders (se_ui RANGE rows).
+                // The values are device-global (se_hw): read live each
+                // frame, and LEFT/RIGHT step + persist + apply them via
+                // se_hw. The screen slider has a floor (se_hw clamps) so a
+                // sweep can't black the display out and trap the user.
+                se_menu_row_t const rows[DISPLAY_ENTRY_COUNT] = {
+                    [DISPLAY_ENTRY_SCREEN]   = { .label = "Screen",   .kind = SE_MENU_VAL_RANGE,
+                                                 .range_pct = se_hw_get_display_brightness() },
+                    [DISPLAY_ENTRY_KEYBOARD] = { .label = "Keyboard", .kind = SE_MENU_VAL_RANGE,
+                                                 .range_pct = se_hw_get_keyboard_brightness() },
+                    [DISPLAY_ENTRY_LEDS]     = { .label = "LEDs",     .kind = SE_MENU_VAL_RANGE,
+                                                 .range_pct = se_hw_get_led_brightness() },
+                };
+                se_menu_def_t const def = {
+                    .title = "Display", .title_h = 36.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = DISPLAY_ENTRY_COUNT, .row_h = 46.0f,
+                    .hint = "up / down to choose, left / right to adjust, esc to leave",
+                    .panel_w = 0.66f, .panel_h = 0.74f, .value_dx = 200.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_display_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)        se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0)   se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (menu_horiz < 0)      res = se_menu_input(&menu, SE_MENU_ACT_LEFT);
+                else if (menu_horiz > 0) res = se_menu_input(&menu, SE_MENU_ACT_RIGHT);
+                if (menu_esc)            res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                s_display_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_DECREMENT || res == SE_MENU_RESULT_INCREMENT) {
+                    int const step = (res == SE_MENU_RESULT_INCREMENT)
+                                         ? SE_HW_BRIGHTNESS_STEP_PCT
+                                         : -SE_HW_BRIGHTNESS_STEP_PCT;
+                    switch (s_display_cursor) {
+                        case DISPLAY_ENTRY_SCREEN:
+                            se_hw_set_display_brightness(
+                                pct_step(se_hw_get_display_brightness(), step));
+                            break;
+                        case DISPLAY_ENTRY_KEYBOARD:
+                            se_hw_set_keyboard_brightness(
+                                pct_step(se_hw_get_keyboard_brightness(), step));
+                            break;
+                        case DISPLAY_ENTRY_LEDS:
+                            se_hw_set_led_brightness(
+                                pct_step(se_hw_get_led_brightness(), step));
+                            break;
+                    }
+                } else if (res == SE_MENU_RESULT_BACK) {
+                    app_state = APP_STATE_SETTINGS;
+                }
+                break;
+            }
+
             case APP_STATE_AUDIO_SETTINGS: {
                 draw_settings_scene(&world, &game);
                 t_after_obs = esp_timer_get_time();
-                // Engine-rendered checkbox menu (se_ui). Rebuilt each
-                // frame so the [X]/[ ] states track the live toggles.
+                // Engine-rendered menu (se_ui): a device-global Volume
+                // slider (RANGE row, LEFT/RIGHT, persisted+applied by
+                // se_hw on the active output) over the three app-audio
+                // toggles. Rebuilt each frame so the value + [X]/[ ] states
+                // track live.
                 se_menu_row_t const rows[AUDIO_ENTRY_COUNT] = {
-                    [AUDIO_ENTRY_MUSIC] = { .label = "Music", .kind = SE_MENU_VAL_CHECK,
-                                            .checked = audio_settings_music_on() },
-                    [AUDIO_ENTRY_SFX]   = { .label = "Sound effects", .kind = SE_MENU_VAL_CHECK,
-                                            .checked = audio_settings_sfx_on() },
-                    [AUDIO_ENTRY_HUM]   = { .label = "Engine hum", .kind = SE_MENU_VAL_CHECK,
-                                            .checked = audio_settings_hum_on() },
+                    [AUDIO_ENTRY_VOLUME] = { .label = "Volume", .kind = SE_MENU_VAL_RANGE,
+                                             .range_pct = se_hw_get_volume() },
+                    [AUDIO_ENTRY_MUSIC]  = { .label = "Music", .kind = SE_MENU_VAL_CHECK,
+                                             .checked = audio_settings_music_on() },
+                    [AUDIO_ENTRY_SFX]    = { .label = "Sound effects", .kind = SE_MENU_VAL_CHECK,
+                                             .checked = audio_settings_sfx_on() },
+                    [AUDIO_ENTRY_HUM]    = { .label = "Engine hum", .kind = SE_MENU_VAL_CHECK,
+                                             .checked = audio_settings_hum_on() },
                 };
                 se_menu_def_t const def = {
                     .title = "Audio", .title_h = 36.0f, .subtitle = NULL,
                     .rows = rows, .row_count = AUDIO_ENTRY_COUNT, .row_h = 44.0f,
-                    .hint = "up / down to choose, enter to toggle, esc to leave",
-                    .panel_w = 0.60f, .panel_h = 0.70f, .value_dx = 230.0f,
+                    .hint = "up / down choose, left / right adjust, enter toggle, esc back",
+                    .panel_w = 0.74f, .panel_h = 0.72f, .value_dx = 230.0f,
                 };
                 se_menu_t menu = { .def = &def, .cursor = s_audio_cursor };
                 se_menu_draw(&menu, fb);
 
                 se_menu_result_t res = SE_MENU_RESULT_NONE;
-                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
-                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
-                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
-                else if (menu_esc)     res = se_menu_input(&menu, SE_MENU_ACT_BACK);
+                if (menu_nav > 0)        se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0)   se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (menu_horiz < 0)      res = se_menu_input(&menu, SE_MENU_ACT_LEFT);
+                else if (menu_horiz > 0) res = se_menu_input(&menu, SE_MENU_ACT_RIGHT);
+                if (pickup_pressed)      res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                else if (menu_esc)       res = se_menu_input(&menu, SE_MENU_ACT_BACK);
                 s_audio_cursor = menu.cursor;
 
                 if (res == SE_MENU_RESULT_ACTIVATED) {
@@ -2519,6 +2618,12 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                             audio_settings_set_hum_on(!audio_settings_hum_on());
                             break;
                     }
+                } else if (res == SE_MENU_RESULT_DECREMENT || res == SE_MENU_RESULT_INCREMENT) {
+                    // Only the Volume row reports DEC/INC (se_ui gates this
+                    // on the RANGE kind), so no cursor switch is needed.
+                    int const step = (res == SE_MENU_RESULT_INCREMENT)
+                                         ? SE_HW_VOLUME_STEP_PCT : -SE_HW_VOLUME_STEP_PCT;
+                    se_hw_set_volume(pct_step(se_hw_get_volume(), step));
                 } else if (res == SE_MENU_RESULT_BACK) {
                     app_state = APP_STATE_SETTINGS;
                 }

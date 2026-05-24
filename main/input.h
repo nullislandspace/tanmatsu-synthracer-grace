@@ -66,6 +66,13 @@ int  input_consume_sun_delta(void);
 // the main loop reads the one appropriate to the current app state.
 int  input_consume_menu_nav(void);
 
+// Horizontal menu edge: +1 for a RIGHT press, -1 for a LEFT press, 0 if
+// neither pressed since last call. Self-clears. Used by the engine
+// menus' RANGE sliders (brightness / volume). LEFT/RIGHT also steer
+// during PLAYING via the polled path; this latch is only consumed in
+// menu states, so the two roles never collide.
+int  input_consume_menu_horiz(void);
+
 // True if ENTER, SPACE or GAMEPAD_A was pressed since last call.
 // Mirrors `input_consume_pickup` — they share the same edge buffer
 // because the action button doubles as the menu confirm button.

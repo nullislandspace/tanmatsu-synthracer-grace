@@ -107,6 +107,20 @@
 #define SE_HW_VOLUME_STEP_PCT  5
 #endif
 
+// Percentage step applied to a brightness (display / keyboard / LED) when
+// a settings slider is nudged via se_hw_set_*_brightness(). Coarser than
+// the volume step so a slider sweeps the full range in fewer presses.
+#ifndef SE_HW_BRIGHTNESS_STEP_PCT
+#define SE_HW_BRIGHTNESS_STEP_PCT  10
+#endif
+
+// Floor for the *display* backlight: se_hw_set_display_brightness() never
+// drops below this, so a slider sweep can't black the screen out and trap
+// the user. Keyboard / LED brightness have no floor (0 = off is fine).
+#ifndef SE_HW_DISPLAY_BRIGHTNESS_MIN
+#define SE_HW_DISPLAY_BRIGHTNESS_MIN  10
+#endif
+
 // Maximum number of remappable controls the bindings subsystem
 // (se_bindings.h) tracks. The game declares up to this many; raise it for
 // a game with a larger control set.
@@ -151,6 +165,16 @@
 #endif
 #ifndef SE_UI_ROW_TEXT_H
 #define SE_UI_ROW_TEXT_H      28.0f   // row label / value font height
+#endif
+
+// Geometry of a SE_MENU_VAL_RANGE slider (drawn in the value column,
+// centred vertically on the row text caps). The "NN%" readout sits to
+// its right. Override per game to resize the bar.
+#ifndef SE_UI_BAR_W
+#define SE_UI_BAR_W           180.0f  // slider track width  (px)
+#endif
+#ifndef SE_UI_BAR_H
+#define SE_UI_BAR_H           16.0f   // slider track height (px)
 #endif
 
 // ---- Renderer / pinhole-camera projection ---------------------------

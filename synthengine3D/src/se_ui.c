@@ -10,8 +10,10 @@
 
 #include "se_ui.h"
 
+#include <stdio.h>          // snprintf (RANGE percentage label)
+
 #include "se_config.h"      // SE_UI_COL_*, SE_UI_* geometry
-#include "se_direct565.h"   // direct_565_dim_rect
+#include "se_direct565.h"   // direct_565_dim_rect / line / vrun
 #include "se_text.h"        // rendertext_draw
 
 // Layout fallbacks for se_menu_def_t fields left at 0.
@@ -30,6 +32,54 @@ static void draw_left(pax_buf_t* fb, float x, float y, float h,
     rendertext_draw(fb, color, NULL, h, x, y, text);
 }
 
+// Solid logical-rect fill via the direct-565 column primitive (one
+// contiguous raw run per column under PAX_O_ROT_CW). Used only by the
+// RANGE slider -- a once-per-frame menu element, not a hot path.
+static void fill_rect_565(uint16_t* px, int x, int y, int w, int h, uint16_t packed) {
+    for (int i = 0; i < w; i++) {
+        direct_565_vrun(px, x + i, y, y + h - 1, packed);
+    }
+}
+
+// Single-pixel rectangle outline (four direct-565 lines).
+static void outline_rect_565(uint16_t* px, int x, int y, int w, int h, uint16_t packed) {
+    direct_565_line(px, x,         y,         x + w - 1, y,         packed);
+    direct_565_line(px, x,         y + h - 1, x + w - 1, y + h - 1, packed);
+    direct_565_line(px, x,         y,         x,         y + h - 1, packed);
+    direct_565_line(px, x + w - 1, y,         x + w - 1, y + h - 1, packed);
+}
+
+// Draw a SE_MENU_VAL_RANGE slider: an outlined track filled to `pct`%,
+// then the "NN%" readout to its right. `x` is the value column's left
+// edge, `ry` the row's text top, `th` the row text height, `col` the
+// row's current colour. The bar is centred vertically on the text caps.
+static void draw_range(pax_buf_t* fb, float x, float ry, float th,
+                       pax_col_t col, int pct) {
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+
+    uint16_t* const out    = (uint16_t*)pax_buf_get_pixels(fb);
+    uint16_t  const packed = direct_565_pack_for(fb, col);
+
+    int const bx = (int)x;
+    int const bw = (int)SE_UI_BAR_W;
+    int const bh = (int)SE_UI_BAR_H;
+    int const by = (int)(ry + (th - SE_UI_BAR_H) * 0.5f);
+
+    outline_rect_565(out, bx, by, bw, bh, packed);
+    // Inner fill, inset 2 px from the outline so the track edge stays
+    // visible at 100%; width tracks the percentage.
+    int const inner_w = bw - 4;
+    int const fill_w  = (inner_w * pct) / 100;
+    if (fill_w > 0) {
+        fill_rect_565(out, bx + 2, by + 2, fill_w, bh - 4, packed);
+    }
+
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d%%", pct);
+    draw_left(fb, x + SE_UI_BAR_W + 14.0f, ry, th, col, buf);
+}
+
 se_menu_result_t se_menu_input(se_menu_t* menu, se_menu_action_t action) {
     if (menu == NULL || menu->def == NULL) return SE_MENU_RESULT_NONE;
     int const n = menu->def->row_count;
@@ -44,6 +94,16 @@ se_menu_result_t se_menu_input(se_menu_t* menu, se_menu_action_t action) {
             if (n > 0) {
                 menu->cursor++;
                 if (menu->cursor >= n) menu->cursor = n - 1;
+            }
+            return SE_MENU_RESULT_NONE;
+        case SE_MENU_ACT_LEFT:
+        case SE_MENU_ACT_RIGHT:
+            // Only meaningful on a RANGE row; the game adjusts whatever
+            // value menu->cursor controls. Any other row ignores it.
+            if (n > 0 && menu->cursor >= 0 && menu->cursor < n
+                && menu->def->rows[menu->cursor].kind == SE_MENU_VAL_RANGE) {
+                return (action == SE_MENU_ACT_LEFT) ? SE_MENU_RESULT_DECREMENT
+                                                    : SE_MENU_RESULT_INCREMENT;
             }
             return SE_MENU_RESULT_NONE;
         case SE_MENU_ACT_ACTIVATE:
@@ -120,6 +180,9 @@ void se_menu_draw(se_menu_t const* menu, pax_buf_t* fb) {
                 if (r->draw_value) {
                     r->draw_value(fb, value_x, ry, SE_UI_ROW_TEXT_H, col, r->ctx);
                 }
+                break;
+            case SE_MENU_VAL_RANGE:
+                draw_range(fb, value_x, ry, SE_UI_ROW_TEXT_H, col, r->range_pct);
                 break;
             case SE_MENU_VAL_NONE:
             default:

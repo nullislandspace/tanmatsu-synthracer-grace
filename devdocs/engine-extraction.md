@@ -429,23 +429,32 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   **`se_input_set_passthrough(bool)`** lets the game's rebind capture forward
   volume/F1 raw (so they can be bound) — it folds away once the rebind dialog
   is engine-owned. Build green + verify clean; text 97822→97929 (+107 B).
-- [x] Device-global settings — **partly done (sub-step 2).** `hw_settings.{c,h}`
-  moved into the engine as **`se_hw.{c,h}`** (public `se_hw_init` /
-  `se_hw_step_volume` / `se_hw_on_jack_event`); `se_run` bootstrap calls
-  `se_hw_init()` after `audio_mixer_init()`, and the pump drives volume/jack.
-  So **load-at-boot + apply + persist for speaker/hp volume + screen/keyboard/
-  LED brightness + jack routing is engine-owned now.** *Remaining for a later
-  sub-step:* the in-game **get/set helpers** the settings menu wires rows to
-  (brightness/volume adjustment UI) — added with the `se_ui` menu system.
+- [x] Device-global settings — **done (sub-step 2 boot path + 4b-iii adjustment
+  UI, 2026-05-24).** `hw_settings.{c,h}` moved into the engine as
+  **`se_hw.{c,h}`** (public `se_hw_init` / `se_hw_step_volume` /
+  `se_hw_on_jack_event`); `se_run` bootstrap calls `se_hw_init()` after
+  `audio_mixer_init()`, and the pump drives volume/jack. So **load-at-boot +
+  apply + persist for speaker/hp volume + screen/keyboard/LED brightness + jack
+  routing is engine-owned.** **4b-iii added the in-game get/set helpers** the
+  settings sliders wire to: `se_hw_get/set_volume` (active output) +
+  `se_hw_get/set_{display,keyboard,led}_brightness` — each setter clamps,
+  persists to the shared NVS, and re-applies via the BSP setter. The display
+  setter clamps up to `SE_HW_DISPLAY_BRIGHTNESS_MIN` so a slider sweep can't
+  black the screen out; `se_hw_step_volume` now just delegates to
+  `se_hw_set_volume` (one persist/apply path).
 - [~] `se_ui` menu system — **per-frame core done (sub-step 3, 2026-05-24).**
   New engine module `se_ui.{c,h}`: `se_menu_def_t` / `se_menu_row_t` /
   `se_menu_t` (lifted from the game's `menu_view_t`/`menu_draw`), the cursor
   state machine **`se_menu_input(menu, action)`** (UP/DOWN clamp + ACTIVATE/
   BACK results), and **`se_menu_draw(menu, fb)`** (dim panel + title + rows +
   hint, via `se_text` + `se_direct565` only — no game dep). Row kinds
-  `NONE / CHECK / TEXT / CUSTOM` (CUSTOM = a game `draw_value` callback, so the
-  keybind→icon logic stays game-side). Theme `SE_UI_COL_*` + geometry `SE_UI_*`
-  in `se_config.h`. The game maps its consumed menu-nav/confirm/cancel onto
+  `NONE / CHECK / TEXT / CUSTOM / RANGE` (CUSTOM = a game `draw_value` callback,
+  so the keybind→icon logic stays game-side; **RANGE = a 0..100 slider bar +
+  "NN%" added 4b-iii** for the brightness/volume sliders, with `SE_MENU_ACT_
+  LEFT/RIGHT` → `SE_MENU_RESULT_DECREMENT/INCREMENT` reported only on a RANGE
+  row, so the engine owns no values — it reports row+direction, the game adjusts
+  what that row controls). Theme `SE_UI_COL_*` + geometry `SE_UI_*` (incl.
+  `SE_UI_BAR_W/H`) in `se_config.h`. The game maps its consumed menu-nav/confirm/cancel onto
   `se_menu_action_t` and acts on the result. Ported every list menu in order:
   Settings + Audio (3), Main + Pause (3 cont.), then **Controls + Upgrade
   slots + Upgrade picker (4b-i, 2026-05-24)** — Controls exercises the
@@ -486,10 +495,16 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   declares controls + defaults and queries the mapping; the engine owns
   storage, persistence, the rendered dialog, and the capture — exactly the
   requested split. text 98783→99173 (4a) → 98717 (4b-i) → 98915 (4b-ii).
-- [~] Port `main.c`'s list menus + rebind capture; retire the bespoke states —
+- [x] Port `main.c`'s list menus + rebind capture; retire the bespoke states —
   **all list menus ported + `menu_draw` deleted (4b-i); rebind capture ported +
-  `APP_STATE_KEY_CAPTURE` retired (4b-ii).** Remaining: the brightness rows
-  (screen / keyboard / LED) on the settings menu (needs `se_hw` get/set helpers).
+  `APP_STATE_KEY_CAPTURE` retired (4b-ii); brightness/volume sliders added
+  (4b-iii).** 4b-iii: a new `APP_STATE_DISPLAY` submenu under Settings (screen /
+  keyboard / LED brightness sliders) + a Volume slider prepended to the Audio
+  menu; `input.c` gained a menu LEFT/RIGHT edge latch (`input_consume_menu_horiz`,
+  D-pad LEFT/RIGHT, consumed only in menu states so it never collides with the
+  polled in-game steering); the sliders use the `se_ui` RANGE rows + the `se_hw`
+  get/set helpers (`pct_step` clamps the get-step-set in `int` before the
+  `uint8_t` cast so a downward step can't wrap). text 98915→101496.
 - [x] `on_backdrop` hook; synthwave invoked from it — **done in sub-step 1**
   (the engine clears to `backdrop_argb` or calls the game's `on_backdrop`,
   which draws the synthwave PPA composite + floor).

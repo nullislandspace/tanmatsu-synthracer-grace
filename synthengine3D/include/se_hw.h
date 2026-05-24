@@ -46,3 +46,28 @@ void se_hw_on_jack_event(bool jack_inserted);
 // launcher sees the change, and re-applies the codec register. se_run's
 // input pump calls this on the volume keys.
 void se_hw_step_volume(int delta_percent);
+
+// ---- Settings-menu accessors ----------------------------------------
+//
+// Read / write the launcher-shared hardware settings so a game can offer
+// in-app sliders for them. The getters return the persisted percentage
+// (0..100), falling back to the engine default if the key is unset. The
+// setters clamp, persist to the shared NVS (so the launcher sees the
+// change), and re-apply via the BSP setter immediately. Per-setter
+// failures are logged but non-fatal.
+//
+// Brightness floors: the *display* setter clamps up to
+// SE_HW_DISPLAY_BRIGHTNESS_MIN so a slider can't black the screen out;
+// keyboard / LED have no floor (0 = off is valid).
+
+uint8_t se_hw_get_volume(void);                  // active output (speaker/hp)
+void    se_hw_set_volume(uint8_t percentage);    // active output (speaker/hp)
+
+uint8_t se_hw_get_display_brightness(void);
+void    se_hw_set_display_brightness(uint8_t percentage);
+
+uint8_t se_hw_get_keyboard_brightness(void);
+void    se_hw_set_keyboard_brightness(uint8_t percentage);
+
+uint8_t se_hw_get_led_brightness(void);
+void    se_hw_set_led_brightness(uint8_t percentage);

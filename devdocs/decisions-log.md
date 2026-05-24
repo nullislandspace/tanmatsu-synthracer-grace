@@ -4292,3 +4292,42 @@
       owed** (rebind each control incl. binding an F-key / a normal letter;
       rebind from pause; confirm steering/pause still honour new binds; credits
       scroll one line per press).
+- 2026-05-24 — **EF sub-step 4b-iii: brightness/volume settings sliders (the
+  last EF feature).** Closes the device-global-settings *adjustment UI* the
+  boot path (sub-step 2) deferred.
+    - **`se_ui` RANGE slider row.** New row kind `SE_MENU_VAL_RANGE` (a 0..100
+      `range_pct` + an outlined track filled to the percentage + a "NN%"
+      readout, drawn via `se_direct565` line/vrun + `se_text` — same no-game-dep
+      rule as the rest of the menu). New actions `SE_MENU_ACT_LEFT/RIGHT` →
+      results `SE_MENU_RESULT_DECREMENT/INCREMENT`, **reported only when the
+      current row is RANGE** (other kinds return NONE). Kept the engine
+      value-agnostic — it reports *which row + which direction*, the game maps
+      that onto whatever the row controls (mirrors how ACTIVATE works). Geometry
+      `SE_UI_BAR_W/H` in `se_config.h`.
+    - **`se_hw` get/set helpers.** Added `se_hw_get/set_volume` (active output)
+      + `se_hw_get/set_{display,keyboard,led}_brightness`. Setters clamp,
+      persist to the shared NVS (launcher sees it), and re-apply the BSP
+      register immediately. **Display brightness clamps up to
+      `SE_HW_DISPLAY_BRIGHTNESS_MIN` (10%)** so a slider sweep can't black the
+      screen out and trap the user; keyboard/LED may go to 0. `se_hw_step_volume`
+      (volume keys) now delegates to `se_hw_set_volume` — one persist/apply path.
+    - **Menu LEFT/RIGHT input.** `input.c` gained an `s_menu_horiz` edge latch
+      (`input_consume_menu_horiz`) set on D-pad LEFT/RIGHT press edges. It is
+      **consumed only in menu states**, so it never collides with the polled
+      in-game LEFT/RIGHT steering (which reads through `input_steer_held`, a
+      different path). Mirrors the existing UP/DOWN `menu_nav` latch.
+    - **Placement.** Volume lives in the **Audio** menu (prepended above the
+      Music/SFX/Hum toggles — volume *is* an audio setting); the three
+      brightnesses get a **new `APP_STATE_DISPLAY` submenu** under Settings
+      (Settings → Controls / **Display** / Audio). The Audio panel was widened
+      (`panel_w` 0.60→0.74) so the slider + the longer toggle labels both fit.
+    - **`pct_step` (game side).** The sliders do get-step-set; `pct_step(cur,
+      delta)` clamps to [0,100] in `int` *before* the `uint8_t` cast, so a
+      downward step past 0 lands on 0 instead of wrapping to ~250 (which se_hw
+      would then clamp *up* to 100). The one real footgun in the whole change.
+    - Build green + `make verify` clean; text 98915→101496 (+2581 B: new state +
+      submenu + slider render + se_hw accessors + the input latch). **On-device
+      smoke owed** (each brightness slider visibly changes the hardware + survives
+      exit-to-launcher; volume slider tracks the volume keys + the audio-jack
+      swap; screen brightness can't be driven to black; sliders reachable from
+      both the main menu and the pause menu).

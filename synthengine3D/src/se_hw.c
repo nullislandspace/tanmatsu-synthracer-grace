@@ -15,6 +15,7 @@
 #include "bsp/led.h"
 #include "esp_log.h"
 #include "nvs_settings_hardware.h"
+#include "se_config.h"   // SE_HW_DISPLAY_BRIGHTNESS_MIN
 
 static char const TAG[] = "se_hw";
 
@@ -29,6 +30,12 @@ static uint8_t clamp_pct_int(int v) {
     if (v < 0)   return 0;
     if (v > 100) return 100;
     return (uint8_t)v;
+}
+
+static uint8_t clamp_pct_min(uint8_t v, uint8_t lo) {
+    if (v < lo)  return lo;
+    if (v > 100) return 100;
+    return v;
 }
 
 // Read the active output's persisted volume from the launcher's NVS
@@ -120,25 +127,74 @@ void se_hw_on_jack_event(bool jack_inserted) {
              (unsigned)read_active_volume());
 }
 
-void se_hw_step_volume(int delta_percent) {
-    uint8_t   current = read_active_volume();
-    int       next    = (int)current + delta_percent;
-    uint8_t   newv    = clamp_pct_int(next);
-    esp_err_t err     = ESP_OK;
-
-    if (s_jack_inserted) {
-        err = nvs_settings_set_headphone_volume(newv);
-    } else {
-        err = nvs_settings_set_speaker_volume(newv);
-    }
-    esp_err_t apply_err = bsp_audio_set_volume((float)newv);
-    ESP_LOGI(TAG, "step_volume: %s %u%% -> %u%% (delta=%+d) nvs_err=%d apply_err=%d",
-             s_jack_inserted ? "headphone" : "speaker",
-             (unsigned)current, (unsigned)newv, delta_percent, err, apply_err);
+void se_hw_set_volume(uint8_t percentage) {
+    uint8_t   const newv = clamp_pct_int((int)percentage);
+    esp_err_t       err  = s_jack_inserted ? nvs_settings_set_headphone_volume(newv)
+                                           : nvs_settings_set_speaker_volume(newv);
+    esp_err_t const apply_err = bsp_audio_set_volume((float)newv);
+    ESP_LOGI(TAG, "set_volume: %s -> %u%% (nvs=%d apply=%d)",
+             s_jack_inserted ? "headphone" : "speaker", (unsigned)newv, err, apply_err);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "persist volume failed: %d (continuing anyway)", err);
     }
     if (apply_err != ESP_OK) {
         ESP_LOGW(TAG, "bsp_audio_set_volume(%u) failed: %d", (unsigned)newv, apply_err);
     }
+}
+
+void se_hw_step_volume(int delta_percent) {
+    // Relative nudge for the volume keys; delegates the clamp + persist +
+    // apply to se_hw_set_volume so there is one code path.
+    se_hw_set_volume(clamp_pct_int((int)read_active_volume() + delta_percent));
+}
+
+// ---- Settings-menu accessors ----------------------------------------
+
+uint8_t se_hw_get_volume(void) {
+    return read_active_volume();
+}
+
+uint8_t se_hw_get_display_brightness(void) {
+    uint8_t v = BACKLIGHT_DEFAULT_PERCENT;
+    nvs_settings_get_display_brightness(&v, BACKLIGHT_DEFAULT_PERCENT);
+    return v;
+}
+
+void se_hw_set_display_brightness(uint8_t percentage) {
+    uint8_t   const v   = clamp_pct_min(percentage, SE_HW_DISPLAY_BRIGHTNESS_MIN);
+    esp_err_t const ne  = nvs_settings_set_display_brightness(v);
+    esp_err_t const ae  = bsp_display_set_backlight_brightness(v);
+    ESP_LOGI(TAG, "set display brightness: %u%% (nvs=%d apply=%d)", (unsigned)v, ne, ae);
+    if (ne != ESP_OK) ESP_LOGW(TAG, "persist display brightness failed: %d", ne);
+    if (ae != ESP_OK) ESP_LOGW(TAG, "bsp_display_set_backlight_brightness(%u) failed: %d", (unsigned)v, ae);
+}
+
+uint8_t se_hw_get_keyboard_brightness(void) {
+    uint8_t v = KEYBOARD_BL_DEFAULT_PERCENT;
+    nvs_settings_get_keyboard_brightness(&v, KEYBOARD_BL_DEFAULT_PERCENT);
+    return v;
+}
+
+void se_hw_set_keyboard_brightness(uint8_t percentage) {
+    uint8_t   const v  = clamp_pct_int((int)percentage);
+    esp_err_t const ne = nvs_settings_set_keyboard_brightness(v);
+    esp_err_t const ae = bsp_input_set_backlight_brightness(v);
+    ESP_LOGI(TAG, "set keyboard brightness: %u%% (nvs=%d apply=%d)", (unsigned)v, ne, ae);
+    if (ne != ESP_OK) ESP_LOGW(TAG, "persist keyboard brightness failed: %d", ne);
+    if (ae != ESP_OK) ESP_LOGW(TAG, "bsp_input_set_backlight_brightness(%u) failed: %d", (unsigned)v, ae);
+}
+
+uint8_t se_hw_get_led_brightness(void) {
+    uint8_t v = LED_BRIGHTNESS_DEFAULT_PCT;
+    nvs_settings_get_led_brightness(&v, LED_BRIGHTNESS_DEFAULT_PCT);
+    return v;
+}
+
+void se_hw_set_led_brightness(uint8_t percentage) {
+    uint8_t   const v  = clamp_pct_int((int)percentage);
+    esp_err_t const ne = nvs_settings_set_led_brightness(v);
+    esp_err_t const ae = bsp_led_set_brightness(v);
+    ESP_LOGI(TAG, "set LED brightness: %u%% (nvs=%d apply=%d)", (unsigned)v, ne, ae);
+    if (ne != ESP_OK) ESP_LOGW(TAG, "persist LED brightness failed: %d", ne);
+    if (ae != ESP_OK) ESP_LOGW(TAG, "bsp_led_set_brightness(%u) failed: %d", (unsigned)v, ae);
 }

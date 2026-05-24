@@ -33,6 +33,7 @@ typedef enum {
     SE_MENU_VAL_CHECK,      // label + [X] / [ ]
     SE_MENU_VAL_TEXT,       // label + a free value string
     SE_MENU_VAL_CUSTOM,     // label + game-drawn value (see draw_value)
+    SE_MENU_VAL_RANGE,      // label + a 0..100 slider bar + "NN%" (see range_pct)
 } se_menu_val_t;
 
 // Draws the value column of a SE_MENU_VAL_CUSTOM row. (x, y) is the value
@@ -48,6 +49,7 @@ typedef struct {
     se_menu_val_t         kind;
     bool                  checked;     // SE_MENU_VAL_CHECK
     char const*           value;       // SE_MENU_VAL_TEXT
+    int                   range_pct;   // SE_MENU_VAL_RANGE  (clamped 0..100)
     se_menu_draw_value_fn draw_value;  // SE_MENU_VAL_CUSTOM
     void*                 ctx;         // SE_MENU_VAL_CUSTOM context
 } se_menu_row_t;
@@ -83,6 +85,8 @@ typedef enum {
     SE_MENU_ACT_NONE = 0,
     SE_MENU_ACT_UP,         // move cursor toward row 0
     SE_MENU_ACT_DOWN,       // move cursor toward the last row
+    SE_MENU_ACT_LEFT,       // decrease the current RANGE row's value
+    SE_MENU_ACT_RIGHT,      // increase the current RANGE row's value
     SE_MENU_ACT_ACTIVATE,   // confirm the current row
     SE_MENU_ACT_BACK,       // cancel / leave the menu
 } se_menu_action_t;
@@ -91,14 +95,20 @@ typedef enum {
 typedef enum {
     SE_MENU_RESULT_NONE = 0,    // nothing actionable (cursor may have moved)
     SE_MENU_RESULT_ACTIVATED,   // current row activated (read menu->cursor)
+    SE_MENU_RESULT_DECREMENT,   // LEFT on a RANGE row  (read menu->cursor)
+    SE_MENU_RESULT_INCREMENT,   // RIGHT on a RANGE row (read menu->cursor)
     SE_MENU_RESULT_BACK,        // back / cancel requested
 } se_menu_result_t;
 
 // Apply one nav action: UP/DOWN move + clamp the cursor (no wrap) and
-// return NONE; ACTIVATE/BACK leave the cursor put and return the matching
-// result. Call once per action the game detected this frame (e.g. a move
-// then an activate); the game then acts on ACTIVATED (using menu->cursor)
-// or BACK. A no-op (returns NONE) if `menu` or its def is NULL.
+// return NONE; LEFT/RIGHT on a SE_MENU_VAL_RANGE row return DECREMENT /
+// INCREMENT (NONE on any other row kind) leaving the cursor put;
+// ACTIVATE/BACK leave the cursor put and return the matching result. Call
+// once per action the game detected this frame (e.g. a move then an
+// activate); the game then acts on ACTIVATED / DECREMENT / INCREMENT (all
+// using menu->cursor) or BACK. The engine owns no values: it reports which
+// row + direction, and the game adjusts whatever that row controls. A
+// no-op (returns NONE) if `menu` or its def is NULL.
 se_menu_result_t se_menu_input(se_menu_t* menu, se_menu_action_t action);
 
 // Draw the menu into `fb`: a dim panel, the title, an optional subtitle,

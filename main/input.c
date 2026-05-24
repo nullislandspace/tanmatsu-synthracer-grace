@@ -16,6 +16,7 @@ static bool          s_pickup_edge   = false;
 static int           s_speed_delta   = 0;
 static int           s_sun_delta     = 0;
 static int           s_menu_nav      = 0;     // latest -1/0/+1 menu direction
+static int           s_menu_horiz    = 0;     // latest -1/0/+1 menu LEFT/RIGHT
 static bool          s_menu_cancel   = false; // latest ESC press
 static bool          s_backspace     = false; // latest BACKSPACE press
 static int           s_digit         = -1;    // 0..9 if a digit was typed, else -1
@@ -63,7 +64,14 @@ void input_handle_event(bsp_input_event_t const* ev) {
                 } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_DOWN) {
                     s_speed_delta -= 1;
                     s_menu_nav     = -1;
+                } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_LEFT) {
+                    s_menu_horiz   = -1;   // menu slider down (consumed only in menus)
+                } else if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_RIGHT) {
+                    s_menu_horiz   = +1;   // menu slider up (consumed only in menus)
                 }
+                // The D-pad LEFT/RIGHT edges above feed only the menu
+                // sliders; in-game steering reads LEFT/RIGHT through the
+                // polled path (input_steer_held), not this latch.
                 // F1-exit and the volume keys are consumed by the engine
                 // (se_run's input pump) and never arrive here.
             }
@@ -233,6 +241,12 @@ int input_consume_menu_nav(void) {
     int n      = s_menu_nav;
     s_menu_nav = 0;
     return n;
+}
+
+int input_consume_menu_horiz(void) {
+    int h        = s_menu_horiz;
+    s_menu_horiz = 0;
+    return h;
 }
 
 bool input_consume_menu_confirm(void) {
