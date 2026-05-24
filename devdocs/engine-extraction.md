@@ -682,7 +682,7 @@ call sites.
   comment in `se_scene.h` already describes it). Build green + verify clean;
   text 105144 → 105286 (+142 B scaffolding).
 
-### ER.2 — real cull/order passes + 6-DOF camera (landed 2026-05-24, engine 0.3.0)
+### ER.2 — real cull/order passes + 6-DOF camera (landed 2026-05-24, post-0.2.0)
 
 The no-op seams are now real, opt-in passes, and the camera became full 6-DOF.
 
@@ -713,7 +713,8 @@ The no-op seams are now real, opt-in passes, and the camera became full 6-DOF.
   cull at emit (`emit_cube`). A generic engine back-face pass would be
   redundant *and* winding-risky, so it's explicitly out of scope (resolves the
   ER "winding convention + per-call toggle" open question by declining it).
-- [x] Docs: `se_version.h` → 0.3.0, `CHANGELOG.md` entry, `docs/renderer.md`
+- [x] Docs: `CHANGELOG.md` "Unreleased" entry (no version bump — stays 0.2.0
+  until a release is chosen), `docs/renderer.md`
   camera + optional-passes sections, header comments. Build green + verify
   clean; text 105326 → 106278 (+952 B: the 3×3 transform + cull/order + API).
 - [x] **On-device A/B done 2026-05-24** (frozen-scene method: pause to freeze
