@@ -21,7 +21,9 @@ static float s_angle = 0.0f;   // triangle spin, radians
 // music; the mixer takes ownership and frees it on shutdown.
 static void on_init(void* user) {
     (void)user;
-    audio_mixer_set_music(music_procedural_create(0x5EED));
+    // NULL config = the built-in synthwave preset; se_music_synthwave_preset()
+    // returns it explicitly, and a game can pass its own se_music_config_t.
+    audio_mixer_set_music(music_procedural_create(NULL, 0x5EED));
 }
 
 // Per frame: advance the spin. dt is seconds since the last frame.

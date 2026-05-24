@@ -10,10 +10,10 @@
 // The mixer (`audio_mixer.c`) only sees two trait-style structs:
 //
 //   - `music_source_t` — one slot, lives for the duration of a run
-//     (or until replaced). The procedural synthwave generator
-//     implements this today; future modplayer / MP3 / MIDI sources
-//     will implement it the same way without the mixer needing to
-//     change.
+//     (or until replaced). The config-driven procedural generator
+//     (se_music_procedural.h, synthwave by default) implements this
+//     today; future modplayer / MP3 / MIDI sources will implement it
+//     the same way without the mixer needing to change.
 //
 //   - `sfx_voice_t` — short-lived (one-shot) or long-lived
 //     (persistent, e.g. engine hum). The owning effect module

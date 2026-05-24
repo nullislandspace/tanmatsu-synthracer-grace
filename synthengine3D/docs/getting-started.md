@@ -57,9 +57,12 @@ play music, implement a `music_source_t` (or use the built-in procedural one)
 and hand it over; the mixer takes ownership:
 
 ```c
-music_source_t* m = music_procedural_create(seed);
+music_source_t* m = music_procedural_create(NULL, seed);  // NULL = synthwave preset
 audio_mixer_set_music(m);          // NULL to stop; its shutdown() frees it
 ```
+
+(Pass your own `se_music_config_t` instead of `NULL` for different music — see
+[audio.md](audio.md#the-config-is-the-content-the-synth-is-the-engine).)
 
 For short effects, embed an `sfx_voice_t` in your effect's state and register
 it with `audio_mixer_register_voice()`. The host pushes mute toggles via

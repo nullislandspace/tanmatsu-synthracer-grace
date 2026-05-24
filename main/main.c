@@ -303,7 +303,10 @@ void start_run(game_state_t* game, world_state_t* world, uint32_t seed, bool is_
     // SFX are quiet.
     ESP_LOGI(TAG, "start_run: seed=%u is_custom=%d — bringing up audio",
              (unsigned)seed, (int)is_custom);
-    music_source_t* music = music_procedural_create(seed);
+    // NULL config = the engine's built-in synthwave preset (Race the
+    // Synth's sound). A game wanting different music passes its own
+    // se_music_config_t here.
+    music_source_t* music = music_procedural_create(NULL, seed);
     if (music == NULL) {
         ESP_LOGW(TAG, "music_procedural_create returned NULL — no music this run");
     }

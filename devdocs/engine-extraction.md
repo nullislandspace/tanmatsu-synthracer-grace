@@ -203,18 +203,29 @@ its own task. **Conclusion: the extraction so far is performance-neutral.**
 - [x] **Hum de-leaked (raised by user).** The engine no longer hardcodes a `SFX_VOICE_TAG_HUM` class. `sfx_voice_t` now carries a generic `uint8_t group`; the mixer gates by group (`SE_AUDIO_SFX_GROUP_COUNT` groups, default-enabled) and assigns no meaning to any group. The *game* defines `AUDIO_SFX_GROUP_GENERAL=0` / `AUDIO_SFX_GROUP_HUM=1` (in `audio_settings.h`) and tags only the hum voice. So the hum *sound* and its *meaning* are entirely game-side; the engine just provides generic mute groups.
 - [x] Build + verify: **All symbols satisfied.** Size text 96546→96662 (+116 B: the generic group array + bounds-check + setter — added functionality, not a hot-path regression; audio runs off the render loop). Boundary checks clean (no engine include of `magicnumbers.h`/`audio_settings.h`; no `SFX_VOICE_TAG`/`tag` left anywhere).
 
-### E2.1 — Parameterize the procedural music generator (planned)
+### E2.1 — Parameterize the procedural music generator ✅ 2026-05-24
 Raised by user 2026-05-23: the generator is engine-side, but its musical
-*content* (instruments/voices, scales/modes, chord progressions,
-tempo/structure) is hardcoded as a synthwave personality, so today it is
-reusable only as "a synthwave generator." Lift the content into a public
+*content* was hardcoded as a synthwave personality, so it was reusable only as
+"a synthwave generator." **Done:** lifted the content into a public
 `se_music_config_t` passed at create time —
-`music_procedural_create(const se_music_config_t* cfg, uint32_t seed)` —
-so other games drive the same generator with their own music. The current
-synthwave settings become the game's data (or an engine-provided
-`se_music_synthwave_preset()` default). Its own reviewable change because
-designing the config schema is the bulk of the work; deferred so E2 stays
-a faithful relocation.
+`music_procedural_create(const se_music_config_t* cfg, uint32_t seed)` (NULL =
+the built-in `se_music_synthwave_preset()`). The config carries the **content +
+tone**: tempo range, tonic pool, the four pattern banks (chord progressions /
+arp / drum / bass), per-layer gains, and each voice's envelope + filter (+ pad
+detune/LFO). Supporting public types added (`se_music_chord_t` /
+`se_music_progression_t` / `se_music_arp_pattern_t` / `se_music_drum_pattern_t`
+/ `se_music_env_t` / `se_music_filter_t`) + the grid constants
+`SE_MUSIC_TICKS_PER_BAR` / `SE_MUSIC_CHORDS_PER_SECTION`.
+- **Scope boundary (deliberate):** the six-voice **synth topology** (saw bass /
+  square arp / 3-saw pad / sine kick / noise snare+hat) and the fixed 4/4
+  16th-note, eight-chord-section **grid** stay shared structure — they're the
+  "engine"; everything *musical* is now data. Making the voice waveforms
+  pluggable too is noted as a possible future step (not needed yet).
+- The old synthwave banks/params became the static `se_music_synthwave_preset()`
+  data; RTS passes `NULL` so its sound is byte-for-byte unchanged. Invalid/empty
+  configs fall back to the preset (logged). **Version bumped 0.1.0 → 0.2.0** (a
+  breaking signature change, allowed pre-1.0; the common call site is a
+  one-token edit). Build green + verify clean; text 105286 → 105326.
 
 ### E3 — Serialization + save framework split ✅ 2026-05-23 (Option B, co-designed)
 - [x] `nbt.{c,h}` → `se_nbt.{c,h}` (generic FILE*-based tagged serializer, public; banner added).

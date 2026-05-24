@@ -4456,3 +4456,27 @@
       (only `se_version.h` is a compiled change). Remaining: **E9** (final
       verify + full-playthrough smoke); **E2.1** parked; ER cull/order seams
       a later measured cut.
+- 2026-05-24 — **E2.1 — procedural music generator parameterized.** Lifted the
+  hardcoded synthwave *content* into a public `se_music_config_t` passed at
+  create time: `music_procedural_create(const se_music_config_t* cfg, uint32_t
+  seed)` (NULL = the built-in `se_music_synthwave_preset()`). The config carries
+  tempo range, tonic pool, the four pattern banks (progressions / arp / drum /
+  bass), per-layer gains, and per-voice envelope + filter (+ pad detune/LFO);
+  supporting public types + the `SE_MUSIC_TICKS_PER_BAR` /
+  `SE_MUSIC_CHORDS_PER_SECTION` grid constants were added.
+    - **Boundary:** the six-voice synth *topology* (saw bass / square arp /
+      3-saw pad / sine kick / noise snare+hat) and the fixed 4/4 16th-note,
+      8-chord-section grid stay shared structure (the "engine"); everything
+      musical is data. Pluggable voice *waveforms* are a possible future step.
+    - The original synthwave banks + scalar params became the static preset
+      data; **RTS passes `NULL` → byte-for-byte the same music** (behaviour-
+      preserving for this game). Empty/NULL configs fall back to the preset
+      (logged), so a half-filled config can't crash the audio task.
+    - **Version 0.1.0 → 0.2.0** (a breaking signature change; allowed pre-1.0,
+      and the common call site is a one-token edit `…create(seed)` →
+      `…create(NULL, seed)`). Updated the callers (RTS `start_run`, the minimal
+      example) + the audio/getting-started docs + CHANGELOG. Build green +
+      verify clean; text 105286 → 105326 (+40 B). **On-device smoke owed**
+      (music still plays + sounds unchanged in a run).
+    - With this, the only roadmap item left is **E9** (final verify +
+      full-playthrough); ER's cull/order fill-in stays a later measured cut.

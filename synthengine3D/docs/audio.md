@@ -92,19 +92,55 @@ Use them inside your `render` callbacks. (See the header for the exact set.)
 
 ## Procedural music (`se_music_procedural.h`)
 
-A ready-made `music_source_t`:
+A ready-made `music_source_t` driven by a **config + seed**:
 
 ```c
-music_source_t* music_procedural_create(uint32_t seed);   // hand to the mixer
+music_source_t* music_procedural_create(se_music_config_t const* cfg, uint32_t seed);
+
+audio_mixer_set_music(music_procedural_create(NULL, seed));  // NULL = synthwave preset
 ```
 
-Seed-derived — the same seed always yields the same musical personality, from a
+Seed-derived — the same config + seed always yields the same music, from a
 PRNG separate from any world generator so toggling music never perturbs other
 seed-driven content.
 
-> **Planned (E2.1):** the musical *content* (instruments, scales, chord
-> progressions, tempo/structure) is currently hardcoded as a synthwave
-> personality, so today it's reusable only as "a synthwave generator." A
-> follow-up lifts that into a public `se_music_config_t` passed at create time,
-> adding a config parameter to the signature above (a backwards-compatible
-> MINOR change). Until then, drive it with the seed only.
+### The config is the content; the synth is the engine
+
+The generator's **structure is fixed** — a six-voice synth (saw bass, square
+arp, three-saw pad, sine kick, noise snare, noise hi-hat) on a 4/4 16th-note
+grid, in 16-bar sections of eight two-bar chords. Its **content and tone are
+data**, supplied as `se_music_config_t`:
+
+- **tempo** — `bpm_min` + `bpm_span` (a BPM picked per run in the range);
+- **key** — `tonics[]` (a MIDI-note pool, one chosen per run);
+- **harmony / rhythm banks** — `progressions[]`, `arp_patterns[]`,
+  `drum_patterns[]`, `bass_patterns[]` (a fresh selection per section);
+- **balance** — per-layer gains (`bass_amp` … `hat_amp`);
+- **timbre** — each voice's `se_music_env_t` envelope + `se_music_filter_t`,
+  plus the pad's detune + LFO rate.
+
+So the same generator plays genuinely different music (different key, rhythm,
+harmony, balance, timbre) with no code change — only the synth topology is
+shared. (Making the voice *waveforms* pluggable too is a possible future step.)
+
+```c
+static se_music_progression_t const MY_PROGS[]  = { /* {root_offset,is_major} × 8 */ };
+static se_music_arp_pattern_t   const MY_ARPS[]  = { /* 16 steps; -1 = rest */ };
+static se_music_drum_pattern_t  const MY_DRUMS[] = { /* kick/snare/hat 16-bit masks */ };
+static uint16_t                 const MY_BASS[]  = { 0x5555u, /* … */ };
+static int8_t                   const MY_KEYS[]  = { 48, 50, 53 };
+
+static se_music_config_t const MY_MUSIC = {
+    .bpm_min = 90, .bpm_span = 8,
+    .tonics = MY_KEYS, .tonic_count = 3,
+    .progressions = MY_PROGS, .progression_count = /* … */,
+    /* arp/drum/bass banks + gains + per-voice env/filter … */
+};
+music_procedural_create(&MY_MUSIC, seed);   // your music, same generator
+```
+
+`se_music_synthwave_preset()` returns the built-in synthwave config (what
+`NULL` selects). The config + its bank arrays are **retained by reference** —
+point them at static storage that outlives the source. See the header for the
+full struct + the grid constants (`SE_MUSIC_TICKS_PER_BAR`,
+`SE_MUSIC_CHORDS_PER_SECTION`) the bank shapes use.

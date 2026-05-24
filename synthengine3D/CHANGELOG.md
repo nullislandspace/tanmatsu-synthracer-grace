@@ -14,6 +14,33 @@ While the version is `0.x`, the surface is documented and semver-tracked but
 not yet frozen — minor releases may still adjust the API as it settles toward
 `1.0`.
 
+## [0.2.0] — 2026-05-24
+
+### Changed (breaking — allowed pre-1.0)
+- **`music_procedural_create()` gained a config parameter:**
+  `music_procedural_create(const se_music_config_t* cfg, uint32_t seed)`.
+  Pass `NULL` for the built-in synthwave preset (so the common case is a
+  one-token change: `…create(seed)` → `…create(NULL, seed)`).
+
+### Added
+- **`se_music_config_t`** + supporting public types (`se_music_chord_t`,
+  `se_music_progression_t`, `se_music_arp_pattern_t`, `se_music_drum_pattern_t`,
+  `se_music_env_t`, `se_music_filter_t`) and the grid constants
+  `SE_MUSIC_TICKS_PER_BAR` / `SE_MUSIC_CHORDS_PER_SECTION`. A game now drives
+  the procedural generator with its own **content + tone** — tempo range,
+  tonic pool, chord/arp/drum/bass pattern banks, per-layer gains, and each
+  voice's envelope + filter — for genuinely different music (key, rhythm,
+  harmony, balance, timbre) on the same six-voice synth.
+- **`se_music_synthwave_preset()`** — the built-in synthwave personality as a
+  config; what `NULL` selects.
+
+### Resolved
+- The 0.1.0 "procedural music content is hardcoded synthwave" limitation
+  (planned as E2.1). The six-voice synth *topology* (saw bass / square arp /
+  3-saw pad / sine kick / noise snare+hat) and the fixed 4/4 16th-note,
+  8-chord-section grid remain shared structure; everything musical is now
+  data. (A future change could make the synth voices pluggable too.)
+
 ## [0.1.0] — 2026-05-24
 
 First documented release: the engine is feature-complete for its source game
