@@ -19,15 +19,11 @@
 // helpers (`direct_565.h`) hardcode rotation + stride into the
 // inner loop while keeping the numeric values configurable — port
 // to a different display by updating these defines.
-#define DISPLAY_RAW_W       480
-#define DISPLAY_RAW_H       800
-
-#define DISPLAY_LOG_W       800   // == DISPLAY_RAW_H
-#define DISPLAY_LOG_H       480   // == DISPLAY_RAW_W
-
-// Raw-buffer stride, in pixels (not bytes). Equals DISPLAY_RAW_W
-// because the framebuffer is a tightly-packed 2D RGB565 array.
-#define DISPLAY_RAW_STRIDE  DISPLAY_RAW_W
+// The DISPLAY_* constants moved into the engine's overridable config
+// (synthengine3D/include/se_config.h) so the renderer owns them; they
+// are included here so game code that pulls in magicnumbers.h still sees
+// the same values. Override by defining before this header is reached.
+#include "se_config.h"
 
 
 // =============================================================
@@ -394,5 +390,61 @@
 // (+10 dB). So bigger numeric steps here translate to subtler
 // perceived changes than instinct suggests. Tune by ear, then
 // verify headroom math on paper rather than the other way around.
-#define AUDIO_MUSIC_GAIN  0.30f
-#define AUDIO_SFX_GAIN    0.35f
+// AUDIO_MUSIC_GAIN / AUDIO_SFX_GAIN now live in the engine config
+// (se_config.h, included above) as overridable defaults; the headroom
+// reasoning above is retained here for context. Override them per game
+// by defining before se_config.h is reached.
+
+
+// =============================================================
+// Synthwave backdrop / PPA compositor layout.
+// =============================================================
+//
+// Geometry + colours for the PPA-driven synthwave backdrop (sky FILL,
+// sun SRM, mountain BLEND) implemented in backdrop.{c,h}. These key off
+// the display geometry above (DISPLAY_LOG_W / the horizon line), so they
+// live here with the rest of the layout tunables rather than buried in
+// the backdrop translation unit.
+
+// ESP32-P4 PSRAM L2 cache line size. Used for the aligned allocation
+// of the layer caches and for `esp_cache_msync` operations.
+#define PPA_PSRAM_CACHE_LINE 128
+
+// Sky region in logical coordinates. `synthwave_draw_top_grid` paints
+// the magenta line at y = HORIZON_LOGICAL_Y; `synthwave_step` paints
+// the floor starting at y = HORIZON_LOGICAL_Y + 1. The PPA pipeline
+// touches logical rows [0, HORIZON_LOGICAL_Y], i.e. SKY_ROWS rows.
+#define HORIZON_LOGICAL_Y 256
+#define SKY_ROWS          (HORIZON_LOGICAL_Y + 1)
+
+// Sun cache: tight bounding box of the sun bands at their canonical
+// baseline. Bands span fb logical y = -4 (off-screen above) to ~174;
+// we render with y_bias = +4 so the topmost band lands at cache y=0
+// and the cache is exactly tall enough to hold the whole sun.
+#define SUN_CACHE_LOG_W   DISPLAY_LOG_W
+#define SUN_CACHE_LOG_H   180
+#define SUN_RENDER_Y_BIAS 4.0f
+
+// Mountain cache: tight bounding box of the visible mountain band.
+// The band spans fb logical y = 94 (mountain peaks) down to 256
+// (horizon). The cache is rendered with y_bias = -94 so the top of
+// the visible mountain region lands at cache y=0, and the horizon
+// line at fb y=256 lands at cache y=162.
+#define MOUNTAIN_CACHE_LOG_W   DISPLAY_LOG_W
+#define MOUNTAIN_CACHE_LOG_H   163
+#define MOUNTAIN_RENDER_Y_BIAS (-94.0f)
+#define MOUNTAIN_DEST_LOG_Y    94
+
+// Colour-key for the mountain cache background. Pure green never
+// appears in the synthwave palette (purples / pinks / cyans /
+// oranges / magentas), so a tight key around it can't false-match
+// any artwork pixel. The cache stores RGB565 (5-6-5); PPA expands
+// to RGB888 internally before comparing against the thresholds.
+// Whether the expansion is "shift" (g=0x3F -> 0xFC) or "replicate"
+// (g=0x3F -> 0xFF) varies by hardware revision, so the threshold
+// range covers both: low (0,0xFC,0) -- high (0,0xFF,0).
+#define MOUNTAIN_KEY_PAX_COL 0xFF00FF00u
+
+// Sky colour for PPA FILL. Same purple PAX paints with
+// `pax_background(0xFF552075)`.
+#define SKY_PAX_COL 0xFF552075u

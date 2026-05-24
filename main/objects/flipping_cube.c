@@ -6,7 +6,7 @@
 
 #include "magicnumbers.h"
 #include "render.h"   // render_camera, RENDER_NEAR_CLIP_Z
-#include "scene.h"    // scene_tri, scene_line
+#include "se_scene.h"    // scene_tri, scene_line
 #include "sfx/sfx_cube_bump.h"
 #include "world.h"
 

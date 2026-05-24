@@ -2,22 +2,27 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <time.h>
 
-#include "esp_log.h"
-#include "fastopen.h"
 #include "game.h"
-#include "nbt.h"
+#include "se_save.h"
 
-static char const* TAG = "save";
-
-// Defined in save_nbt.c — serializer for save_data_t.
+// Defined in save_nbt.c — (de)serialiser for the game's save_data_t.
 void save_write_state(NbtWriter* w, save_data_t const* s);
 void save_read_state(NbtReader* r, save_data_t* s);
 
-static void slot_path(int slot, char* buf, size_t size) {
-    snprintf(buf, size, SAVE_PATH_PREFIX "/save%d.bin", slot);
+// Stamped into every slot's engine peek header.
+#define SAVE_GAME_NAME    "Race the Synth"
+#define SAVE_GAME_VERSION 1
+
+// Engine save callbacks: adapt the typed (de)serialisers to the engine's
+// void* contract. By the time these run the engine has already written
+// the root compound + peek header (writer) or consumed the root tag
+// (reader); save_read_state skips the engine's se_peek block as unknown.
+static void game_serialize(NbtWriter* w, void const* game_data) {
+    save_write_state(w, (save_data_t const*)game_data);
+}
+static void game_deserialize(NbtReader* r, void* game_data) {
+    save_read_state(r, (save_data_t*)game_data);
 }
 
 void save_init_defaults(save_data_t* s) {
@@ -32,144 +37,35 @@ void save_init_defaults(save_data_t* s) {
 }
 
 void save_init(void) {
-    struct stat st;
-    if (stat(SAVE_PATH_PREFIX, &st) != 0) {
-        if (mkdir(SAVE_PATH_PREFIX, 0755) != 0) {
-            ESP_LOGE(TAG, "mkdir %s failed", SAVE_PATH_PREFIX);
-        } else {
-            ESP_LOGI(TAG, "created %s", SAVE_PATH_PREFIX);
-        }
-    }
+    se_save_config_t const cfg = {
+        .dir          = SAVE_PATH_PREFIX,
+        .game_name    = SAVE_GAME_NAME,
+        .game_version = SAVE_GAME_VERSION,
+        .serialize    = game_serialize,
+        .deserialize  = game_deserialize,
+    };
+    se_save_init(&cfg);
 }
 
 int save_slot_exists(int slot) {
-    if (slot < 0 || slot >= SAVE_SLOT_COUNT) return 0;
-    char path[64];
-    slot_path(slot, path, sizeof(path));
-    struct stat st;
-    return stat(path, &st) == 0;
-}
-
-int save_slot_peek(int slot, save_peek_info_t* out) {
-    if (!out) return -1;
-    memset(out, 0, sizeof(*out));
-    if (slot < 0 || slot >= SAVE_SLOT_COUNT) return -1;
-
-    char path[64];
-    slot_path(slot, path, sizeof(path));
-
-    FILE* f = fastopen(path, "rb");
-    if (!f) return -1;
-
-    NbtReader r;
-    if (nbt_read_open(&r, f) < 0) {
-        fastclose(f);
-        return -1;
-    }
-
-    // Root compound
-    char name[64];
-    int type = nbt_read_tag(&r, name, sizeof(name));
-    if (type != NBT_COMPOUND) {
-        fastclose(f);
-        return -1;
-    }
-
-    // First child must be the peek compound (we write it first).
-    type = nbt_read_tag(&r, name, sizeof(name));
-    if (type == NBT_COMPOUND && strcmp(name, "peek") == 0) {
-        while ((type = nbt_read_tag(&r, name, sizeof(name))) != NBT_END) {
-            if (type < 0) break;
-            if (type == NBT_INT64 && strcmp(name, "last_played_unix") == 0) {
-                out->last_played_unix = nbt_read_int64(&r);
-            } else if (type == NBT_INT64 && strcmp(name, "score_best") == 0) {
-                out->score_best = nbt_read_int64(&r);
-            } else if (type == NBT_INT32 && strcmp(name, "stage_best") == 0) {
-                out->stage_best = nbt_read_int32(&r);
-            } else if (type == NBT_INT32 && strcmp(name, "runs_total") == 0) {
-                out->runs_total = nbt_read_int32(&r);
-            } else {
-                nbt_skip_payload(&r, type);
-            }
-        }
-    }
-
-    fastclose(f);
-    return r.error ? -1 : 0;
+    return se_save_slot_exists(slot);
 }
 
 int save_load_slot(int slot, save_data_t* s) {
     save_init_defaults(s);
-    if (slot < 0 || slot >= SAVE_SLOT_COUNT) return -1;
-
-    char path[64];
-    slot_path(slot, path, sizeof(path));
-
-    FILE* f = fastopen(path, "rb");
-    if (!f) {
-        ESP_LOGW(TAG, "no save file at %s", path);
-        return -1;
-    }
-
-    NbtReader r;
-    if (nbt_read_open(&r, f) < 0) {
-        ESP_LOGE(TAG, "bad header in %s", path);
-        fastclose(f);
-        return -1;
-    }
-
-    // Root compound
-    char name[64];
-    int type = nbt_read_tag(&r, name, sizeof(name));
-    if (type != NBT_COMPOUND) {
-        fastclose(f);
-        return -1;
-    }
-
-    save_read_state(&r, s);
-    fastclose(f);
-
-    if (r.error) {
-        ESP_LOGE(TAG, "read error in %s", path);
-        return -1;
-    }
-
-    ESP_LOGI(TAG, "loaded slot %d (v%d, swap=%d)", slot, r.version, r.swap);
-    return 0;
+    return se_save_load_slot(slot, s);
 }
 
 int save_write_slot(int slot, save_data_t* s) {
-    if (slot < 0 || slot >= SAVE_SLOT_COUNT) return -1;
-
-    // Refresh peek block + timestamp.
-    s->last_played_unix = (int64_t)time(NULL);
-    s->peek_score_best  = s->stats.all_time.score;
-    s->peek_stage_best  = s->stats.all_time.stage_reached;
-    s->peek_runs_total  = s->stats.all_time.runs_total;
-
-    char path[64];
-    slot_path(slot, path, sizeof(path));
-
-    FILE* f = fastopen(path, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "open %s for write failed", path);
-        return -1;
-    }
-
-    NbtWriter w;
-    nbt_write_open(&w, f);
-    nbt_write_compound(&w, "root");
-    save_write_state(&w, s);
-    nbt_write_end(&w);
-    fastclose(f);
-
-    if (w.error) {
-        ESP_LOGE(TAG, "write error to %s", path);
-        return -1;
-    }
-
-    ESP_LOGI(TAG, "saved slot %d", slot);
-    return 0;
+    // Build the one-line slot-select summary carried in the engine peek's
+    // free-text `info` field (shown by draw_slot_select alongside the
+    // engine's timestamp). Race the Synth only ever saves manually.
+    char info[SE_SAVE_INFO_MAX];
+    snprintf(info, sizeof(info), "best %lld  stage %d  runs %d",
+             (long long)s->stats.all_time.score,
+             (int)s->stats.all_time.stage_reached,
+             (int)s->stats.all_time.runs_total);
+    return se_save_write_slot(slot, SE_SAVE_MANUAL, s, info);
 }
 
 void run_stats_merge_into_all_time(run_stats_t* all, run_stats_t const* last) {

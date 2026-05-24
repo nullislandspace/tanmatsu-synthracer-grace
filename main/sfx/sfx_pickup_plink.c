@@ -1,8 +1,8 @@
 #include "sfx/sfx_pickup_plink.h"
 
-#include "audio_dsp.h"
-#include "audio_mixer.h"
-#include "audio_source.h"
+#include "se_audio_dsp.h"
+#include "se_audio.h"
+#include "se_audio_source.h"
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"

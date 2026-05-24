@@ -1,8 +1,8 @@
 #include "sfx/sfx_scrape.h"
 
-#include "audio_dsp.h"
-#include "audio_mixer.h"
-#include "audio_source.h"
+#include "se_audio_dsp.h"
+#include "se_audio.h"
+#include "se_audio_source.h"
 
 #include <stdatomic.h>
 #include <stdint.h>

@@ -2,10 +2,10 @@
 
 #include <math.h>
 
-#include "direct_565.h"
+#include "se_direct565.h"
 #include "esp_timer.h"
 #include "magicnumbers.h"
-#include "scene.h"
+#include "se_scene.h"
 
 // Scale every RGB channel of an ARGB pax_col_t by `scale` (0..1).
 // Alpha kept intact. Same shape as the dim_argb helper in game.c
@@ -25,31 +25,15 @@ static inline pax_col_t dim_argb_render(pax_col_t col, float scale) {
 // non-square footprints (e.g. wall segments running along z) work
 // without any special-case code.
 //
-// Near-plane handling now lives in scene.c: scene_tri / scene_line
-// clamp each vertex's z to RENDER_NEAR_CLIP_Z and drop geometry that
-// is wholly behind the near plane, so the emitters below just hand
-// over raw world-space geometry. The whole-object `z` culls kept
-// here are a cheap early-out, not a correctness requirement.
-
-// The camera global. x defaults to track centre, y to the resting
-// (grounded) eye height; main.c overwrites both every frame.
-static render_camera_t s_camera = { 0.0f, RENDER_CAM_Y };
-
-void render_set_camera(float x, float y) {
-    s_camera.x = x;
-    s_camera.y = y;
-}
-
-render_camera_t render_camera(void) {
-    return s_camera;
-}
-
-void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy) {
-    if (z_w < 0.01f) z_w = 0.01f;  // guard against /0 if a near-clip slips through
-    float const inv_z = 1.0f / z_w;
-    *out_sx = RENDER_HALF_W + RENDER_FOCAL_LEN * (x_w - s_camera.x) * inv_z;
-    *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y_w - s_camera.y) * inv_z;
-}
+// Near-plane handling lives in the engine scene (se_scene.c): scene_tri /
+// scene_line clamp each vertex's z to RENDER_NEAR_CLIP_Z and drop geometry
+// that is wholly behind the near plane, so the emitters below just hand
+// over raw world-space geometry. The whole-object `z` culls kept here are
+// a cheap early-out, not a correctness requirement.
+//
+// The camera + projection (render_set_camera / render_camera /
+// render_project) also moved into the engine scene; this module just
+// reads them via se_scene.h to project its floor shadows.
 
 void render_shadows(pax_buf_t* fb, world_state_t const* w, float cam_x, float sun_y) {
     // After full sunset the floor base is already the shadow

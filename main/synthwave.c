@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "direct_565.h"
+#include "se_direct565.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "magicnumbers.h"

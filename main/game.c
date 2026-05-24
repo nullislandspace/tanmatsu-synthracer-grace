@@ -5,7 +5,7 @@
 
 #include "pax_gfx.h"
 #include "render.h"
-#include "scene.h"
+#include "se_scene.h"
 #include "shapes/pax_tris.h"
 #include "objects/ship_model.h"
 

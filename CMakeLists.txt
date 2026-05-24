@@ -10,15 +10,19 @@ project(app C)
 # App source files — add your .c files here
 set(APP_SOURCES
     main/main.c
+    main/game_ui.c
+    main/keybind_ui.c
+    main/backdrop.c
+    main/hud.c
+    main/screens.c
+    main/play_states.c
     main/crt0.c
     main/synthwave.c
-    main/rendertext.c
     main/icons.c
     main/input.c
     main/game.c
     main/world.c
     main/render.c
-    main/scene.c
     main/obstacle.c
     main/objects/cube.c
     main/objects/wall.c
@@ -41,16 +45,11 @@ set(APP_SOURCES
     main/areas/simple_platform.c
     main/areas/synthengine_ad.c
     main/areas/rest.c
-    main/nbt.c
     main/save.c
     main/save_nbt.c
-    main/audio_dsp.c
-    main/audio_mixer.c
     main/audio_settings.c
     main/controls_settings.c
     main/attachments.c
-    main/hw_settings.c
-    main/music/music_procedural.c
     main/sfx/sfx_engine_hum.c
     main/sfx/sfx_pickup_ding.c
     main/sfx/sfx_pickup_plink.c
@@ -87,6 +86,17 @@ target_compile_options(app_obj PRIVATE
     "SHELL:-include freertos/event_groups.h"
 )
 
+# SynthEngine3D engine component (see synthengine3D/ and
+# devdocs/engine-extraction.md). In this plain-CMake build it provides a
+# relocatable OBJECT library; add_subdirectory MUST precede the link-script
+# file(GENERATE) below so $<TARGET_OBJECTS:synthengine3d> resolves. Linking it
+# to app_obj propagates the engine's PUBLIC include dir (synthengine3D/include)
+# so game sources can #include "synthengine3d.h"; the engine's object files are
+# folded into app.so explicitly in the link script (no double-counting -- the
+# custom command, not CMake, performs the link).
+add_subdirectory(synthengine3D)
+target_link_libraries(app_obj PRIVATE synthengine3d)
+
 # Collect object files into a list file, then link via a response file
 # This avoids issues with generator expressions in custom commands
 set(LINK_SCRIPT ${CMAKE_BINARY_DIR}/link_app.sh)
@@ -102,6 +112,7 @@ ${CMAKE_C_COMPILER} \
     -Wl,-Map=${CMAKE_BINARY_DIR}/app.map \
     -L${CMAKE_CURRENT_SOURCE_DIR}/fakelib \
     $<JOIN:$<TARGET_OBJECTS:app_obj>, > \
+    $<JOIN:$<TARGET_OBJECTS:synthengine3d>, > \
     -lall \
     -o ${CMAKE_BINARY_DIR}/app.so
 ")
@@ -110,6 +121,8 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/app.so
     COMMAND sh ${LINK_SCRIPT}
     DEPENDS app_obj
         $<TARGET_OBJECTS:app_obj>
+        synthengine3d
+        $<TARGET_OBJECTS:synthengine3d>
         ${CMAKE_CURRENT_SOURCE_DIR}/app.ld
         ${CMAKE_CURRENT_SOURCE_DIR}/app_version.script
         ${CMAKE_CURRENT_SOURCE_DIR}/fakelib/liball.so

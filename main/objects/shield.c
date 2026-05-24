@@ -6,7 +6,7 @@
 #include "esp_timer.h"
 #include "magicnumbers.h"
 #include "render.h"      // RENDER_NEAR_CLIP_Z
-#include "scene.h"       // scene_tri, scene_line
+#include "se_scene.h"       // scene_tri, scene_line
 #include "world.h"
 
 // Violet palette — distinct from the blue Tri, green speed booster

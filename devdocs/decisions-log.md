@@ -3818,3 +3818,695 @@
     area defines `AD_TEXT_COLOR` (red) and hands it in. Lets the same sign
     object render different signage in different colours; a per-ad-text
     colour array would slot into the area trivially if wanted later.
+
+- 2026-05-23 — **SynthEngine3D extraction planned** (branch
+  `engine_extraction`). Decision to lift the game-agnostic engine (3D
+  software renderer, object framework, audio mixer + DSP + procedural music,
+  vector text, UI/menu widgets, settings, save framework) out of `main/` into
+  a self-contained `synthengine3D/` component behind a stable public API, so
+  internals can evolve without rewriting games and the component can later be
+  reused (graceloader, other apps). Full plan + step-by-step in
+  [engine-extraction.md](engine-extraction.md). Key decisions:
+    - **Dual-mode IDF component, not an idf.py game.** Clarified the
+      toolchain/build-system split: the project uses the IDF *toolchain*
+      (`riscv32-esp-elf-*`, hence `export.sh`) but **not** the IDF *build
+      system* (plain `project(app C)` CMake → `-nostdlib` `.so` linked
+      against `fakelib`, custom `app.ld` / `app_version.script` / crt0). So
+      the engine's `CMakeLists.txt` is dual-mode: `if(COMMAND
+      idf_component_register)` registers a real IDF component (for
+      graceloader, a real idf.py app, to consume later via the component
+      manager), `else()` defines a plain library target this game consumes via
+      `add_subdirectory`. The game stays a plain-CMake `.so` build (turning it
+      into an idf.py firmware build would fight the graceloader `.so` model).
+      An `idf_component.yml` ships now for future external management.
+    - **Public/internal API enforced by the build, three layers.** (1) Opaque
+      handle types — public headers forward-declare structs, definitions in
+      `src/internal/`, so layout changes can't break games; (2) include-path
+      separation — `include/` public is the only consumer-visible dir,
+      `src/`+`src/internal/` PRIVATE, so including an internal header fails to
+      compile; (3) `se_` naming + banners + a semver'd `se_version.h`
+      (public API = semver contract; anything internal may change at a patch).
+    - **Overridable defaults.** Engine ships `#ifndef`-guarded defaults
+      (`RENDER_HORIZON_Y` etc. stay defines, game-overridable) in
+      `se_config.h`; runtime config struct for coarse-grained values only.
+    - **App specifics stay in the game.** Engine is a toolkit; the graceloader
+      main loop, BSP bootstrap, vsync, input drain and app state machine
+      remain in `main/`. Native-vs-graceloader `#ifdef`s in the engine are
+      deferred past v1.
+    - **Self-contained docs inside the component** (README + CHANGELOG +
+      `docs/` + a minimal example), written for an outside developer — they
+      travel with the component; the game's `devdocs/` does not.
+    - **Performance contract: net-zero if done right.** It stays one `.so`
+      (`-Bsymbolic` ⇒ direct intra-`.so` calls, no PLT); no `-flto` and `.c`
+      files are already separate TUs, so no cross-TU inlining is lost; same
+      flags ⇒ same codegen. The hottest code is `static inline` in headers
+      (`direct_565.h` rasterizer, `audio_dsp.h` synth) — these become
+      **public inline headers** and must never be hidden behind opaque
+      handles; opaque handles are for coarse objects only. Hot-loop tunables
+      stay compile-time defines; the renderer→world inversion passes a
+      `se_shadow_caster_t[]` array, not a per-element callback; the engine
+      target must replicate the exact flags (esp. `-march=...xesppie`, or the
+      PIE SIMD silently degrades to scalar). Regression gate: record an
+      `app.map` size + on-device FPS baseline at E0 and re-check after the
+      structural moves (E1/E4/E5).
+    - **Migration is strangler-style:** cleanest/least-coupled modules first,
+      `make build` + `make verify` green at every step, user commits between
+      steps. No code moved yet — this entry records the plan only.
+
+- 2026-05-23 — **E3 save framework: generic slot manager in the engine
+  (Option B).** The original sketch was ambiguous about how much of the save
+  system to extract. Code review showed `save.c`/`save_nbt.c` are ~400 lines
+  bound to the `save_data_t` schema, so the *minimal* honest cut would have
+  moved only the NBT primitive. But the user had listed "save file handling"
+  as an engine capability and confirmed reuse is the explicit goal, so we
+  chose **Option B**: a generic, reusable save-slot framework in the engine.
+    - `nbt.{c,h}` → `se_nbt.{c,h}` — generic FILE*-based tagged serializer.
+    - New `se_save.{c,h}` — engine owns N file-backed slots
+      (`SE_SAVE_SLOT_COUNT`, an overridable `#define` per the user so a game
+      sets its own slot count), the slot directory (`mkdir`), and the on-disk
+      wrapping. The game registers a `se_save_config_t` (dir, game name/
+      version, serialize + deserialize callbacks). API: `se_save_init`,
+      `se_save_slot_exists`, `se_save_peek`, `se_save_load_slot`,
+      `se_save_write_slot(slot, kind, data, info)`.
+    - **Peek header (co-designed with user).** Engine writes a `se_peek`
+      compound first in every file: `timestamp` + `format_version` filled by
+      the engine automatically; `game_name`/`game_version` from the config; a
+      free-text `info` display string and a `se_save_kind_t`
+      (MANUAL/AUTOSAVE/QUICKSAVE — a generic enum the user wanted for other
+      games; RTS always MANUAL) supplied per write. Slot-select reads only
+      this block. The game's old structured peek fields (score/stage/runs)
+      collapse into the `info` string, formatted in `save_write_slot`.
+    - **Game keeps** its `save_data_t` schema, the serialize/deserialize
+      callbacks (the former `save_write_state`/`save_read_state`, minus the
+      peek), defaults, run-stats merge, run-end commit, and — deliberately —
+      the **day-rollover** logic (it's daily-challenge *policy*, not generic
+      persistence, so it did NOT go into the engine despite the original
+      sketch mentioning it). No opaque handle: the slot manager is a
+      configured singleton, which is simpler and matches the existing design.
+    - **Save-format change, graceful.** The peek block layout changed, so a
+      pre-existing on-device slot loads all its progress (the stats/meta/daily
+      compounds are untouched and the game reader skips the unknown old/new
+      peek) but shows a blank date/info on the slot-select line until the next
+      save rewrites it. User pre-approved changing the save internals.
+    - Build clean, all symbols satisfied (text 96662→97063, +401 B for the
+      generic peek/config/callback layer). On-device save/load/peek round-trip
+      smoke still pending (can't run from the build host).
+
+- 2026-05-23 — **E4 renderer extraction + the world-coupling cut.** Moved
+  the software 3D pipeline into the engine and severed the renderer's
+  dependency on the game world — the headline goal of the whole effort.
+    - `scene.{c,h}` → `se_scene.{c,h}` (z-buffer rasterizer). The pinhole
+      camera + projection (`render_camera_t`, `render_set_camera`,
+      `render_camera`, `render_project`) moved from `render.c` into
+      `se_scene.c`/`.h` alongside it — they're one cohesive "3D scene"
+      module. Symbol names kept (precedent), so call sites are unchanged.
+    - **The world dependency was cut by *recognition*, not a new abstraction.**
+      The original sketch proposed inverting `render_submit_obstacles` /
+      `render_shadows` behind a generic `se_shadow_caster_t[]` array. On
+      reading the code, those functions (and the cube/pyramid/icosahedron
+      emitters) are plainly *game* code: they iterate the obstacle pool, know
+      `obstacle_t`, and use `GAME_*` tuning + a synthwave-specific floor-shadow
+      projection. So they simply stayed in the game's `render.c`, now calling
+      the engine's `scene_tri`/`scene_line`/`render_project`. No premature
+      caster API. Net effect, and the point of E4: **no engine source or
+      header includes `world.h` (or `render.h`/`game.h`/`magicnumbers.h`)** —
+      verified by grep.
+    - `render.h` became a game-only header (world-aware decls) that
+      re-exports `se_scene.h`, so every existing `#include "render.h"` /
+      `"scene.h"` call site keeps compiling (the latter swept to
+      `"se_scene.h"`).
+    - **Magicnumbers split finished:** `RENDER_HALF_W/HORIZON_Y/FOCAL_LEN/
+      CAM_Y/NEAR_CLIP_Z` → `se_config.h` as `#ifndef` overridable defaults
+      (`RENDER_HORIZON_Y` documented as the per-game backdrop-match knob, per
+      the user's earlier call). With E1's display geometry and E2's audio
+      gains, the engine half of `magicnumbers.h` now lives entirely in
+      `se_config.h`; `GAME_*` gameplay tuning stays in the game.
+    - Build clean, all symbols satisfied; text 97063→97109 (+46 B, just the
+      relocation). Performance note: `scene_project` (per-vertex hot path) now
+      shares a TU with `render_camera()`, so it can inline that call — a
+      marginal improvement over the pre-split cross-TU call. On-device FPS
+      reconfirm welcome but no regression expected.
+
+- 2026-05-24 — **E5 resolved as defer; render pipeline pivot (ER) added.**
+  A design discussion reframed the object-framework question.
+    - **E5 = keep `obstacle.{c,h}` game-side (no extraction).** The pool lives
+      in `world_state_t` (checkpoint struct-copies it, so the engine can't own
+      it); `collide`/`physics` take game/world state; the kind + hit enums are
+      game semantics; and — decisively — **the engine never calls the object
+      callbacks** (all dispatch is in `game.c`/`world.c`/`render.c`). So the
+      only generic thing to extract would be a POD struct + pool allocator,
+      thin, with one consumer and 29 files of `obstacle_t` churn. Not worth it.
+    - **The real reuse leverage is the render *pipeline*, not the object pool.**
+      The engine is immediate-mode — it has no render list; games submit
+      geometry via `scene_tri`/`scene_line` each frame and organise their own
+      objects however they like. A second game needs the pipeline, not
+      `obstacle_t`.
+    - **New phase ER (post-extraction): pivot `se_scene` immediate → deferred.**
+      `scene_tri`/`scene_line` accumulate a per-frame geometry list (as edges
+      already do); a new `scene_render(mode)` does the work and `scene_flush`
+      folds in. Object `emit` code is unchanged. This lets the engine own /
+      select the rasterization algorithm (z-buffer now; painter's/sorted/tiled
+      later) and do central FOV/resolution-aware frustum + back-face culling
+      and front-to-back ordering — so games stop re-deriving culling. Likely a
+      real win because the game is fill-bound (front-to-back early-z cuts
+      overdraw), but net perf is an on-device A/B question (buffering traffic
+      vs fill saved). **Initial cut ships ordering + culling as DUMMY
+      pass-throughs** (Race the Synth already pre-culls in how `world.c`
+      builds the object list), so the first ER lands the architecture
+      (deferred accumulation + `scene_render` + algorithm hook + no-op
+      cull/order seams) behavior-identically; real cull/sort fill in later and
+      measured. Sequencing: finish the mechanical extraction (E6 menus, E7
+      backdrop, E8 docs, E9 verify) first, then ER. Full spec in
+      [engine-extraction.md](engine-extraction.md) (ER section).
+
+- 2026-05-24 — **Major pivot: the engine becomes an application framework
+  (inversion of control).** This reverses the original constraint 4 ("app
+  specifics stay in the game; engine is a toolkit"). The user's call:
+  volume keys, audio-jack, F1-exit, vsync, and the input-queue pump are
+  identical in every graceloader game, so the engine should own them and the
+  game shouldn't re-implement loop plumbing per title. Decision: do it
+  properly in one pass on this branch rather than piecemeal across releases.
+    - **New capstone phase EF** (`se_run` + callbacks). Engine owns: BSP/
+      display/audio bootstrap, the framebuffer + double-buffer + vsync blit,
+      the input-queue pump, the device-global keys (volume ±, audio-jack
+      re-route, F2/F3 brightness, F1-exit when the game opts in, power), per-
+      frame `dt`, `scene_init`, and the backdrop clear. The game registers
+      `on_init/on_input/on_update/on_backdrop/on_render/on_shutdown` + a config
+      (`f1_exits`, `backdrop_argb`, …) and a `void* user`. Polled steering
+      stays a direct BSP read inside `on_update`.
+    - **Backdrop hook (answers the user's question):** engine clears to
+      `backdrop_argb` (black default) **or** calls `on_backdrop(fb)` if
+      registered. Race the Synth draws its synthwave there; the synthwave/PPA
+      code stays game-side. This subsumes E7.
+    - **Menu system (subsumes E6), built on the loop.** Once the engine owns
+      the frame, menus get `se_menu_t` (definition + live cursor state; row
+      kinds NONE/CHECK/TEXT/CUSTOM, CUSTOM carrying a `draw_value` callback so
+      the keybind→icon logic stays game-side; theme via `SE_UI_COL_*` in
+      `se_config.h`). Core is per-frame (`se_menu_input(action)` /
+      `se_menu_draw(fb)`) so it composes with live gameplay (pause overlay);
+      a blocking `se_ui_run_menu(&def,&result)` wrapper (pumps engine frames +
+      the backdrop hook) gives the "show menu → get result" call site the user
+      wanted; `se_ui_capture_key()` replaces the bespoke key-capture state for
+      rebinds. Menu *content* + which key means "down" (remappable) stay
+      game-side.
+    - **Risk:** the biggest rewrite of the effort (re-architects the
+      ~3079-line `main.c`). Mitigated by the branch + a strangler sub-plan
+      (stand up `se_run` driving existing code first, then move input/globals,
+      then vsync, then the menu system, then retire bespoke states), building
+      green + on-device smoke at each step. The `se_run`/callback API is being
+      signed off before any code moves (same discipline as the E3 save API).
+    - **Re-sequenced remaining work:** EF → E8 docs → E9 verify → ER render
+      pipeline; E2.1 (music config) parked. E0–E4 done; E5 deferred. Full spec
+      in [engine-extraction.md](engine-extraction.md) (EF section).
+    - **EF API refined (user sign-off, supersedes the globals list above):**
+      (1) The engine consumes **only** volume ± + audio-jack live (+ F1-exit
+      if opted in). **F2/F3 are NOT grabbed** (function keys too valuable;
+      brightness is a setting) and the **power button is left alone** (2 s-hold
+      power-off is in the coprocessor; it's next to volume and fragile, so a
+      short tap must never cost progress). (2) **Brightness is a device-global
+      *setting*, not a key.** The engine owns four shared-`"system"`-NVS
+      hardware settings — speaker/hp volume, screen brightness, keyboard
+      backlight, LED brightness — loaded at boot from the launcher/other apps,
+      applied via BSP, adjustable from the in-game settings menu, and
+      persisted back so they carry across apps. App-specific settings
+      (music/SFX/hum, keybinds, gyro) stay the game's. (3) **Menu nav keys are
+      engine-owned + fixed but overridable** via `SE_UI_KEY_UP/DOWN/ACTIVATE/
+      BACK` `#define`s in `se_config.h` (not the game's remappable gameplay
+      bindings) — so a non-QWERTY port can retarget them.
+
+- 2026-05-24 — **EF sub-step 1 implemented: the engine owns the run loop.**
+  Stood up `synthengine3D/src/se_run.c` and migrated `main.c`'s `app_main`
+  onto it. The engine now owns: NVS/BSP/display bootstrap, the two PSRAM
+  (cache-line-aligned) framebuffers + `pax_buf` setup, `scene_init`,
+  `audio_mixer_init`, the vsync/tearing-effect semaphore, the per-frame `dt`
+  (clamped to the new overridable `SE_FRAME_DT_MAX`), the default backdrop
+  clear, `blit` and the double-buffer swap. `app_main` is now a 12-line
+  `se_run(&cfg,&cb,NULL)` call.
+    - **Loop → callbacks.** The ~960-line `while(1)` body was split, *without
+      re-indenting it*, into the four `se_run` callbacks: `on_init`
+      (game-side content bootstrap — synthwave/PPA caches, icons, input,
+      settings, save, `game_init`, daily seed), `on_update` (input drain +
+      per-frame **input snapshot** + debug knobs + the physics pass / post-run
+      holds), `on_backdrop` (the PPA sky/sun/mountain composite + the floor
+      grid + obstacle shadows), `on_render` (the `app_state` switch: scene +
+      HUD + menus + state transitions). Per-frame order is identical to the
+      old loop (update → backdrop → render → present).
+    - **Shared frame state.** The old loop locals were promoted to file-scope
+      statics (`game`, `world`, checkpoint snapshots, `app_state`,
+      `run_end_committed`, `daily_seed`, profiling). Input is consumed **once**
+      per frame into an `s_in_*` snapshot in `on_update` so the physics pass
+      and the render switch read one consistent view (consume order among
+      independent one-shot flags is irrelevant); `crashed`/`stalled` are
+      published via `s_crashed`/`s_stalled`; `dt` via `s_frame_dt` (on_backdrop
+      has no dt param).
+    - **Framebuffer bridge (the key low-churn move).** ~100 in-file draw
+      helpers + the PPA submits reference a file-scope `pax_buf_t* fb`; rather
+      than thread `fb` through every call, `on_backdrop`/`on_render` mirror the
+      engine's current back buffer (the callback param) into that `fb` at the
+      top of the frame. Raw display geometry the PPA bands + layer caches need
+      is pulled from the new public **`se_display_info()`** in `on_init`.
+    - **Profiling re-anchored, not lost.** The same per-stage breakdown
+      (in/phys/bgkick/bgflr/bgwait/obs/fgrest) is kept across the callbacks via
+      boundary-timestamp statics; `blit`+`vsync`+swap are the engine's now, so
+      they fold into one **`present`** bucket (the gap between a frame's
+      on_render end and the next on_update start).
+    - **Deliberately deferred to sub-step 2:** the input-queue *pump* and the
+      device-global keys stay game-side — `on_update` still calls
+      `input_drain_events()` and handles F1→launcher itself, and
+      `cfg.f1_exits=false`. `on_input` is wired in the API but unused so far.
+    - **Build:** green + `make verify` clean. text 97109→97822 (+713 B) — the
+      framework scaffolding (`se_run`/`se_bootstrap`/`se_present`/
+      `se_display_info`) + 4-callback-per-frame dispatch, **not** a hot-path
+      regression: the `static inline` rasterizer/DSP leaves are untouched and
+      the per-frame work is the same code, so the perf contract holds (confirm
+      `fgrest` unchanged on the next on-device flash). **On-device smoke owed.**
+    - *On-device smoke: passed (user, 2026-05-24) — boots/plays normally.*
+
+- 2026-05-24 — **EF sub-step 2: input pump + device-global keys → the engine.**
+  Moved the BSP input-queue pump and the device-global hardware settings into
+  `se_run`, completing the "engine owns the loop *and* its input" half of EF.
+    - **`hw_settings.{c,h}` → engine `se_hw.{c,h}`** (functions `hw_settings_*`
+      → `se_hw_*`). It was already game-agnostic (only `bsp/*` + the upstream
+      `nvs_settings_*` shared-NVS helpers), so it's a clean relocation — it
+      maps exactly onto the EF "device-global settings the engine owns"
+      (speaker/hp volume with jack-selected active output, + display/keyboard/
+      LED brightness). `se_run`'s bootstrap calls `se_hw_init()` right after
+      `audio_mixer_init()` (preserving the "overlay persisted volume on the
+      mixer's raw-jack amp default" ordering). The vestigial `VOLUME_STEP_PCT`
+      + its `_Static_assert` were dropped; the pump's step is the overridable
+      `SE_HW_VOLUME_STEP_PCT` in `se_config.h` (default 5).
+    - **Input-queue pump in `se_run`.** Bootstrap acquires the queue
+      (`bsp_input_get_queue`); each frame, *before* `on_update`,
+      `se_pump_input` drains it. It consumes the **audio-jack** action
+      (always — pure device routing, never bindable), the **volume ±** keys
+      (→ `se_hw_step_volume`), and **F1** (→ `audio_mixer_shutdown` +
+      `bsp_device_restart_to_launcher`, since `cfg.f1_exits=true`). Everything
+      else is forwarded to the new **`on_input(ev,user)`** callback. The
+      **power button** and **F2/F3** are deliberately never touched.
+    - **`input.c` lost queue ownership.** `input_drain_events()` (which owned
+      `bsp_input_get_queue` + the drain loop, and handled F1/volume/jack)
+      became `input_handle_event(const bsp_input_event_t*)` — the per-event
+      switch minus the now-engine-owned keys. `main.c`'s `on_input` routes the
+      engine's forwarded events into it; `input.c` keeps only the accelerometer
+      enable + the polled steering. F1 handling left `on_update` entirely.
+    - **Rebind-capture seam.** During a "press any key" capture the volume keys
+      + F1 must reach the game so they can be *bound*, not acted on. Added a
+      transitional **`se_input_set_passthrough(bool)`**: `input_begin_key_
+      capture()` turns it on, `input_consume_captured_key()` turns it off; while
+      on, the pump forwards volume/F1 raw (jack is still consumed — it's never
+      a bindable key). This preserves the original "bind F1 works, volume is
+      swallowed during capture" behaviour exactly, and folds away once the
+      rebind dialog is engine-owned (`se_ui_capture_key`, a later sub-step).
+    - **Behaviour-identical:** press/release handling, the consume-then-snapshot
+      timing, jack-during-capture, and bind-to-F1 all match the pre-migration
+      `input.c`. Build green + `make verify` clean; text 97822→97929 (+107 B:
+      the pump + passthrough; `se_hw` code moved out of app_obj into the engine,
+      roughly net-neutral). **On-device smoke owed** (volume keys persist to
+      launcher, jack hot-swap re-routes, F1 exits, rebind dialog still binds).
+    - *On-device smoke: passed (user, 2026-05-24).*
+
+- 2026-05-24 — **EF sub-step 3: `se_ui` list-menu system (per-frame core).**
+  Lifted the game's data-driven list-menu (`menu_view_t` + `menu_draw`) into
+  the engine as **`se_ui.{c,h}`**, and ported the first two menus onto it.
+    - **API.** `se_menu_def_t` (title/rows/hint/layout) + `se_menu_row_t`
+      (kinds `NONE / CHECK / TEXT / CUSTOM`) describe a menu; `se_menu_t` adds
+      the live cursor. The engine owns the cursor state machine
+      **`se_menu_input(menu, action)`** — `UP/DOWN` move+clamp (no wrap),
+      `ACTIVATE/BACK` return a result — and the renderer **`se_menu_draw(menu,
+      fb)`** (dim panel + title + subtitle + rows + footer hint). The game
+      derives `se_menu_action_t` from whatever input layer it has (RTS maps its
+      consumed menu-nav/confirm/cancel) and acts on `SE_MENU_RESULT_ACTIVATED`
+      (using `menu->cursor`) / `_BACK`. So the engine owns *nav + render*, the
+      game owns *what each row is and does*.
+    - **CUSTOM keeps game logic game-side.** A row needing bespoke value
+      drawing (the keybind icons) uses `SE_MENU_VAL_CUSTOM` + a `draw_value`
+      callback, exactly as planned — the engine never learns about scancodes
+      or icons. (Used when the Controls menu ports; the first two menus use
+      NONE/CHECK only.)
+    - **Render dependencies are engine-only:** `se_text` (vector text) +
+      `se_direct565` (panel dim). Theme `SE_UI_COL_*` + geometry `SE_UI_*` are
+      overridable `#define`s in `se_config.h` (reskin without touching engine
+      code). No game header reached.
+    - **Design choice — action-driven, not raw-event-driven.** The plan
+      sketched `se_menu_handle_event(menu, ev)` mapping raw BSP events via
+      `SE_UI_KEY_*`. But RTS's input layer already maps events → consumed
+      actions (menu_nav / pickup / cancel), so a raw-event menu API would
+      duplicate that and force another `input.c` change. Chose the
+      lower-coupling `se_menu_input(menu, action)`: the engine owns the cursor
+      *semantics*, the host feeds *actions* from whatever input it has. The
+      raw-event mapper (`se_ui_action_from_event` + `SE_UI_KEY_*`) and the
+      blocking `se_ui_run_menu` / `se_ui_capture_key` are deferred to the
+      controls/rebind round, where a blocking "press any key" capture is the
+      natural consumer.
+    - **First consumers:** the **Settings** (2 plain rows → submenus) and
+      **Audio** (3 checkboxes) cases now build an `se_menu_def_t` + `se_menu_t`,
+      draw via `se_menu_draw`, and drive the cursor via `se_menu_input`;
+      pixel- and behaviour-identical (draw-then-move ordering preserved, same
+      clamp, same dispatch). Their bespoke `draw_settings_menu` /
+      `draw_audio_settings` builders were removed. Main / Pause / Controls stay
+      on the game's `menu_draw` for now (next rounds), so `menu_draw` +
+      `menu_view_t` stay until they port.
+    - **Build:** green + `make verify` clean. text 97929→98797 (+868 B) —
+      transient duplication (the engine renderer + the not-yet-retired game
+      `menu_draw` both linked); expected to drop back when the remaining menus
+      port and `menu_draw` is deleted.
+    - *On-device smoke: passed (user, 2026-05-24) — Settings + Audio.*
+    - **Follow-on (same day): Main menu + Pause overlay ported** to `se_ui`
+      too, same pattern. Pause keeps its special handling (F4 = resume beats
+      pickup-activate; the Abort row commits a QUIT run) — only the
+      render+cursor moved to the engine. `draw_main_menu` / `draw_pause_overlay`
+      removed. The game's `menu_draw` / `menu_view_t` now serve only the
+      Controls menu (keybind rows) + the non-list screens; they retire when
+      Controls ports onto `se_bindings` + the engine rebind dialog. text
+      98797→98783. **On-device smoke owed** (main menu nav + all entries; pause
+      F4-resume, Resume/Settings/Abort rows, Settings-from-pause).
+    - *On-device smoke: passed (user, 2026-05-24) — Main + Pause.*
+
+- 2026-05-24 — **EF sub-step 4a: `se_bindings` (the binding-storage half).**
+  New engine module `se_bindings.{c,h}` owns remappable key bindings +
+  their persistence; the game *declares* its controls, the engine *stores*
+  them. This is the storage foundation for the engine-owned remap dialog
+  (sub-step 4b).
+    - **API.** The game passes a `se_bindings_config_t` (NVS namespace +
+      a `se_binding_def_t[]` of `{id, label, nvs_key, default_sc}`) to
+      `se_bindings_init`; then `se_bindings_get(id)` (current scancode,
+      polled for steering) / `se_bindings_set(id, sc)` (set + persist). A
+      tiny linear scan maps the game's control id → slot (≤ `SE_BINDINGS_MAX`,
+      a `se_config.h` cap); no malloc.
+    - **Game side thinned.** `controls_settings.c` kept only the **gyro** flag
+      (a toggle, not a binding — answers the long-open gyro-row question: it
+      stays a game setting) and now declares the binding table + calls
+      `se_bindings_init` from `controls_settings_load`, so `main.c`'s boot path
+      didn't change. `controls_settings_key`/`set_key` + the keybind array were
+      deleted; `input.c` (steering + pause-key match) and `main.c` (Controls
+      menu rows + capture write) now call `se_bindings_get`/`set`.
+    - **Migration-safe:** same NVS namespace (`synthracer`), same keys
+      (`ctl_k_left/right/item/pause`), same defaults (ESC / Backspace / Space /
+      F4) — a player's already-remapped keys load unchanged.
+    - **Deferred to 4b:** the engine-*rendered* remap dialog — the Controls
+      menu still uses the game's `menu_draw` (KEYBIND rows) and the bespoke
+      `APP_STATE_KEY_CAPTURE`; they port onto `se_ui` (`CUSTOM` rows) +
+      `se_ui_capture_key` next, which also lets `menu_draw`/`menu_view_t` finally
+      be deleted. The `label` field in `se_binding_def_t` is carried now for
+      that dialog (unused so far).
+    - **Behaviour-identical** (storage semantics unchanged). Build green +
+      `make verify` clean; text 98783→99173 (+390 B: the generic bindings
+      layer + config indirection; not a hot path). **On-device smoke owed**
+      (steering keys work, remap a key → persists across reboot, gyro toggle).
+    - *On-device smoke: passed (user, 2026-05-24).*
+
+- 2026-05-24 — **EF sub-step 4b-i: last list menus → `se_ui`; `menu_draw`
+  deleted.** Ported the final three list menus — **Controls**, **Upgrade
+  slots**, **Upgrade picker** — onto the engine's `se_ui`, completing the
+  list-menu migration.
+    - **Controls exercises the `CUSTOM` row kind** (untested until now): the
+      gyro is a `CHECK` row; the four keybinds are `CUSTOM` rows whose value
+      column is drawn by a game callback (`controls_keybind_draw`, wrapping the
+      existing keybind icon/label renderer), with the scancode passed in the
+      row `ctx`. The keybind *value* (from `se_bindings_get`) and its icon
+      logic stay game-side; the engine owns the menu frame + cursor. This
+      settles the long-open **gyro-row question**: gyro is a game `CHECK` row
+      inside the engine-rendered menu, not part of `se_bindings`.
+    - **Upgrade slots / picker** are plain `TEXT`/`NONE` rows; the "no
+      attachment slots yet" message stays a bespoke panel (it's not a list),
+      and the duplicate-attachment block stays in the activate handler.
+    - **`menu_draw` + `menu_view_t` + `menu_row_t` + `menu_val_kind_t` deleted**
+      — every list menu now renders through `se_menu_draw`. Kept (shared with
+      the remaining hand-laid NON-list screens — slot-select, seed entry,
+      stats, credits, the "press a key" modal): `draw_chevron`,
+      `draw_menu_panel_size`, `draw_left`, `MENU_COL_*`, and a few panel
+      geometry consts; plus `draw_keybind_value` + the scancode→icon/name/glyph
+      helpers (now the Controls `CUSTOM` drawer). text 99303→98717 (the
+      transient duplication is gone).
+    - **Still bespoke (4b-ii):** the rebind **capture** — `APP_STATE_KEY_CAPTURE`
+      + `draw_key_capture` + `input.c`'s capture latch (`input_begin_key_capture`
+      / `input_consume_captured_key` / `nav_to_scancode`) — to be replaced by a
+      blocking engine `se_ui_capture_key`.
+    - **Behaviour + pixel identical** for all three (same draw-then-move, clamp,
+      dispatch; the no-slots panel + duplicate block preserved). Build green +
+      `make verify` clean. **On-device smoke owed** (Controls: nav, keybind
+      icons, rebind, gyro toggle; Upgrade: slots/picker/equip + no-slots +
+      duplicate-block; regression check on main/settings/audio/pause).
+    - *On-device smoke: passed (user, 2026-05-24).*
+
+- 2026-05-24 — **EF sub-step 4b-ii: engine `se_ui_capture_key`; bespoke
+  key-capture retired.** The "press a key" rebind dialog is now the engine's,
+  completing the engine-owned bindings vision.
+    - **`se_ui_capture_key(prompt_label)`** (declared in `se_ui.h`, defined in
+      `se_run.c` because it needs the loop primitives): a **blocking** modal
+      that pumps engine frames — re-running the registered `on_backdrop` hook +
+      drawing a "press a key" prompt panel + presenting at vsync — until the
+      user presses a bindable key, then returns its scancode. It **drains the
+      input queue itself** (bypassing the normal per-frame pump), so the keys
+      the pump would otherwise eat (volume ±, F1) reach it and can be bound;
+      `se_bindable_scancode` maps F-key nav events + single-byte scancode
+      presses to a scancode (the old `nav_to_scancode` + filter, moved engine
+      side). To support it, `se_run` retains the callbacks + backdrop colour in
+      file statics (`s_cb`/`s_user`/`s_backdrop_argb`) and factored the
+      backdrop into `se_draw_backdrop`.
+    - **Game collapse.** The Controls keybind row now calls `se_ui_capture_key`
+      inline (`sc = se_ui_capture_key(label); if (sc) se_bindings_set(id, sc)`)
+      — no state transition. Deleted: `APP_STATE_KEY_CAPTURE` (+ its enum entry
+      + the `in_settings_family` ref), `draw_key_capture`, `s_capture_target`,
+      and in `input.c` the whole capture path (`input_begin_key_capture` /
+      `input_consume_captured_key` / `s_capturing` / `s_captured` /
+      `nav_to_scancode` + the two capture branches in `input_handle_event`).
+    - **`se_input_set_passthrough` removed** (engine + the input.c calls): it was
+      the transitional crutch for the bespoke capture; the blocking capture
+      drains the queue directly, so the normal pump always consumes its globals
+      and no passthrough is needed. (Never released, so no compat concern.)
+    - **Net result — the requested split is met:** the game declares its
+      controls + defaults + NVS namespace and queries the mapping
+      (`se_bindings_get`); the engine owns the storage, the persistence, the
+      rendered controls menu, and the rebind dialog/capture.
+    - **One accepted visual nuance:** rebinding from the *pause* menu now shows
+      the synthwave backdrop (via the re-run `on_backdrop`) behind the prompt
+      rather than the frozen obstacle scene (which is an `on_render` thing the
+      blocking modal doesn't call). Brief + minor.
+    - Also fixed two unrelated reports: the `draw_slot_select` `snprintf`
+      truncation warning (grew `sub[128]`→`[160]`), and the **Credits scroll**
+      (`CREDITS_SCROLL_STEP` was 3 lines/press → now 1 line, so it scrolls
+      line-by-line instead of jumping section-to-section).
+    - Build green + `make verify` clean; text 98717→98915 (+198 B: the engine
+      capture + prompt, minus the removed game capture). **On-device smoke
+      owed** (rebind each control incl. binding an F-key / a normal letter;
+      rebind from pause; confirm steering/pause still honour new binds; credits
+      scroll one line per press).
+- 2026-05-24 — **EF sub-step 4b-iii: brightness/volume settings sliders (the
+  last EF feature).** Closes the device-global-settings *adjustment UI* the
+  boot path (sub-step 2) deferred.
+    - **`se_ui` RANGE slider row.** New row kind `SE_MENU_VAL_RANGE` (a 0..100
+      `range_pct` + an outlined track filled to the percentage + a "NN%"
+      readout, drawn via `se_direct565` line/vrun + `se_text` — same no-game-dep
+      rule as the rest of the menu). New actions `SE_MENU_ACT_LEFT/RIGHT` →
+      results `SE_MENU_RESULT_DECREMENT/INCREMENT`, **reported only when the
+      current row is RANGE** (other kinds return NONE). Kept the engine
+      value-agnostic — it reports *which row + which direction*, the game maps
+      that onto whatever the row controls (mirrors how ACTIVATE works). Geometry
+      `SE_UI_BAR_W/H` in `se_config.h`.
+    - **`se_hw` get/set helpers.** Added `se_hw_get/set_volume` (active output)
+      + `se_hw_get/set_{display,keyboard,led}_brightness`. Setters clamp,
+      persist to the shared NVS (launcher sees it), and re-apply the BSP
+      register immediately. **Display brightness clamps up to
+      `SE_HW_DISPLAY_BRIGHTNESS_MIN` (10%)** so a slider sweep can't black the
+      screen out and trap the user; keyboard/LED may go to 0. `se_hw_step_volume`
+      (volume keys) now delegates to `se_hw_set_volume` — one persist/apply path.
+    - **Menu LEFT/RIGHT input.** `input.c` gained an `s_menu_horiz` edge latch
+      (`input_consume_menu_horiz`) set on D-pad LEFT/RIGHT press edges. It is
+      **consumed only in menu states**, so it never collides with the polled
+      in-game LEFT/RIGHT steering (which reads through `input_steer_held`, a
+      different path). Mirrors the existing UP/DOWN `menu_nav` latch.
+    - **Placement.** Volume lives in the **Audio** menu (prepended above the
+      Music/SFX/Hum toggles — volume *is* an audio setting); the three
+      brightnesses get a **new `APP_STATE_DISPLAY` submenu** under Settings
+      (Settings → Controls / **Display** / Audio). The Audio panel was widened
+      (`panel_w` 0.60→0.74) so the slider + the longer toggle labels both fit.
+    - **`pct_step` (game side).** The sliders do get-step-set; `pct_step(cur,
+      delta)` clamps to [0,100] in `int` *before* the `uint8_t` cast, so a
+      downward step past 0 lands on 0 instead of wrapping to ~250 (which se_hw
+      would then clamp *up* to 100). The one real footgun in the whole change.
+    - Build green + `make verify` clean; text 98915→101496 (+2581 B: new state +
+      submenu + slider render + se_hw accessors + the input latch). **On-device
+      smoke owed** (each brightness slider visibly changes the hardware + survives
+      exit-to-launcher; volume slider tracks the volume keys + the audio-jack
+      swap; screen brightness can't be driven to black; sliders reachable from
+      both the main menu and the pause menu). *(Smoke passed 2026-05-24.)*
+- 2026-05-24 — **EF wrap — capstone phase code-complete.** All EF sub-steps
+  (run loop · input pump + device-global keys · `se_ui` menu system · all six
+  list menus ported + bespoke `menu_draw` deleted · `se_bindings` + engine-
+  rendered Controls + blocking rebind capture · brightness/volume sliders ·
+  `on_backdrop` hook) are landed, each smoke-tested on device as it shipped.
+    - **Final size accounting.** text **96546→101496 (+4950 vs the E0 baseline)**,
+      dec 363674→368956. The growth is *added framework + new functionality*,
+      not a codegen regression of moved code: the `se_run` loop/pump, `se_hw`,
+      the `se_ui` menu system, `se_bindings`, the blocking rebind dialog, and the
+      brightness/volume adjustment UI — the last two are **features that didn't
+      exist before EF** (the old build had no in-game rebind and deferred
+      brightness UI entirely) — minus the deleted bespoke loop/menus/capture.
+    - **Performance contract intact.** The contract is "hot inline leaves stay
+      inline", not "total size unchanged". EF moved no hot leaf — `se_direct565`
+      / `se_text` were settled at E1/E4 and stayed inline; EF's additions
+      (menu/settings/bindings) all run on menu-state transitions, off the
+      gameplay render path. So the +4950 B is expected and benign.
+    - **Boundary reconfirmed clean.** No engine source/header includes a game
+      header (only `bsp/*`/IDF); no game file references a deleted symbol
+      (`menu_draw` / `menu_view_t` / `APP_STATE_KEY_CAPTURE` /
+      `se_input_set_passthrough`). Swept the last transitional "sub-step N /
+      moves into se_run next" comments out of `main.c` + `se_run.c` so the
+      source reads as the finished design, not a migration diary.
+    - **The one owed item is the user's final full playthrough + on-device FPS
+      reconfirm** vs the ~28.3 baseline (predicted unchanged for the reason
+      above). Next up after sign-off: **E8** (component docs — README / CHANGELOG
+      / docs / examples), then **E9** (final verify + playthrough) and **ER**
+      (deferred render-pipeline pivot); **E2.1** (procedural-music config) parked.
+- 2026-05-24 — **main.c modularised (3088 → 1046 lines).** The monolithic
+  game controller was split into focused game-side modules, in five
+  behaviour-preserving steps (build green + `make verify` clean at each):
+    1. **game_ui.{c,h}** — the `fb` framebuffer bridge + the shared draw
+       primitives (menu_left_x / draw_left / draw_menu_panel_size /
+       draw_chevron) + the menu palette/geometry macros.
+    2. **keybind_ui.{c,h}** — the scancode → key-cap icon/name/glyph mapping
+       + the se_ui `controls_keybind_draw` value drawer.
+    3. **backdrop.{c,h}** — the PPA synthwave compositor (FILL/SRM/BLEND
+       clients, the sun/mountain PSRAM layer caches, the per-frame submits,
+       `backdrop_init`). Its 12 layout constants moved to **magicnumbers.h**
+       (they'd been sitting inline in main.c since the backdrop was first
+       built — only ever used by the compositor, so they belong with the
+       other layout tunables, per a review note).
+    4. **hud.{c,h}** — the in-game readouts/indicators (score / multiplier /
+       stage + banner, the debug readouts, boost/jump/shield/checkpoint
+       symbols, pause hint). draw_debug_readout now takes the godmode flag
+       as a param instead of reading a main.c global.
+    5. **The state-machine split (the aggressive option, chosen knowingly):**
+       every `on_render` case body moved into a per-state frame function —
+       11 in **screens.c** (the non-gameplay states + their bespoke draws +
+       the run-scene/overlay helpers + pct_step) and 6 in **play_states.c**
+       (the gameplay states). `on_render` is now a 17-line dispatch switch.
+       The shared controller state (game/world/s_save/cursors/app_state/run
+       bookkeeping/input snapshot/`t_after_obs`) + the run-lifecycle helpers
+       stay **defined in main.c** but are now exposed (un-static'd) through a
+       new **game_app.h** contract; the frame modules operate on them. This
+       is deliberately globals-heavy — the game's controller has always been
+       globals-driven; the split just makes the sharing explicit so the
+       per-state code can live in its own file. The case bodies were sliced
+       **verbatim** (a one-shot Python pass, not hand-retyped) and each
+       wrapped in `do { … } while (0)` so every `break;` keeps its exact
+       meaning (case-level breaks exit the wrapper; nested-switch breaks bind
+       to their switch).
+    - The engine (synthengine3D) was untouched — this is purely game-side
+      file organisation. Performance-neutral: the moved code is menu /
+      transition / HUD work that runs off the gameplay render hot path (the
+      inline leaves se_direct565 / se_text were not involved). text
+      101496 → 105144 across the five steps (added module scaffolding + the
+      17 per-frame const blocks + cross-TU calls, not a hot-path regression).
+      **On-device smoke owed** (every screen + transition still works: slot
+      select → menu → daily/seeded run → pause → settings family → upgrade →
+      stats → credits → game-over/checkpoint-redo).
+- 2026-05-24 — **ER first cut: se_scene immediate → deferred (architecture
+  only).** `scene_tri` no longer rasterizes on call — it projects with the
+  current camera and **accumulates** into a per-frame PSRAM triangle list
+  (`SCENE_TRI_CAP 4096`, ~160 KB, overflow-drops like the existing edge
+  list). New **`scene_render(se_render_mode_t mode)`** rasterizes the whole
+  accumulated frame — tris in submission order (per-pixel z-test, so order is
+  irrelevant) then edges — and empties the lists. `scene_flush()` is now an
+  alias for `scene_render(SE_RENDER_ZBUFFER)`; the one call site
+  (`render_run_scene`) uses `scene_render` directly. `se_render_mode_t`
+  (`SE_RENDER_ZBUFFER` / `SE_RENDER_DEFAULT`) is the algorithm-selection hook;
+  only the z-buffer ships.
+    - **The point is the architecture, not a behaviour change:** the engine
+      now holds the whole frame, so it can later own the algorithm + cull +
+      order centrally (against FOV/resolution) with no game call-site change.
+      The **cull + order passes ship as no-ops** (`scene_cull_pass` /
+      `scene_order_pass`, TODO frustum/back-face + front-to-back sort) — RTS
+      pre-culls in how `world.c` builds the object list, so the first cut is
+      behaviour-identical. The whole-tri near-clip guard stays in `scene_tri`
+      (a projection guard, not the central cull).
+    - **Likely future win** (when the order pass stops being a no-op):
+      front-to-back sort gives early-z rejection on a fill-bound, GPU-less
+      device — RTS's frame is dominated by fill (`obs`/`bgflr` 14–40 ms).
+      Net is an **on-device A/B question** (buffering adds PSRAM traffic; the
+      sort removes fill) — the regression gate becomes a *win* gate.
+    - Build green + verify clean; text 105144 → 105286 (+142 B: the deferred
+      path + the two seam stubs). Output expected pixel-identical (same tris,
+      same order, same z-buffer). **On-device A/B owed** (FPS vs baseline; the
+      scene must look unchanged in a run — obstacles, ship, wireframes).
+      *(A/B confirmed neutral on device 2026-05-24: every stage matched
+      baseline; obs scaled 8→28 ms with density, no raised floor.)*
+- 2026-05-24 — **E8 — engine documentation (first-class deliverable).** Wrote
+  the consumable doc suite for `synthengine3D/`: `README.md` (pitch + capability
+  table + hello-triangle-and-sound quick start + both build modes + the
+  stability/performance policy), `CHANGELOG.md`, and nine `docs/` guides
+  (getting-started, architecture, renderer, audio, ui, save, objects,
+  configuration, integration) + a commented `examples/minimal/` app (run loop +
+  spinning triangle + procedural music). The docs are written from the *user's*
+  side (how to consume the engine), distinct from `devdocs/engine-extraction.md`
+  which is the *builder's* extraction history.
+    - **Version bumped 0.0.0 → 0.1.0** so the CHANGELOG has a real anchor: first
+      documented release, still pre-1.0 (surface documented + semver-tracked but
+      not yet frozen). `se_version_string()` returns "0.1.0".
+    - **objects.md deviation (per E5-defer):** the engine has no object
+      framework, so the engine doc covers the **geometry-submission contract**
+      (the scene_tri/scene_line rules — coords, CCW-outward winding, back-face
+      cull, per-face shading, Hershey-text-as-lines), not the game's
+      OpenSCAD→header tooling. The game's `importing-objects.md` keeps the
+      modelling pipeline and now cross-links the engine contract.
+    - Swept stale transitional comments from the public headers (`se_run.h`'s
+      "STATUS: in progress", `synthengine3d.h`'s "still to land (EF)") so the
+      header docs read as the finished surface. Build green + verify clean
+      (only `se_version.h` is a compiled change). Remaining: **E9** (final
+      verify + full-playthrough smoke); **E2.1** parked; ER cull/order seams
+      a later measured cut.
+- 2026-05-24 — **E2.1 — procedural music generator parameterized.** Lifted the
+  hardcoded synthwave *content* into a public `se_music_config_t` passed at
+  create time: `music_procedural_create(const se_music_config_t* cfg, uint32_t
+  seed)` (NULL = the built-in `se_music_synthwave_preset()`). The config carries
+  tempo range, tonic pool, the four pattern banks (progressions / arp / drum /
+  bass), per-layer gains, and per-voice envelope + filter (+ pad detune/LFO);
+  supporting public types + the `SE_MUSIC_TICKS_PER_BAR` /
+  `SE_MUSIC_CHORDS_PER_SECTION` grid constants were added.
+    - **Boundary:** the six-voice synth *topology* (saw bass / square arp /
+      3-saw pad / sine kick / noise snare+hat) and the fixed 4/4 16th-note,
+      8-chord-section grid stay shared structure (the "engine"); everything
+      musical is data. Pluggable voice *waveforms* are a possible future step.
+    - The original synthwave banks + scalar params became the static preset
+      data; **RTS passes `NULL` → byte-for-byte the same music** (behaviour-
+      preserving for this game). Empty/NULL configs fall back to the preset
+      (logged), so a half-filled config can't crash the audio task.
+    - **Version 0.1.0 → 0.2.0** (a breaking signature change; allowed pre-1.0,
+      and the common call site is a one-token edit `…create(seed)` →
+      `…create(NULL, seed)`). Updated the callers (RTS `start_run`, the minimal
+      example) + the audio/getting-started docs + CHANGELOG. Build green +
+      verify clean; text 105286 → 105326 (+40 B). **On-device smoke owed**
+      (music still plays + sounds unchanged in a run).
+    - With this, the only roadmap item left is **E9** (final verify +
+      full-playthrough); ER's cull/order fill-in stays a later measured cut.
+- 2026-05-24 — **E9 — final verification & polish (engine extraction complete).**
+  Ran the wrap-up checks; the only outstanding item is the user's on-device
+  full playthrough (E9 itself made no code changes — docs only).
+    - **Build:** `make clean build` + `make verify` → All symbols satisfied.
+    - **Internal-header lint clean:** no `main/` source includes an engine
+      internal header; the game's only engine includes are public `se_*.h` /
+      `synthengine3d.h`, and nothing reaches into `synthengine3D/src/`. (The lone
+      "hershey" grep hit was the *comment* on a public `se_text.h` include in
+      `objects/synthengine_sign.c`, which legitimately uses the public
+      `simplex[]` table.)
+    - **Size:** text 96546 (E0) → 105326 (+8780); dec 363674 → 373170. The
+      E9 "≈ unchanged" gate was about the pure relocations (E1–E5, which were
+      byte-identical / +tens of B). The growth is *added functionality +
+      framework* after E0 — the EF IoC loop + menu system + bindings + rebind
+      dialog + brightness/volume UI (none existed at E0), the main.c
+      modularization's per-frame const blocks + cross-TU calls, ER's deferred
+      buffers, and E2.1's config indirection. The hot inline leaves
+      (`se_direct565`/`se_text`) were verified byte-identical at E1/E4 and never
+      touched since, so this is not a codegen regression of the moved code.
+    - **Game docs updated to the boundary:** top-level `README.md` (built on
+      SynthEngine3D + the engine/game split), and `devdocs/architecture.md`
+      (fixed the stale "unmodified template" intro; added an "Engine / game
+      boundary" section with a moved-vs-stayed table; flagged the design-era
+      module sections as historical). `devdocs/README.md` status table E-row
+      flipped to "essentially complete."
+    - **On-device full playthrough passed 2026-05-24** (render / audio / save /
+      menus / objects) — the final sign-off. **The engine extraction (E0–E9 +
+      ER first cut + E2.1) is COMPLETE.** Deferred-by-design follow-ons remain
+      (not needed by this game): ER's real cull/order passes (a measured cut)
+      and pluggable music voice waveforms.

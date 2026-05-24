@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "bsp/input.h"   // bsp_input_event_t (forwarded by the engine)
+
 // Game state codes that gate the modal steering keys (ESC and Backspace
 // are steering only during STATE_PLAYING; everywhere else they have
 // their conventional cancel/edit roles). Defined here so input.c can
@@ -20,10 +22,13 @@ void input_init(void);
 // Set the current modal mode. Affects which keys count as steering.
 void input_set_mode(input_mode_t mode);
 
-// Drain all queued events. Returns true if the user pressed F1
-// (caller should restart_to_launcher). Other queued events update
-// internal latches that will be observable via the accessors below.
-bool input_drain_events(void);
+// Process one input event forwarded by the engine's input pump
+// (se_run's on_input callback). Updates the internal latches that the
+// consume_* accessors below read. The engine consumes the device-global
+// keys itself (volume +/-, audio-jack, F1-exit), so those never arrive
+// here; everything else (pickup, menu nav, ESC/Backspace, digits, the
+// pause + debug keys, and rebind-capture key presses) does.
+void input_handle_event(bsp_input_event_t const* ev);
 
 // Returns the steering input as a signed value in [-1.0, +1.0]:
 // the D-pad and the remappable Left/Right keys give full-deflection
@@ -61,6 +66,13 @@ int  input_consume_sun_delta(void);
 // the main loop reads the one appropriate to the current app state.
 int  input_consume_menu_nav(void);
 
+// Horizontal menu edge: +1 for a RIGHT press, -1 for a LEFT press, 0 if
+// neither pressed since last call. Self-clears. Used by the engine
+// menus' RANGE sliders (brightness / volume). LEFT/RIGHT also steer
+// during PLAYING via the polled path; this latch is only consumed in
+// menu states, so the two roles never collide.
+int  input_consume_menu_horiz(void);
+
 // True if ENTER, SPACE or GAMEPAD_A was pressed since last call.
 // Mirrors `input_consume_pickup` — they share the same edge buffer
 // because the action button doubles as the menu confirm button.
@@ -92,14 +104,6 @@ bool input_consume_force_next_area(void);
 // toggling godmode (crash / stall end-of-run disabled). Self-clears.
 bool input_consume_godmode_toggle(void);
 
-// Begin key-capture for the Controls remap dialog. While capture is
-// active, the next plain key press is latched and every other event
-// (steering, menu nav, F1 exit, volume, …) is swallowed so the
-// pressed key is bound rather than acted on. Capture ends when
-// input_consume_captured_key() returns true.
-void input_begin_key_capture(void);
-
-// If a key was captured since input_begin_key_capture(), returns true,
-// writes the BSP scancode into *out_scancode, and ends capture mode.
-// Returns false while still waiting for a key press.
-bool input_consume_captured_key(uint16_t* out_scancode);
+// (Key-rebind capture moved into the engine: the Controls menu calls the
+// engine's blocking se_ui_capture_key(), which drains the input queue
+// itself, so input.c no longer exposes a capture mode.)

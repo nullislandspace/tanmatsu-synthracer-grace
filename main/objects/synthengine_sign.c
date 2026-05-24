@@ -8,16 +8,15 @@
 #include "objects/synthengine_sign_model.h"
 #include "objects/wall.h"   // WALL_HEIGHT
 #include "render.h"         // render_camera, RENDER_NEAR_CLIP_Z
-#include "scene.h"          // scene_tri, scene_line
+#include "se_scene.h"          // scene_tri, scene_line
+#include "se_text.h"        // simplex[] Hershey glyph table (public engine API)
 #include "world.h"          // obstacle_spawn
 
-// The Hershey simplex glyph table. Defined (non-static) in hershey.h,
-// which is compiled into rendertext.c's translation unit; we reference
-// it here rather than re-include the definition (that would duplicate
-// the symbol). Format per glyph: [nverts, advance, x0,y0, x1,y1, ...],
+// We draw the sign text as raw Hershey strokes mapped onto 3D geometry,
+// so we read the engine's `simplex[]` glyph table directly (declared in
+// se_text.h). Format per glyph: [nverts, advance, x0,y0, x1,y1, ...],
 // with (-1,-1) marking a pen-up. Y is already up (0 = baseline,
 // 21 = cap height), so it maps straight into world-up with no flip.
-extern int simplex[95][112];
 #define HERSHEY_CAP_H 21.0f
 
 // --- Panel text layout (world units; model is 1:1 so scale ~ 1) -------

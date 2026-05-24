@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "se_audio.h"   // push toggles into the engine mixer's output gates
 
 static char const TAG[]       = "audio_settings";
 static char const NS[]        = "synthracer";
@@ -71,16 +72,19 @@ void audio_settings_set_music_on(bool on) {
     if (s_music_on == on) return;
     s_music_on = on;
     save_one(KEY_MUSIC, on);
+    audio_mixer_set_music_enabled(on);
 }
 
 void audio_settings_set_sfx_on(bool on) {
     if (s_sfx_on == on) return;
     s_sfx_on = on;
     save_one(KEY_SFX, on);
+    audio_mixer_set_group_enabled(AUDIO_SFX_GROUP_GENERAL, on);
 }
 
 void audio_settings_set_hum_on(bool on) {
     if (s_hum_on == on) return;
     s_hum_on = on;
     save_one(KEY_HUM, on);
+    audio_mixer_set_group_enabled(AUDIO_SFX_GROUP_HUM, on);
 }

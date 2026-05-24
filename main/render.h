@@ -2,42 +2,17 @@
 
 #include "magicnumbers.h"
 #include "pax_gfx.h"
+#include "se_scene.h"   // engine 3D scene: scene_*, camera + projection,
+                        // and (via se_config.h) the RENDER_* constants
 #include "world.h"
 
-// Pinhole-camera projection parameters. The horizon-y matches
-// synthwave's GRID_HORIZON_Y_BASE - GRID_LIFT_PX (= 256), so projected
-// world geometry vanishes correctly into the synthwave horizon.
-#define RENDER_HALF_W       ((float)DISPLAY_LOG_W / 2.0f)
-#define RENDER_HORIZON_Y    256.0f
-#define RENDER_FOCAL_LEN    450.0f
-#define RENDER_CAM_Y        1.0f   // camera's resting (grounded) height
-
-// Near-plane z below which projections blow up. Shared by render.c
-// and any custom-draw object modules that need to clip their own
-// geometry the same way the default cube renderer does.
-#define RENDER_NEAR_CLIP_Z  0.5f
-
-// The camera. A single render-module global, set once per frame via
-// render_set_camera() and read by render_project. `x` follows the
-// ship laterally; `y` follows it vertically (a partial follow of the
-// ship's jump altitude — see main.c). Kept as a struct so it can
-// gain fields later (zoom, shake, look-ahead) without touching call
-// sites. cam_y lives ONLY here — it is never threaded as a parameter.
-typedef struct {
-    float x;
-    float y;
-} render_camera_t;
-
-// Set / read the camera. render_set_camera is called once per frame
-// before the scene is drawn.
-void            render_set_camera(float x, float y);
-render_camera_t render_camera(void);
-
-// Project a world point (x_w, y_w, z_w) onto the screen. y=0 is the
-// ground plane, +y is up; +z is forward (away from the camera). The
-// camera position is read from the render-module global. Out values
-// are in pax logical pixels.
-void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy);
+// Game-side world rendering. The 3D pipeline itself — the z-buffer
+// rasterizer, the pinhole camera (render_camera_t / render_set_camera /
+// render_camera), render_project, and the RENDER_* projection constants —
+// now lives in the engine (se_scene.h / se_config.h) and is re-exported
+// above so existing call sites keep working. What remains here is the
+// game-specific glue that walks the obstacle pool: submitting its
+// geometry to the engine scene and drawing the obstacles' floor shadows.
 
 // Draw shadow quads on the floor for every active cube obstacle.
 // Each shadow is a flat trapezoid on the y=0 ground plane,

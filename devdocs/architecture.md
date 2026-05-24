@@ -4,9 +4,14 @@
 
 ## Context
 
-We are building **Race the Synth**, a Tanmatsu graceloader app at
-`/home/cavac/src/tanmatsu/tanmatsu-synthracer-grace/`. The repo currently
-contains the unmodified template (`main/main.c` showing input events).
+**Race the Synth** is a Tanmatsu graceloader app at
+`/home/cavac/src/tanmatsu/tanmatsu-synthracer-grace/`. The game is complete and
+its reusable machinery has since been **extracted into the SynthEngine3D
+engine** — so the tree is now split in two (see "Engine / game boundary"
+below). Much of this document was written during design + implementation and
+describes module *behaviour*; where a module was later extracted, that
+behaviour now lives in the engine under an `se_*` name (called out in the
+boundary section).
 
 The game is a clone of *Race The Sun* (Flippfly, 2013) reskinned in synthwave
 aesthetic. Player pilots a craft along a procedurally generated landscape;
@@ -38,7 +43,52 @@ Scope confirmed with user:
 
 ---
 
+## Engine / game boundary (current)
+
+The codebase is split into a **reusable engine** and the **game**:
+
+- **`synthengine3D/`** — the **SynthEngine3D** engine: a dual-mode IDF/plain-CMake
+  component with a semver'd public API under `include/` (`se_*.h`). It owns the
+  run loop, the software 3D renderer, the audio mixer + DSP + procedural music,
+  the menu system, input bindings, device settings, the save framework, vector
+  text and the framebuffer leaves. It knows nothing about Race the Synth. Its
+  own docs live at `synthengine3D/README.md` + `synthengine3D/docs/`; the full
+  extraction history is in [engine-extraction.md](engine-extraction.md).
+- **`main/`** — the game: content + policy that plugs into the engine through
+  its contracts (the `se_app_callbacks_t` run-loop callbacks, `scene_tri`/
+  `scene_line` geometry submission, `sfx_voice_t`/`music_source_t` audio
+  sources, the save (de)serialise callbacks, the `se_binding_def_t[]` control
+  declarations). It never includes an engine internal header.
+
+**What moved into the engine** (where the module sections below say otherwise,
+this is the current home):
+
+| Was (game-side, this doc) | Now (engine) |
+|---|---|
+| `scene.c` (z-buffer rasterizer + camera + projection) | `se_scene` |
+| audio mixer + DSP + procedural music | `se_audio*`, `se_music_procedural` |
+| `nbt.c` + the save-slot framework | `se_nbt`, `se_save` (game keeps its `save_data_t` schema in `save.c`) |
+| Hershey vector text | `se_text` |
+| direct-565 framebuffer primitives | `se_direct565` |
+| the run loop / state machine plumbing that lived in `main.c` | `se_run` (the game's state machine itself stayed, split into `screens.c` / `play_states.c`) |
+| device-global volume/brightness; remappable bindings; the menu renderer | `se_hw`, `se_bindings`, `se_ui` |
+
+**What stayed game-side:** the simulation (`game.c`), the world generator
+(`world.c`), the obstacle pool + per-object geometry emitters
+(`obstacle.c`, `objects/*.c`) + area generators (`areas/*.c`), the synthwave
+backdrop art + its PPA compositor (`synthwave.c`, `backdrop.c`), the HUD
+(`hud.c`), input policy (`input.c`), the save schema (`save.c`), settings
+policy (`audio_settings.c`, `controls_settings.c`), the upgrade catalog
+(`attachments.c`), the SFX recipes (`sfx/*.c`), and the controller +
+state machine (`main.c`, `screens.c`, `play_states.c`, `game_app.h`).
+
 ## File Layout
+
+> Historical (design-era) — the per-module sections that follow predate the
+> engine extraction + the `main.c` modularization; read them with the boundary
+> table above. The current source layout is `synthengine3D/` (engine) +
+> `main/` (game, now also split into `screens.c` / `play_states.c` / `hud.c` /
+> `backdrop.c` / `keybind_ui.c` / `game_ui.c` / `game_app.h`).
 
 Following the multi-file action-game convention from `tanmatsu-placeinvaders-grace`:
 
