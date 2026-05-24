@@ -2,31 +2,51 @@
 
 > Frame-time profiling and the catalogue of viable optimisations. Part of the [dev docs](README.md).
 
+## Landed (2026-05-24 optimisation pass)
+
+Normal play went ~20 → **27–35 FPS**; a deliberate banner-spam stress scene
+sits at ~11 FPS, **geometry/fill-bound** (large overhead banners = huge
+triangle fill area). What changed:
+
+- **`se_scene` prepare/rasterize split + SRAM geometry lists.** `scene_render`
+  split into `scene_prepare()` (cull+order, no framebuffer) and
+  `scene_rasterize()`; the deferred tri/line lists moved to internal SRAM. The
+  geometry prepare (`emit`) now runs during the PPA backdrop DMA without bus
+  contention.
+- **depth+stamp fold.** The z-buffer + per-pixel frame stamp share one
+  `uint32` cell → ~17 % off triangle raster, ~11 % off lines (the rasterizer is
+  PSRAM-latency-bound; the win is fewer cache-line touches).
+- **`se_ppa` is now an ordered job queue + pump task** (item #2 below, done the
+  *safe* way — submission in a task, not the ISR). Each submit is a non-blocking
+  enqueue tagged with a `job_id`; the pump runs jobs in submission order. This
+  also removed the cross-client ordering footgun and the per-client queue-depth
+  bug. **#1 (PPA floor-base FILL) landed** as part of this — the floor base is
+  a FILL job that hides under the prepare.
+- **Sun shrunk to its ~212 px bbox** via `se_ppa_blit_rect` (sprite blit,
+  horizon-clipped) — ~73 % less SRM, and it fixed a below-horizon overdraw.
+- **`depth_order` (early-z) measured a wash** even in heavy scenes (the qsort
+  ≈ the early-z saving); left on by default only as headroom.
+
+The remaining frame cost is PSRAM pixel writes — `rast` (scene rasterize) and
+the floor shadows. The only big lever left is **content/LOD** (item #6) — fewer
+/ smaller filled triangles, esp. distant or large-area geometry.
+
 ## Future FPS improvements
 
-Catalogue of viable optimisations parked at the 28 FPS plateau
-(2026-05-11). Sorted roughly by expected wallclock-saved-per-unit-effort.
-Estimated wins are rough — measure before committing.
+Catalogue of the still-open ideas. Sorted roughly by expected
+wallclock-saved-per-unit-effort. Estimated wins are rough — measure first.
 
-### Background pipeline (`bgkick + bgflr ≈ 25 ms`)
+### Background pipeline
 
-1. **PPA FILL for the floor base** (-7 to -10 ms `bgflr`,
-   medium effort). The floor's purple base rect
-   (`pax_simple_rect`, 800×224 px) is currently CPU work — about
-   10 ms in `bgflr`. Replace with a fourth PPA op
-   (`ppa_do_fill`) covering the below-horizon region. Adds one
-   more PPA op to the serial chain (~2 ms), nets ~7–8 ms saved.
-   Trade-off: more PPA op ordering complexity, one more wait.
+1. ✅ **DONE (2026-05-24): PPA FILL for the floor base.** The floor's purple
+   base rect is now a `se_ppa_fill` job (`backdrop_submit_fill_floor`) instead
+   of a CPU `pax_simple_rect`, freeing that CPU time.
 
-2. **PPA callback chaining** (-5 to -8 ms `bgkick`, high
-   effort, risky). The current serial waits between FILL → SRM
-   → BLEND cost ~5 ms of pure idle time. Submit each op
-   non-blocking; in the `on_trans_done` callback (ISR context)
-   submit the next op directly. Restores full PPA-vs-CPU
-   parallelism. Risk: calling `ppa_do_xxx` from ISR may not be
-   safe in this IDF version — needs validation. Fallback: a
-   high-priority FreeRTOS task that wakes on completion and
-   submits the next op.
+2. ✅ **DONE (2026-05-24): PPA submission off the critical path.** Implemented
+   as the safe fallback, not ISR chaining: a dedicated **pump task** owns
+   `ppa_do_*` (task context), woken by the completion ISR. The render task just
+   enqueues jobs and `se_ppa_wait_job()`s. (ISR-context submit was confirmed
+   unsafe — `ppa_do_*` takes blocking locks.)
 
 3. **Specialised direct_565 horizontal/vertical line fast
    paths** (-1 to -2 ms `bgflr`, low effort). `direct_565_line`
@@ -43,22 +63,19 @@ Estimated wins are rough — measure before committing.
    integer stride per row would skip the branching cost on
    every pixel. Small but cheap to do.
 
-### Obstacle pipeline (`obs ≈ 5 ms`)
+### Obstacle pipeline (`rast` — the dominant bucket in heavy scenes)
 
-5. **Z-buffer rasterisation** (variable, medium-high effort).
-   Add a 1-byte-per-pixel depth buffer. Triangles write depth +
-   color, skipping pixels behind already-written content. Big
-   help if the scene ever produces significant overdraw (the
-   user's expectation: 3-4× obstacle count plus pickups,
-   particles, etc.). Per-pixel cost goes from "always write"
-   to "test, maybe write" — wins when overdraw factor > ~2.
-   Memory cost: ~384 KB for a 800×480 8-bit depth buffer.
+5. ✅ **DONE: Z-buffer rasterisation.** The `se_scene` renderer is per-pixel
+   z-buffered (reciprocal-z depth + a per-pixel frame stamp, since folded into
+   one `uint32` cell — see the Landed section). The opt-in front-to-back
+   `depth_order` early-z pass exists too, but measured a wash in practice.
 
-6. **Per-cube LOD** (-1 to -2 ms `obs`, low effort). Drop
-   wireframes for cubes farther than ~25 world units, and drop
-   side/top faces when the cube projects to <8 px. The visual
-   impact is small (those cubes are 1–4 px wide near the
-   horizon) and they currently cost full per-triangle setup.
+6. **Per-object LOD** (the recommended next lever, game-side). `rast` is
+   fill-area-bound: large/near geometry dominates. Drop wireframe past a
+   distance and drop or shrink the *fill* on small/far objects. The big
+   overhead banners are the worst case — large filled triangles. Cuts `rtri`,
+   `rline` and `emit` together. Lives in the game's emitters (`render.c`), not
+   the engine.
 
 7. **Tile-based screen binning** (variable, high effort).
    Split the screen into ~32×32 px tiles. During the sort pass

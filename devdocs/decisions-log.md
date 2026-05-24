@@ -4510,3 +4510,69 @@
       ER first cut + E2.1) is COMPLETE.** Deferred-by-design follow-ons remain
       (not needed by this game): ER's real cull/order passes (a measured cut)
       and pluggable music voice waveforms.
+- 2026-05-24 — **Render performance pass (post-extraction).** Profiled the
+  framework loop and worked the frame down methodically. Net: normal play
+  ~20 → **27–35 FPS**; a deliberate banner-spam stress scene sits at ~11 FPS,
+  **fill-bound by design** (large overhead banners cover huge pixel areas).
+  What was tried and what landed:
+    - **Rejected — interleaving the CPU floor paint into the PPA FILL/SUN
+      waits.** The waits *look* like wasted idle CPU, but (a) the framebuffer
+      is in PSRAM and both the PPA ops and the CPU floor writes are
+      bandwidth-bound on that one bus, so overlapping them just split the
+      bandwidth (~25 → ~23.6 ms, a wash); and (b) under PAX_O_ROT_CW the floor
+      (raw offsets 0–222) and sky (223–479) share the 128-byte cache line at
+      offsets 192–255, so a concurrent CPU-floor + PPA-sky write **corrupts
+      that line → ground flicker**. Only the (sparse, short) MOUNTAIN blend is
+      safe to overlap CPU floor. Reverted; the lesson is recorded in agent
+      memory.
+    - **`depth_order` (early-z) measured a wash.** Added a live `C`-key toggle +
+      a `V`-key scene-freeze (both under a new `ENABLE_DEBUGKEYS` switch in
+      `magicnumbers.h`) for clean A/B; on a frozen heavy scene the qsort cost
+      ≈ the early-z saving (~2 ms each way) even under overdraw. Left on by
+      default as headroom only. Also added `rtri`/`rline`/`tris`/`lines` and
+      `intfree`/`intblk` to the FPS debug line via `scene_raster_stats()`.
+    - **depth+stamp fold (`se_scene`).** Folded the z-buffer (uint16) and the
+      per-pixel frame stamp (uint8) into one `uint32` cell (`stamp<<16|depth`):
+      ~17 % off triangle raster, ~11 % off lines. The rasterizer is
+      PSRAM-latency-bound, so the win is fewer distinct cache lines / memory
+      instructions per pixel (output byte-identical; stamp now 16-bit).
+    - **`scene_render` split + SRAM geometry lists.** Split into
+      `scene_prepare()` (cull+order, no framebuffer) and `scene_rasterize()`,
+      and moved the deferred tri/line lists to **internal SRAM** (graceful PSRAM
+      fallback). The geometry prepare (`emit`) now runs during the PPA backdrop
+      DMA without bus contention. The game preps in `on_backdrop`, rasterizes in
+      `on_render`.
+    - **`se_ppa` redesigned into an ordered job queue + pump task.** The old
+      per-client model couldn't batch same-type ops (a depth-1 driver queue
+      rejected the 2nd FILL → flicker), and the "obvious" fix (submit the next
+      op from the completion *callback*) is unsafe — that callback is ISR
+      context and `ppa_do_*` takes blocking locks. So: submits are non-blocking
+      enqueues tagged with a caller `job_id`; a dedicated **pump task** (task
+      context) runs jobs **one at a time in submission order**, posting finished
+      ids to a queue the game drains via `se_ppa_wait_job(id)`. Guarantees
+      ordering across op types with no cross-client races, no caller barriers,
+      and no per-client-depth footgun. `se_ppa_wait_one` removed;
+      `SE_PPA_MAX_PENDING` → `SE_PPA_QUEUE_DEPTH` + `SE_PPA_PUMP_TASK_*`.
+      Breaking but pre-1.0; `se_ppa.h` was unreleased anyway.
+    - **Sun shrunk to its bounding box; floor base moved to PPA.** Added
+      `se_ppa_blit_rect` (sprite blit of a logical sub-rect; generalised the
+      band orientation maths to `rect_to_raw`). The sun cache went 800→220 px
+      wide (~281 → ~76 KB PSRAM, ~73 % less SRM) and is horizon-clipped, which
+      also fixed a wasted below-horizon overdraw. The floor base became a PPA
+      FILL job (`backdrop_submit_fill_floor`) instead of a CPU rect.
+    - **Coherency:** PPA-writes-then-CPU-overwrites (sky→obstacles, floor→grid)
+      is safe without a per-frame fb msync because the per-frame working set
+      (768 KB fb + the depth/stamp plane) far exceeds the L2 cache, so the
+      alternate-buffer frame evicts a buffer's prior lines before the CPU
+      read-allocates. Documented in `ppa.md`.
+    - **Conclusion:** the engine pipeline is at its PSRAM-pixel-write floor. The
+      only big lever left is **content/LOD** (`performance.md` #6) — fewer /
+      smaller filled triangles; the large overhead banners are the worst case.
+      (A dual-core rasterize spike was scoped but not taken — uncertain whether
+      a 2nd core finds spare PSRAM bandwidth.)
+    - Docs updated to the new model: `se_ppa.h`/`se_scene.h` headers,
+      `docs/ppa.md`, `configuration.md`, `renderer.md`, `README.md`, CHANGELOG,
+      `examples/backdrop`, and `performance.md` (done items marked, "Landed"
+      section added). Build green + verify clean throughout.
+    - **On-device verified 2026-05-24** (user): flicker gone, renders correctly,
+      FPS numbers above measured live + on a `V`-frozen stress scene.
