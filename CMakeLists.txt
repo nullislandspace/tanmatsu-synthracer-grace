@@ -11,6 +11,7 @@ project(app C)
 set(APP_SOURCES
     main/main.c
     main/game_ui.c
+    main/keybind_ui.c
     main/crt0.c
     main/synthwave.c
     main/icons.c
