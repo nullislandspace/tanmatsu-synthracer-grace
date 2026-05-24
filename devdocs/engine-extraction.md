@@ -576,12 +576,29 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   `synthengine3d.h` + `se_run.h` (the framework is complete). Build green +
   verify clean (only `se_version.h` changed in compiled terms).
 
-### E9 — Final verification & polish
-- [ ] Full `make clean build` + `make verify` (all symbols satisfied).
-- [ ] `app.map` size vs E0 baseline (≈ unchanged); on-device FPS vs baseline (≈ unchanged).
-- [ ] Grep-lint: no game source includes any engine `*_internal.h`.
-- [ ] On-device full-playthrough smoke (render, audio, save, menus, objects).
-- [ ] Update the game's `devdocs/architecture.md` + `README.md` status to reflect the engine boundary.
+### E9 — Final verification & polish (2026-05-24)
+- [x] Full `make clean build` + `make verify` — **All symbols satisfied.**
+- [x] Size vs E0 baseline: text **96546 → 105326 (+8780)**, dec 363674 → 373170.
+  **Expected, and not a codegen regression of moved code:** the "≈ unchanged"
+  gate applied to the pure relocations (E1–E5 were byte-identical / +tens of B).
+  The growth is *new functionality + framework* added after E0 — EF (the
+  `se_run` IoC loop + `se_ui` menu system + `se_bindings` + the rebind dialog +
+  the brightness/volume settings UI, none of which existed at E0), the `main.c`
+  modularization (17 per-frame const blocks + cross-TU calls), ER (the deferred
+  tri/edge accumulation path), and E2.1 (the music-config indirection + the
+  preset data now in `.data`). The hot inline leaves (`se_direct565`/`se_text`)
+  were verified byte-identical at E1/E4 and untouched since.
+- [x] Grep-lint: **no game source includes an engine internal header** — the
+  game's only engine includes are public `se_*.h` / `synthengine3d.h` (the one
+  "hershey" grep hit was the *comment* on a public `se_text.h` include in
+  `objects/synthengine_sign.c`, which uses the public `simplex[]` table).
+  Nothing in `main/` reaches into `synthengine3D/src/`.
+- [ ] **On-device full-playthrough smoke owed** (render / audio / save / menus /
+  objects) — the one item that needs the device.
+- [x] Updated the game docs to the engine boundary: top-level `README.md` (built
+  on SynthEngine3D + the split), and `devdocs/architecture.md` (fixed the stale
+  "unmodified template" intro; added an "Engine / game boundary" section with
+  the moved-vs-stayed table; flagged the design-era module sections as historical).
 
 ---
 

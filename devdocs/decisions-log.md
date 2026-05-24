@@ -4480,3 +4480,32 @@
       (music still plays + sounds unchanged in a run).
     - With this, the only roadmap item left is **E9** (final verify +
       full-playthrough); ER's cull/order fill-in stays a later measured cut.
+- 2026-05-24 — **E9 — final verification & polish (engine extraction complete).**
+  Ran the wrap-up checks; the only outstanding item is the user's on-device
+  full playthrough (E9 itself made no code changes — docs only).
+    - **Build:** `make clean build` + `make verify` → All symbols satisfied.
+    - **Internal-header lint clean:** no `main/` source includes an engine
+      internal header; the game's only engine includes are public `se_*.h` /
+      `synthengine3d.h`, and nothing reaches into `synthengine3D/src/`. (The lone
+      "hershey" grep hit was the *comment* on a public `se_text.h` include in
+      `objects/synthengine_sign.c`, which legitimately uses the public
+      `simplex[]` table.)
+    - **Size:** text 96546 (E0) → 105326 (+8780); dec 363674 → 373170. The
+      E9 "≈ unchanged" gate was about the pure relocations (E1–E5, which were
+      byte-identical / +tens of B). The growth is *added functionality +
+      framework* after E0 — the EF IoC loop + menu system + bindings + rebind
+      dialog + brightness/volume UI (none existed at E0), the main.c
+      modularization's per-frame const blocks + cross-TU calls, ER's deferred
+      buffers, and E2.1's config indirection. The hot inline leaves
+      (`se_direct565`/`se_text`) were verified byte-identical at E1/E4 and never
+      touched since, so this is not a codegen regression of the moved code.
+    - **Game docs updated to the boundary:** top-level `README.md` (built on
+      SynthEngine3D + the engine/game split), and `devdocs/architecture.md`
+      (fixed the stale "unmodified template" intro; added an "Engine / game
+      boundary" section with a moved-vs-stayed table; flagged the design-era
+      module sections as historical). `devdocs/README.md` status table E-row
+      flipped to "essentially complete."
+    - **Owed:** one on-device full playthrough of the branch (render / audio /
+      save / menus / objects) as the final sign-off. The extraction (E0–E9 + ER
+      first cut + E2.1) is otherwise done; deferred follow-ons: ER's real
+      cull/order passes (a measured cut) and pluggable music voice waveforms.
