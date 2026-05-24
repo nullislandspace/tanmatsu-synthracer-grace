@@ -4359,3 +4359,46 @@
       above). Next up after sign-off: **E8** (component docs — README / CHANGELOG
       / docs / examples), then **E9** (final verify + playthrough) and **ER**
       (deferred render-pipeline pivot); **E2.1** (procedural-music config) parked.
+- 2026-05-24 — **main.c modularised (3088 → 1046 lines).** The monolithic
+  game controller was split into focused game-side modules, in five
+  behaviour-preserving steps (build green + `make verify` clean at each):
+    1. **game_ui.{c,h}** — the `fb` framebuffer bridge + the shared draw
+       primitives (menu_left_x / draw_left / draw_menu_panel_size /
+       draw_chevron) + the menu palette/geometry macros.
+    2. **keybind_ui.{c,h}** — the scancode → key-cap icon/name/glyph mapping
+       + the se_ui `controls_keybind_draw` value drawer.
+    3. **backdrop.{c,h}** — the PPA synthwave compositor (FILL/SRM/BLEND
+       clients, the sun/mountain PSRAM layer caches, the per-frame submits,
+       `backdrop_init`). Its 12 layout constants moved to **magicnumbers.h**
+       (they'd been sitting inline in main.c since the backdrop was first
+       built — only ever used by the compositor, so they belong with the
+       other layout tunables, per a review note).
+    4. **hud.{c,h}** — the in-game readouts/indicators (score / multiplier /
+       stage + banner, the debug readouts, boost/jump/shield/checkpoint
+       symbols, pause hint). draw_debug_readout now takes the godmode flag
+       as a param instead of reading a main.c global.
+    5. **The state-machine split (the aggressive option, chosen knowingly):**
+       every `on_render` case body moved into a per-state frame function —
+       11 in **screens.c** (the non-gameplay states + their bespoke draws +
+       the run-scene/overlay helpers + pct_step) and 6 in **play_states.c**
+       (the gameplay states). `on_render` is now a 17-line dispatch switch.
+       The shared controller state (game/world/s_save/cursors/app_state/run
+       bookkeeping/input snapshot/`t_after_obs`) + the run-lifecycle helpers
+       stay **defined in main.c** but are now exposed (un-static'd) through a
+       new **game_app.h** contract; the frame modules operate on them. This
+       is deliberately globals-heavy — the game's controller has always been
+       globals-driven; the split just makes the sharing explicit so the
+       per-state code can live in its own file. The case bodies were sliced
+       **verbatim** (a one-shot Python pass, not hand-retyped) and each
+       wrapped in `do { … } while (0)` so every `break;` keeps its exact
+       meaning (case-level breaks exit the wrapper; nested-switch breaks bind
+       to their switch).
+    - The engine (synthengine3D) was untouched — this is purely game-side
+      file organisation. Performance-neutral: the moved code is menu /
+      transition / HUD work that runs off the gameplay render hot path (the
+      inline leaves se_direct565 / se_text were not involved). text
+      101496 → 105144 across the five steps (added module scaffolding + the
+      17 per-frame const blocks + cross-TU calls, not a hot-path regression).
+      **On-device smoke owed** (every screen + transition still works: slot
+      select → menu → daily/seeded run → pause → settings family → upgrade →
+      stats → credits → game-over/checkpoint-redo).
