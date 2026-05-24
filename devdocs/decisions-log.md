@@ -4169,5 +4169,14 @@
     - **Build:** green + `make verify` clean. text 97929→98797 (+868 B) —
       transient duplication (the engine renderer + the not-yet-retired game
       `menu_draw` both linked); expected to drop back when the remaining menus
-      port and `menu_draw` is deleted. **On-device smoke owed** (Settings +
-      Audio: nav, checkbox toggles, esc-back, unchanged look).
+      port and `menu_draw` is deleted.
+    - *On-device smoke: passed (user, 2026-05-24) — Settings + Audio.*
+    - **Follow-on (same day): Main menu + Pause overlay ported** to `se_ui`
+      too, same pattern. Pause keeps its special handling (F4 = resume beats
+      pickup-activate; the Abort row commits a QUIT run) — only the
+      render+cursor moved to the engine. `draw_main_menu` / `draw_pause_overlay`
+      removed. The game's `menu_draw` / `menu_view_t` now serve only the
+      Controls menu (keybind rows) + the non-list screens; they retire when
+      Controls ports onto `se_bindings` + the engine rebind dialog. text
+      98797→98783. **On-device smoke owed** (main menu nav + all entries; pause
+      F4-resume, Resume/Settings/Abort rows, Settings-from-pause).

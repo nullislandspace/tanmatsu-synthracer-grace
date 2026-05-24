@@ -1110,37 +1110,11 @@ static void draw_slot_select(void) {
               "up / down to choose, enter to confirm, F1 to exit");
 }
 
-// Main menu — six entries.
-static void draw_main_menu(void) {
-    static char const* const labels[MENU_ENTRY_COUNT] = {
-        [MENU_ENTRY_DAILY]    = "Daily Run",
-        [MENU_ENTRY_SEEDED]   = "Seeded Run",
-        [MENU_ENTRY_UPGRADE]  = "Upgrade Ship",
-        [MENU_ENTRY_STATS]    = "Stats",
-        [MENU_ENTRY_SETTINGS] = "Settings",
-        [MENU_ENTRY_CREDITS]  = "Credits",
-        [MENU_ENTRY_EXIT]     = "Exit",
-    };
-    menu_row_t rows[MENU_ENTRY_COUNT] = {0};
-    for (int i = 0; i < MENU_ENTRY_COUNT; i++) {
-        rows[i].label = labels[i];
-        rows[i].kind  = MENU_VAL_NONE;
-    }
-    char subtitle[32];
-    snprintf(subtitle, sizeof(subtitle), "slot %d", s_active_slot + 1);
-
-    menu_view_t const m = {
-        .title = "RACE THE SYNTH", .title_h = 48.0f, .subtitle = subtitle,
-        .rows = rows, .row_count = MENU_ENTRY_COUNT, .row_h = 38.0f,
-        .cursor = s_menu_cursor, .hint = "up / down to choose, enter to confirm",
-        .panel_w = 0.80f, .panel_h = 0.94f, .value_dx = 0.0f,
-    };
-    menu_draw(&m);
-}
-
-// (The Settings + Audio submenus are now rendered by the engine's se_ui
-// list-menu system directly from their APP_STATE_* cases; their bespoke
-// draw_* builders were retired when they were ported.)
+// (The main menu, pause overlay, and the Settings + Audio submenus are now
+// rendered by the engine's se_ui list-menu system directly from their
+// APP_STATE_* cases; their bespoke draw_* builders were retired when they
+// were ported. The Controls menu below still uses the game's menu_draw
+// until se_bindings + the engine rebind dialog land.)
 
 // Controls screen — gyro checkbox + four remappable keybinds.
 static void draw_controls_menu(void) {
@@ -1263,28 +1237,6 @@ static void draw_stats_view(void) {
     rendertext_draw(fb, 0xFFFFFF6Bu, NULL, 18.0f, tx, y, buf);
 
     draw_left(tx, fbh * 0.95f, 14.0f, MENU_COL_HINT, "press enter or esc to return");
-}
-
-// Pause overlay shown over the frozen game scene (STATE_PAUSED).
-static void draw_pause_overlay(void) {
-    static char const* const labels[PAUSE_ENTRY_COUNT] = {
-        [PAUSE_ENTRY_RESUME]   = "Resume",
-        [PAUSE_ENTRY_SETTINGS] = "Settings",
-        [PAUSE_ENTRY_ABORT]    = "Abort run",
-    };
-    menu_row_t rows[PAUSE_ENTRY_COUNT] = {0};
-    for (int i = 0; i < PAUSE_ENTRY_COUNT; i++) {
-        rows[i].label = labels[i];
-        rows[i].kind  = MENU_VAL_NONE;
-    }
-    menu_view_t const m = {
-        .title = "PAUSED", .title_h = 48.0f, .subtitle = NULL,
-        .rows = rows, .row_count = PAUSE_ENTRY_COUNT, .row_h = 44.0f,
-        .cursor = s_pause_cursor,
-        .hint = "up / down to choose, enter to confirm, F4 to resume",
-        .panel_w = 0.55f, .panel_h = 0.62f, .value_dx = 0.0f,
-    };
-    menu_draw(&m);
 }
 
 // Phase 9.4 equip UI. The ship has `attach_slots` (0/1/2) equip slots,
@@ -2505,13 +2457,40 @@ static void on_render(pax_buf_t* fb_param, void* user) {
 
             case APP_STATE_MENU: {
                 t_after_obs = esp_timer_get_time();
-                draw_main_menu();
-                if (menu_nav != 0) {
-                    s_menu_cursor -= menu_nav;
-                    if (s_menu_cursor < 0)                  s_menu_cursor = 0;
-                    if (s_menu_cursor >= MENU_ENTRY_COUNT)   s_menu_cursor = MENU_ENTRY_COUNT - 1;
+                // Engine-rendered main menu (se_ui). Subtitle shows the
+                // active save slot.
+                static char const* const labels[MENU_ENTRY_COUNT] = {
+                    [MENU_ENTRY_DAILY]    = "Daily Run",
+                    [MENU_ENTRY_SEEDED]   = "Seeded Run",
+                    [MENU_ENTRY_UPGRADE]  = "Upgrade Ship",
+                    [MENU_ENTRY_STATS]    = "Stats",
+                    [MENU_ENTRY_SETTINGS] = "Settings",
+                    [MENU_ENTRY_CREDITS]  = "Credits",
+                    [MENU_ENTRY_EXIT]     = "Exit",
+                };
+                se_menu_row_t rows[MENU_ENTRY_COUNT] = {0};
+                for (int i = 0; i < MENU_ENTRY_COUNT; i++) {
+                    rows[i].label = labels[i];
+                    rows[i].kind  = SE_MENU_VAL_NONE;
                 }
-                if (pickup_pressed) {
+                char subtitle[32];
+                snprintf(subtitle, sizeof(subtitle), "slot %d", s_active_slot + 1);
+                se_menu_def_t const def = {
+                    .title = "RACE THE SYNTH", .title_h = 48.0f, .subtitle = subtitle,
+                    .rows = rows, .row_count = MENU_ENTRY_COUNT, .row_h = 38.0f,
+                    .hint = "up / down to choose, enter to confirm",
+                    .panel_w = 0.80f, .panel_h = 0.94f, .value_dx = 0.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_menu_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                s_menu_cursor = menu.cursor;
+
+                if (res == SE_MENU_RESULT_ACTIVATED) {
                     switch (s_menu_cursor) {
                         case MENU_ENTRY_DAILY:
                             start_run(&game, &world, daily_seed, /*is_custom=*/false);
@@ -2917,20 +2896,39 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                 draw_score_readout(&game);
                 draw_stage_readout(&world);
                 draw_sun_readout(game.sun_y);
-                draw_pause_overlay();
-
-                if (menu_nav != 0) {
-                    s_pause_cursor -= menu_nav;
-                    if (s_pause_cursor < 0)                 s_pause_cursor = 0;
-                    if (s_pause_cursor >= PAUSE_ENTRY_COUNT) s_pause_cursor = PAUSE_ENTRY_COUNT - 1;
+                // Engine-rendered pause overlay (se_ui), over the frozen run.
+                static char const* const labels[PAUSE_ENTRY_COUNT] = {
+                    [PAUSE_ENTRY_RESUME]   = "Resume",
+                    [PAUSE_ENTRY_SETTINGS] = "Settings",
+                    [PAUSE_ENTRY_ABORT]    = "Abort run",
+                };
+                se_menu_row_t rows[PAUSE_ENTRY_COUNT] = {0};
+                for (int i = 0; i < PAUSE_ENTRY_COUNT; i++) {
+                    rows[i].label = labels[i];
+                    rows[i].kind  = SE_MENU_VAL_NONE;
                 }
+                se_menu_def_t const def = {
+                    .title = "PAUSED", .title_h = 48.0f, .subtitle = NULL,
+                    .rows = rows, .row_count = PAUSE_ENTRY_COUNT, .row_h = 44.0f,
+                    .hint = "up / down to choose, enter to confirm, F4 to resume",
+                    .panel_w = 0.55f, .panel_h = 0.62f, .value_dx = 0.0f,
+                };
+                se_menu_t menu = { .def = &def, .cursor = s_pause_cursor };
+                se_menu_draw(&menu, fb);
+
+                se_menu_result_t res = SE_MENU_RESULT_NONE;
+                if (menu_nav > 0)      se_menu_input(&menu, SE_MENU_ACT_UP);
+                else if (menu_nav < 0) se_menu_input(&menu, SE_MENU_ACT_DOWN);
+                if (pickup_pressed)    res = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
+                s_pause_cursor = menu.cursor;
+
                 if (pause_toggle) {
                     // F4 inside the pause overlay = Resume (matches
                     // the prompt at the bottom of the overlay).
                     app_state = APP_STATE_PLAYING;
                     input_set_mode(INPUT_MODE_PLAYING);
                     resume_audio_from_pause_menu();
-                } else if (pickup_pressed) {
+                } else if (res == SE_MENU_RESULT_ACTIVATED) {
                     switch (s_pause_cursor) {
                         case PAUSE_ENTRY_RESUME:
                             app_state = APP_STATE_PLAYING;

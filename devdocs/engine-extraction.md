@@ -447,14 +447,17 @@ the bespoke menu states from `main.c`. On-device smoke after each.
   keybind→icon logic stays game-side). Theme `SE_UI_COL_*` + geometry `SE_UI_*`
   in `se_config.h`. The game maps its consumed menu-nav/confirm/cancel onto
   `se_menu_action_t` and acts on the result. **Ported the Settings + Audio
-  submenus** onto it as the first consumers (behaviour + pixels identical);
-  their bespoke builders retired. *Remaining:* the blocking convenience
-  **`se_ui_run_menu`** + **`se_ui_capture_key`** + the raw-event→action mapper
+  submenus** first, then the **Main menu + Pause overlay** (2026-05-24, same
+  pattern — Pause keeps its F4-resume + abort-commit, just on `se_ui` now); all
+  four behaviour + pixel identical, bespoke builders retired. The game's
+  `menu_draw` / `menu_view_t` now serve only the **Controls** menu + the
+  non-list screens (slot-select, seed entry, stats, upgrade, credits,
+  overlays). *Remaining:* the blocking convenience **`se_ui_run_menu`** +
+  **`se_ui_capture_key`** + the raw-event→action mapper
   (`se_ui_action_from_event` / `SE_UI_KEY_*`) — added with the controls/rebind
   port, where a blocking capture is actually needed. Build green + verify;
-  text 97929→98797 (+868 B = transient duplication: the engine renderer + the
-  game's not-yet-ported `menu_draw` both linked; resolves when Main/Pause/
-  Controls port over and `menu_draw` is deleted).
+  text 98797→98783 after the Main/Pause port (the big drop comes when Controls
+  ports and `menu_draw` is finally deleted).
 - [ ] **Input bindings subsystem** (`se_bindings_*`): game declares controls
   + defaults + NVS namespace; engine owns load/persist + `get`/`set` + the
   remap dialog. Absorbs `controls_settings.c` + the controls menu +
