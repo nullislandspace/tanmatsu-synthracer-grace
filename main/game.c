@@ -567,21 +567,10 @@ bool game_collide(game_state_t* g, world_state_t* w, float dt) {
         }
     }
 
-    // Phase 6: crash penalty on multiplier. Applied once per
-    // crash frame (head_on, set above) — only meaningful in
-    // future scenarios where the player survives the hit
-    // (e.g. Shield pickup absorbs one fatal contact, planned
-    // for Phase 9+). Today the run ends on head_on so the
-    // penalised multiplier never gets used, but we maintain
-    // the rule so the gameplay invariant is correct from
-    // the start. `multiplier_max` deliberately doesn't track
-    // this drop — only increases bump the all-time peak.
-    if (head_on) {
-        g->multiplier -= GAME_MULTIPLIER_CRASH_PENALTY;
-        if (g->multiplier < GAME_MULTIPLIER_FLOOR) {
-            g->multiplier = GAME_MULTIPLIER_FLOOR;
-        }
-    }
+    // The multiplier is deliberately NOT penalised on a crash: it only
+    // ever climbs (every 5th Tri) and survives head-on hits / shield
+    // saves / checkpoint rewinds untouched. (`head_on` still drives the
+    // run-end, shield and checkpoint logic via this function's return.)
 
     // Publish the shadow-ray result (Phase 9.1d). game_after_collide
     // forces this true once the sun has fully set.

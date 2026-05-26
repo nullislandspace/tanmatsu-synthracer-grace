@@ -359,11 +359,8 @@
 #define GAME_SCORE_TRI                     5
 #define GAME_SCORE_BOOSTER                 10
 
-// Crash penalty applied to `game.multiplier` on a head-on / stall
-// run-end. Floors at 1 today; Phase 11 will raise the floor with
-// player level (lv6 → 2, lv12 → 3, lv23 → 4, lv24 → max).
-#define GAME_MULTIPLIER_CRASH_PENALTY      5
-#define GAME_MULTIPLIER_FLOOR              1
+// (The multiplier carries no crash penalty: it only climbs, one per
+//  5 Tris, and is never reduced — not by crashes, shields or rewinds.)
 
 // Per-stage obstacle play time, seconds at cruise. Implemented
 // as a world-z distance budget so a slow run takes longer in

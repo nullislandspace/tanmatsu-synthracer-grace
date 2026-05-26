@@ -4576,3 +4576,17 @@
       section added). Build green + verify clean throughout.
     - **On-device verified 2026-05-24** (user): flicker gone, renders correctly,
       FPS numbers above measured live + on a `V`-frozen stress scene.
+
+- 2026-05-26 — **Multiplier crash penalty removed.** The Phase 6 rule that
+  docked the score multiplier by 5 (floor 1) on a head-on hit is gone: in
+  practice it read as a confusing "scrape dropped my multiplier to 1" (a
+  shielded head-on still applied the penalty before the shield absorbed the
+  hit), and the multiplier-as-pure-reward model is cleaner. The multiplier now
+  only ever climbs (one per 5 Tris collected) and is never reduced — not by
+  crashes, shield saves or checkpoint rewinds. Surgical change: deleted only
+  the `if (head_on) { multiplier -= … }` block in `game_collide`; the `head_on`
+  flag and everything it drives (run-end, shield absorb, checkpoint redo) are
+  untouched. Dropped the now-dead `GAME_MULTIPLIER_CRASH_PENALTY` /
+  `GAME_MULTIPLIER_FLOOR` defines. Supersedes the Phase 6 penalty noted in the
+  2026-05-13/14 entries above. (`research.md` still records the *original* Race
+  The Sun's "crash drops multiplier" behaviour as a reference, unchanged.)
