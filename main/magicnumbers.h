@@ -38,7 +38,7 @@
 // unaffected. Override by defining before this header is reached.
 // =============================================================
 #ifndef ENABLE_DEBUGKEYS
-#define ENABLE_DEBUGKEYS 1
+#define ENABLE_DEBUGKEYS 0
 #endif
 
 

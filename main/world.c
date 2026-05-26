@@ -355,8 +355,11 @@ void world_init(world_state_t* w, uint32_t seed) {
     // One checkpoint in the pre-stage-1 lead-in (Phase 9.3, for
     // testing) so the player can collect a checkpoint straight away.
     // In-run, checkpoints are scheduled once per stage from stage 5;
-    // shields once per stage from stage 3.
+    // shields once per stage from stage 3. Debug-only — a release build
+    // (ENABLE_DEBUGKEYS == 0) gets no free starting checkpoint.
+#if ENABLE_DEBUGKEYS
     checkpoint_spawn(w);
+#endif
 }
 
 void world_advance(world_state_t* w, float dt, float speed_z, float cam_x) {

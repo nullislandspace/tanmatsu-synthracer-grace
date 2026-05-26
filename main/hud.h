@@ -21,7 +21,8 @@ void draw_stage_readout(world_state_t const* w);      // top-right "Stage: N"
 
 // Debug readouts (top-right stack, below score). draw_debug_readout shows
 // the godmode flag + ship world position; godmode is passed in (it is
-// main.c state toggled by the G key).
+// main.c state toggled by the G key). All three compile to no-ops in a
+// release build (ENABLE_DEBUGKEYS == 0) -- see hud.c.
 void draw_speed_readout(float speed_z);
 void draw_sun_readout(float sun_y);
 void draw_debug_readout(game_state_t const* g, bool godmode);

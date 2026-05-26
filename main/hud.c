@@ -14,28 +14,42 @@
 
 // Top-right readout stack. Slot 0 = score, slot 1 = stage, slot 2 = v,
 // slot 3 = sun. Each line is `text_h + 4` px below the previous.
+//
+// The v= / sun= / god= readouts are development diagnostics: they
+// compile to no-ops in a release build (ENABLE_DEBUGKEYS == 0), so the
+// HUD shows only the score/stage above them. Gated here rather than at
+// the call sites so the seven callers in play_states.c stay clean.
 void draw_speed_readout(float speed_z) {
+#if ENABLE_DEBUGKEYS
     char        buf[32];
     snprintf(buf, sizeof(buf), "v=%.1f", speed_z);
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
     float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
     rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 2.0f * (text_h + 4.0f), buf);
+#else
+    (void)speed_z;
+#endif
 }
 
 void draw_sun_readout(float sun_y) {
+#if ENABLE_DEBUGKEYS
     char        buf[32];
     snprintf(buf, sizeof(buf), "sun=%.1f", sun_y);
     float const text_h = 18.0f;
     pax_vec2f   sz     = rendertext_size(NULL, text_h, buf);
     float const x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
     rendertext_draw(fb, 0xFFFFFFFF, NULL, text_h, x, 12.0f + 3.0f * (text_h + 4.0f), buf);
+#else
+    (void)sun_y;
+#endif
 }
 
 // Debug readout -- slot 4, directly below `sun=`. Shows the godmode
 // toggle state (G key) plus the ship's world position so the run
 // can be inspected while flown around with crash/stall disabled.
 void draw_debug_readout(game_state_t const* g, bool godmode) {
+#if ENABLE_DEBUGKEYS
     char        buf[48];
     snprintf(buf, sizeof(buf), "god=%s x=%.2f y=%.2f",
              godmode ? "ON" : "off", g->ship_x_world, g->ship_y);
@@ -44,6 +58,10 @@ void draw_debug_readout(game_state_t const* g, bool godmode) {
     pax_vec2f     sz     = rendertext_size(NULL, text_h, buf);
     float const   x      = pax_buf_get_widthf(fb) - sz.x - 12.0f;
     rendertext_draw(fb, col, NULL, text_h, x, 12.0f + 4.0f * (text_h + 4.0f), buf);
+#else
+    (void)g;
+    (void)godmode;
+#endif
 }
 
 // Bottom-left HUD: a solid green upward-pointing triangle that's
