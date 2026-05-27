@@ -3,6 +3,7 @@
 #include <math.h>
 
 #include "bsp/input.h"
+#include "gl_input.h"
 #include "controls_settings.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -138,13 +139,13 @@ void input_handle_event(bsp_input_event_t const* ev) {
 
 static bool poll_nav(bsp_input_navigation_key_t key) {
     bool      held = false;
-    esp_err_t res  = bsp_input_read_navigation_key(key, &held);
+    esp_err_t res  = gl_input_read_navigation_key(key, &held);
     return (res == ESP_OK) && held;
 }
 
 static bool poll_scancode(bsp_input_scancode_t code) {
     bool      held = false;
-    esp_err_t res  = bsp_input_read_scancode(code, &held);
+    esp_err_t res  = gl_input_read_scancode(code, &held);
     return (res == ESP_OK) && held;
 }
 

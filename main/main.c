@@ -13,6 +13,7 @@
 #include "bsp/input.h"
 #include "se_direct565.h"
 #include "esp_heap_caps.h"
+#include "gl_input.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
