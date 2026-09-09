@@ -46,6 +46,7 @@
 #include "se_hw.h"
 #include "se_ppa.h"
 #include "se_run.h"
+#include "se_splash.h"
 #include "se_scene.h"
 #include "se_ui.h"
 #include "sfx/sfx_crash.h"
@@ -488,6 +489,11 @@ static int64_t prof_window_start = 0;
 // se_display_info() is valid and the mixer gates can be pushed).
 static void on_init(void* user) {
     (void)user;
+
+    // Engine title sequence. Blocking: it draws and presents its own
+    // frames for ~1 s, then returns. First thing in on_init so it plays
+    // against a clean framebuffer, before any game content is loaded.
+    se_splash();
 
     synthwave_init();
     icons_load();
