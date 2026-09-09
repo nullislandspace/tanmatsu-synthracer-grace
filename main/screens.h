@@ -9,8 +9,9 @@
 //  because the gameplay states (play_states.c) reuse them.
 // =====================================================================
 
-#include "game.h"    // game_state_t
-#include "world.h"   // world_state_t
+#include "game.h"       // game_state_t
+#include "se_scene.h"   // se_render_mode_t (renderer selection)
+#include "world.h"      // world_state_t
 
 // Per-state frame functions (draw + input + transitions).
 void screen_slot_select_frame(void);
@@ -27,6 +28,13 @@ void screen_credits_frame(void);
 
 // Shared draw helpers reused by the gameplay states (play_states.c).
 // The 3D scene is drawn in two phases so the geometry-only prepare can
+// Select / read the engine renderer the 3D scene resolves through
+// (SE_RENDER_ZBUFFER or SE_RENDER_RAYCAST; see se_scene.h). Applies from the
+// next prepared frame -- both halves of a frame always use one mode. Safe to
+// change at any time: the two renderers produce the same image.
+void             render_set_mode(se_render_mode_t mode);
+se_render_mode_t render_get_mode(void);
+
 // overlap the PPA backdrop DMA: render_prepare_scene() (emit + cull + order,
 // no framebuffer access) runs in on_backdrop; render_rasterize_scene()
 // paints it in on_render after the backdrop is down. render_run_scene() is

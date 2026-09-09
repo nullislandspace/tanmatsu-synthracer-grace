@@ -640,6 +640,18 @@ static void on_update(float dt, void* user) {
             o.depth_order = !o.depth_order;
             scene_set_options(&o);
         }
+        // Debug: R cycles the scene renderer (z-buffer <-> raycast) live.
+        // Both draw the same image, so the only thing that changes is the
+        // frame cost -- pair it with V (freeze) to compare the two against
+        // identical static geometry, and read `rend=` / `rast=` in the perf
+        // line below.
+        if (input_consume_renderer_toggle()) {
+            se_render_mode_t const next =
+                (render_get_mode() == SE_RENDER_ZBUFFER) ? SE_RENDER_RAYCAST
+                                                         : SE_RENDER_ZBUFFER;
+            render_set_mode(next);
+            ESP_LOGI(TAG, "scene renderer -> %s", se_renderer_name(next));
+        }
         if (input_consume_freeze_toggle()) {
             s_debug_freeze = !s_debug_freeze;
         }
@@ -1063,7 +1075,7 @@ static void on_render(pax_buf_t* fb_param, void* user) {
             int64_t rs_tri_us = 0, rs_line_us = 0;
             scene_raster_stats(&rs_tri_n, &rs_line_n, &rs_tri_us, &rs_line_us);
             ESP_LOGI(TAG,
-                     "FPS=%.1f  in=%.2f phys=%.2f bgfill=%.2f bgmtn=%.2f emit=%.2f rast=%.2f fgrest=%.2f present=%.2f ms  tris=%d lines=%d rtri=%.2f rline=%.2f  dord=%d frz=%d  intfree=%uKB intblk=%uKB",
+                     "FPS=%.1f  in=%.2f phys=%.2f bgfill=%.2f bgmtn=%.2f emit=%.2f rast=%.2f fgrest=%.2f present=%.2f ms  rend=%s tris=%d lines=%d rtri=%.2f rline=%.2f  dord=%d frz=%d  intfree=%uKB intblk=%uKB",
                      fps,
                      (float)prof_input_us   * inv_fr / 1000.0f,
                      (float)prof_phys_us    * inv_fr / 1000.0f,
@@ -1075,6 +1087,9 @@ static void on_render(pax_buf_t* fb_param, void* user) {
                      (float)prof_obs_us     * inv_fr / 1000.0f,
                      (float)prof_fgrest_us  * inv_fr / 1000.0f,
                      (float)prof_present_us * inv_fr / 1000.0f,
+                     // Which renderer produced rast=/rtri= -- the numbers are
+                     // only comparable across a run if you know which one ran.
+                     se_renderer_name(render_get_mode()),
                      // Rasterize split: tri/line counts + per-phase ms (last frame).
                      rs_tri_n, rs_line_n,
                      (float)rs_tri_us  / 1000.0f,

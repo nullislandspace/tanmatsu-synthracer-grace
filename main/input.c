@@ -26,6 +26,7 @@ static bool          s_pause_toggle  = false; // latest pause-key press edge
 static bool          s_force_area    = false; // latest TAB press edge (debug)
 static bool          s_godmode_edge  = false; // latest G press edge (debug)
 static bool          s_depthorder_edge = false; // latest C press edge (debug)
+static bool          s_renderer_edge   = false; // latest R press edge (debug)
 static bool          s_freeze_edge   = false; // latest V press edge (debug)
 
 // (Key-rebind capture is the engine's now — se_ui_capture_key blocks and
@@ -111,6 +112,8 @@ void input_handle_event(bsp_input_event_t const* ev) {
                 s_godmode_edge = true;     // debug: toggle godmode
             } else if (sc == BSP_INPUT_SCANCODE_C) {
                 s_depthorder_edge = true;  // debug: toggle depth_order pass
+            } else if (sc == BSP_INPUT_SCANCODE_R) {
+                s_renderer_edge = true;    // debug: cycle scene renderer
             } else if (sc == BSP_INPUT_SCANCODE_V) {
                 s_freeze_edge = true;      // debug: toggle scene freeze
             }
@@ -306,6 +309,12 @@ bool input_consume_godmode_toggle(void) {
 bool input_consume_depthorder_toggle(void) {
     bool e             = s_depthorder_edge;
     s_depthorder_edge = false;
+    return e;
+}
+
+bool input_consume_renderer_toggle(void) {
+    bool e           = s_renderer_edge;
+    s_renderer_edge = false;
     return e;
 }
 

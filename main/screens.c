@@ -52,19 +52,46 @@ static uint8_t pct_step(uint8_t cur, int delta) {
 // during the PPA backdrop DMA (on_backdrop), in parallel with the sky/sun
 // composite. render_rasterize_scene() then paints it once the backdrop is
 // down.
+// Which engine renderer resolves the 3D scene. Both built-ins consume the
+// same submitted geometry and draw the same image; they differ only in cost
+// profile (z-buffer pays for overdraw, raycast pays for non-empty tile area
+// -- see se_scene.h), so which one wins depends on the scene. Held here, in
+// the one place that drives the engine, and switchable at runtime so the two
+// can be A/B'd against identical geometry (debug key R, plus V to freeze).
+//
+// Measured on device (2026-09-09, normal play, ~400 tris over 800x480):
+// z-buffer rast 12.6-22.4 ms / 24-30 FPS, raycast rast 60.9 ms / 12 FPS.
+// This game's scenes are sparse -- few triangles spread over a lot of
+// screen -- which is the regime the z-buffer wins: it visits only covered
+// pixels, while the raycaster visits every pixel of every non-empty tile.
+// So the game ships the z-buffer. The raycaster stays available (press R)
+// because the crossover is a property of the SCENE, not of the engine:
+// heavy overdraw is where zero-overdraw pays off.
+static se_render_mode_t s_render_mode = SE_RENDER_ZBUFFER;
+
+void render_set_mode(se_render_mode_t mode) {
+    s_render_mode = mode;
+}
+
+se_render_mode_t render_get_mode(void) {
+    return s_render_mode;
+}
+
 void render_prepare_scene(world_state_t const* w, game_state_t const* g,
                           bool draw_ship) {
     scene_begin(fb);
     render_submit_obstacles(w);
     if (draw_ship) game_submit_ship(g);
-    scene_prepare(SE_RENDER_ZBUFFER);   // cull + order; no pixels touched
+    // Prepare and rasterize MUST be given the same mode -- prepare is where a
+    // renderer builds whatever the rasterize half consumes.
+    scene_prepare(s_render_mode);   // cull + order; no pixels touched
 }
 
 // Rasterize the scene prepared by render_prepare_scene() into the
 // framebuffer. Must run after the backdrop is in place — near obstacles
 // project up into the sky band, so it overwrites backdrop pixels.
 void render_rasterize_scene(void) {
-    scene_rasterize(SE_RENDER_ZBUFFER);
+    scene_rasterize(s_render_mode);
 }
 
 // One-shot prepare + rasterize, for callers that don't overlap the two with
