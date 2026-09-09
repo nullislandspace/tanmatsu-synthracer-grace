@@ -6,9 +6,19 @@ This uses [Graceloader](https://github.com/nullislandspace/tanmatsu-graceloader)
 
 Built on **SynthEngine3D**, a reusable engine extracted from this game (run
 loop, software 3D renderer, audio mixer + procedural music, menus, input
-bindings, save framework). It lives in [`synthengine3D/`](synthengine3D/) as a
-dual-mode IDF / plain-CMake component with its own docs; the game itself is the
-content + rules in [`main/`](main/).
+bindings, save framework). It now lives in its own repository,
+[nullislandspace/synthengine3D](https://github.com/nullislandspace/synthengine3D),
+and is consumed here as a git submodule at [`synthengine3D/`](synthengine3D/) --
+a dual-mode IDF / plain-CMake component with its own docs; the game itself is
+the content + rules in [`main/`](main/).
+
+Clone with submodules, or the build will fail with a missing `synthengine3D/`:
+
+```sh
+git clone --recursive git@github.com:nullislandspace/tanmatsu-synthracer-grace.git
+# or, in an existing clone:
+git submodule update --init
+```
 
 ## License
 
