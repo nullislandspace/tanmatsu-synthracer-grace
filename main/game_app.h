@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "game.h"    // game_state_t
+#include "se_audio_source.h"  // music_source_t (build_music_source)
 #include "world.h"   // world_state_t
 #include "save.h"    // save_data_t
 
@@ -94,6 +95,7 @@ enum {
 enum {
     AUDIO_ENTRY_VOLUME = 0,
     AUDIO_ENTRY_MUSIC,
+    AUDIO_ENTRY_SOURCE,
     AUDIO_ENTRY_SFX,
     AUDIO_ENTRY_HUM,
     AUDIO_ENTRY_COUNT,
@@ -164,6 +166,17 @@ extern int64_t t_after_obs;
 void start_run(game_state_t* game, world_state_t* world, uint32_t seed, bool is_custom);
 void save_apply_day_rollover(save_data_t* s);
 void end_run_audio(void);
+
+// Rebuild the mixer's music source from the current audio settings.
+// Called when the player switches between procedural and MP3 so the
+// change is audible at once; a no-op when no run's music is live, in
+// which case the choice simply applies at the next start_run().
+void audio_reinstall_music(void);
+
+// Build the music source matching the current audio settings (procedural
+// or MP3). Caller hands it to audio_mixer_set_music(), which takes
+// ownership. Never returns NULL unless both sources failed.
+music_source_t* build_music_source(uint32_t seed);
 void pause_audio_for_pause_menu(void);
 void resume_audio_from_pause_menu(void);
 void commit_run_end(game_state_t const* g, world_state_t const* w, bool head_on);

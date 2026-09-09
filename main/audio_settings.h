@@ -25,6 +25,12 @@ esp_err_t audio_settings_load(void);
 bool audio_settings_music_on(void);
 bool audio_settings_sfx_on(void);
 bool audio_settings_hum_on(void);
+// Which music source feeds the mixer: false = the engine's procedural
+// synthwave generator (default), true = MP3 files from /sd/music via
+// se_mp3. Both are music_source_t, so this only changes which one the
+// game builds -- see build_music_source() in main.c. Falls back to
+// procedural at build time if the SD card has no playable tracks.
+bool audio_settings_music_mp3(void);
 
 void audio_settings_set_music_on(bool on);
 void audio_settings_set_sfx_on(bool on);
@@ -33,3 +39,4 @@ void audio_settings_set_sfx_on(bool on);
 // find the constant tone fatiguing on long sessions even when
 // they want the one-shot SFX on, so it gets its own toggle.
 void audio_settings_set_hum_on(bool on);
+void audio_settings_set_music_mp3(bool on);

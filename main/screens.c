@@ -877,6 +877,12 @@ void screen_audio_frame(void)
                                              .range_pct = se_hw_get_volume() },
                     [AUDIO_ENTRY_MUSIC]  = { .label = "Music", .kind = SE_MENU_VAL_CHECK,
                                              .checked = audio_settings_music_on() },
+                    // Which source feeds the music slot. A TEXT row rather
+                    // than a checkbox: "Procedural"/"MP3 files" says what
+                    // you get, where a ticked box called "MP3" would not.
+                    [AUDIO_ENTRY_SOURCE] = { .label = "Music source", .kind = SE_MENU_VAL_TEXT,
+                                             .value = audio_settings_music_mp3()
+                                                          ? "MP3 files" : "Procedural" },
                     [AUDIO_ENTRY_SFX]    = { .label = "Sound effects", .kind = SE_MENU_VAL_CHECK,
                                              .checked = audio_settings_sfx_on() },
                     [AUDIO_ENTRY_HUM]    = { .label = "Engine hum", .kind = SE_MENU_VAL_CHECK,
@@ -904,6 +910,12 @@ void screen_audio_frame(void)
                     switch (s_audio_cursor) {
                         case AUDIO_ENTRY_MUSIC:
                             audio_settings_set_music_on(!audio_settings_music_on());
+                            break;
+                        case AUDIO_ENTRY_SOURCE:
+                            // Swaps the live music source too (see
+                            // audio_reinstall_music), so switching is
+                            // audible without restarting the run.
+                            audio_settings_set_music_mp3(!audio_settings_music_mp3());
                             break;
                         case AUDIO_ENTRY_SFX:
                             audio_settings_set_sfx_on(!audio_settings_sfx_on());

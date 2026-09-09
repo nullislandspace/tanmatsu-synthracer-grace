@@ -45,6 +45,7 @@
 #include "se_bindings.h"
 #include "se_hw.h"
 #include "se_ppa.h"
+#include "se_mp3.h"
 #include "se_run.h"
 #include "se_splash.h"
 #include "se_scene.h"
@@ -145,6 +146,10 @@ double  s_run_play_seconds = 0.0;
 int     s_peak_stage       = 1;
 static int     s_run_was_custom   = 0;
 static int64_t s_run_seed_used    = 0;
+// True while a run's music source is installed in the mixer. Lets the
+// Audio menu tell "swap the playing music now" from "there is nothing
+// playing, so the choice applies at the next run".
+static bool    s_music_live       = false;
 
 // Calendar day for this whole play session, as yyyymmdd, captured
 // once at startup by capture_session_date(). Everything day-
@@ -313,16 +318,42 @@ void start_run(game_state_t* game, world_state_t* world, uint32_t seed, bool is_
     // NULL config = the engine's built-in synthwave preset (Race the
     // Synth's sound). A game wanting different music passes its own
     // se_music_config_t here.
-    music_source_t* music = music_procedural_create(NULL, seed);
-    if (music == NULL) {
-        ESP_LOGW(TAG, "music_procedural_create returned NULL — no music this run");
-    }
-    audio_mixer_set_music(music);
+    audio_mixer_set_music(build_music_source(seed));
+    s_music_live = true;
     if (audio_settings_hum_on()) {
         if (!sfx_engine_hum_start()) {
             ESP_LOGW(TAG, "sfx_engine_hum_start failed");
         }
     }
+}
+
+// Build whichever music source the player has selected. MP3 is best
+// effort: se_mp3_create() returns NULL when /sd/music is missing or holds
+// no playable files, and silence would be a worse answer than the music
+// the game shipped with, so that falls back to the procedural generator.
+music_source_t* build_music_source(uint32_t seed) {
+    if (audio_settings_music_mp3()) {
+        music_source_t* mp3 = se_mp3_create(NULL);
+        if (mp3 != NULL) {
+            ESP_LOGI(TAG, "music: %d MP3 track(s), first is %s",
+                     se_mp3_track_count(mp3), se_mp3_track_name(mp3));
+            return mp3;
+        }
+        ESP_LOGW(TAG, "MP3 music unavailable — falling back to procedural");
+    }
+    // NULL config = the engine's built-in synthwave preset (Race the
+    // Synth's sound). A game wanting different music passes its own
+    // se_music_config_t here.
+    music_source_t* const music = music_procedural_create(NULL, seed);
+    if (music == NULL) {
+        ESP_LOGW(TAG, "music_procedural_create returned NULL — no music this run");
+    }
+    return music;
+}
+
+void audio_reinstall_music(void) {
+    if (!s_music_live) return;   // nothing playing; applies at the next run
+    audio_mixer_set_music(build_music_source((uint32_t)s_run_seed_used));
 }
 
 // Edge tracker for the scrape SFX, file-scope so the pause-menu
@@ -334,6 +365,7 @@ static bool s_scrape_was_on = false;
 // Tear down per-run audio (music + persistent SFX). Idle-drain in
 // the mixer mutes the speaker amplifier within ~50 ms.
 void end_run_audio(void) {
+    s_music_live = false;
     audio_mixer_set_music(NULL);
     sfx_engine_hum_stop();
     sfx_scrape_stop();
