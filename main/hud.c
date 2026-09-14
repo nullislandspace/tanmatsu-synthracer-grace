@@ -265,8 +265,12 @@ void draw_multiplier_panel(game_state_t const* g) {
 // the rest-area banner: during a rest area between stages N and
 // N+1, w->stage is still N, so we add 1 so the HUD shows the same
 // number as the banner above. Green to match the banner.
+int hud_stage_number(world_state_t const* w) {
+    return (int)w->stage + (w->area.type == AREA_TYPE_REST ? 1 : 0);
+}
+
 void draw_stage_readout(world_state_t const* w) {
-    int const stage = (int)w->stage + (w->area.type == AREA_TYPE_REST ? 1 : 0);
+    int const stage = hud_stage_number(w);
     char      buf[32];
     snprintf(buf, sizeof(buf), "Stage: %d", stage);
     float const text_h = 18.0f;

@@ -19,6 +19,10 @@ void draw_score_readout(game_state_t const* g);       // top-right score
 void draw_multiplier_panel(game_state_t const* g);    // top-left x-mult panel
 void draw_stage_readout(world_state_t const* w);      // top-right "Stage: N"
 
+// The stage number the readout shows: during a rest area it already names
+// the stage the rest leads into. Also drives the external VFD (vfd.h).
+int hud_stage_number(world_state_t const* w);
+
 // Debug readouts (top-right stack, below score). draw_debug_readout shows
 // the godmode flag + ship world position; godmode is passed in (it is
 // main.c state toggled by the G key). All three compile to no-ops in a

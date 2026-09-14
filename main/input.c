@@ -77,8 +77,9 @@ void input_handle_event(bsp_input_event_t const* ev) {
                 // The D-pad LEFT/RIGHT edges above feed only the menu
                 // sliders; in-game steering reads LEFT/RIGHT through the
                 // polled path (input_steer_held), not this latch.
-                // F1-exit and the volume keys are consumed by the engine
-                // (se_run's input pump) and never arrive here.
+                // The volume keys are consumed by the engine (se_run's
+                // input pump) and F1-exit by main.c's on_input; neither
+                // arrives here.
             }
             break;
         case INPUT_EVENT_TYPE_SCANCODE: {

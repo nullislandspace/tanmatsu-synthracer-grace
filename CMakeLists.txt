@@ -14,6 +14,7 @@ set(APP_SOURCES
     main/keybind_ui.c
     main/backdrop.c
     main/hud.c
+    main/vfd.c
     main/screens.c
     main/play_states.c
     main/crt0.c

@@ -4590,3 +4590,13 @@
   `GAME_MULTIPLIER_FLOOR` defines. Supersedes the Phase 6 penalty noted in the
   2026-05-13/14 entries above. (`research.md` still records the *original* Race
   The Sun's "crash drops multiplier" behaviour as a reference, unchanged.)
+
+- 2026-09-13 — **External VFD status display.** Units with the
+  NE-HCS12SS59T-R1 I2C VFD at 0x13 now show the game state on it: a scrolling
+  "RACE THE SYNTH BY CAVAC" when no race is running, "STAGE N" while racing,
+  a blinking "PAUSED" when paused; the tube is switched on at startup and off
+  on exit. New `vfd.c` — all I2C in its own low-priority task so the render
+  loop never blocks on the bus (a missing or unplugged display costs nothing
+  per frame). F1 moved from the engine (`f1_exits`) into the game's `on_input`
+  so exit can turn the display off first; F1 and the menu Exit share
+  `app_exit_to_launcher()`. Details in `architecture.md` (`vfd.c`).

@@ -25,8 +25,8 @@ void input_set_mode(input_mode_t mode);
 // Process one input event forwarded by the engine's input pump
 // (se_run's on_input callback). Updates the internal latches that the
 // consume_* accessors below read. The engine consumes the device-global
-// keys itself (volume +/-, audio-jack, F1-exit), so those never arrive
-// here; everything else (pickup, menu nav, ESC/Backspace, digits, the
+// keys itself (volume +/-, audio-jack), and main.c's on_input takes F1
+// (exit) before calling this, so those never arrive here; everything else (pickup, menu nav, ESC/Backspace, digits, the
 // pause + debug keys, and rebind-capture key presses) does.
 void input_handle_event(bsp_input_event_t const* ev);
 

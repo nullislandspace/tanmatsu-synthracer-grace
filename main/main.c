@@ -57,6 +57,7 @@
 #include "sfx/sfx_pickup_plink.h"
 #include "sfx/sfx_scrape.h"
 #include "synthwave.h"
+#include "vfd.h"
 #include "world.h"
 
 // The PPA synthwave compositor (clients, layer caches, sky/sun/mountain
@@ -436,7 +437,7 @@ void commit_run_end(game_state_t const* g, world_state_t const* w, bool head_on)
 //
 //  The engine (se_run) owns the device + display bootstrap, the two
 //  framebuffers, the input-queue pump + device-global keys (volume /
-//  audio-jack / F1-exit), vsync/blit, the buffer swap and the per-frame
+//  audio-jack), vsync/blit, the buffer swap and the per-frame
 //  delta time. The game is the callbacks below plus its content; events
 //  the pump doesn't consume arrive via on_input → input_handle_event.
 //  State the old monolithic app_main kept as loop locals is promoted to
@@ -522,9 +523,14 @@ static int64_t prof_window_start = 0;
 static void on_init(void* user) {
     (void)user;
 
+    // Optional external VFD: probe + switch on in the background, showing
+    // the idle marquee until a run starts. Its own task on core 1, so it
+    // comes up during the splash below without touching the framebuffer.
+    vfd_init();
+
     // Engine title sequence. Blocking: it draws and presents its own
-    // frames for ~1 s, then returns. First thing in on_init so it plays
-    // against a clean framebuffer, before any game content is loaded.
+    // frames for ~1 s, then returns. Before any game content is loaded so
+    // it plays against a clean framebuffer.
     se_splash();
 
     synthwave_init();
@@ -610,8 +616,8 @@ static void on_update(float dt, void* user) {
 
         // The engine's input pump already drained the BSP queue this
         // frame (before on_update) and forwarded each non-global event to
-        // on_input → input_handle_event, which latched it; it also handled
-        // F1-exit + the volume/jack keys itself. Here we just consume the
+        // on_input → input_handle_event, which latched it (on_input takes
+        // F1-exit first); it also handled the volume/jack keys itself. Here we just consume the
         // latched one-shots into the per-frame snapshot, so the physics
         // pass below and the render switch (on_render) read one consistent
         // view of the frame.
@@ -1061,6 +1067,40 @@ static void on_backdrop(pax_buf_t* fb_param, void* user) {
         s_t_bg_end      = t_after_mtn;
 }
 
+// Map the app state onto the external VFD's content (see vfd.h). A run
+// shows its stage through the crash / stall hold and the checkpoint
+// Re-Do dialog; paused — including Settings opened from the pause menu —
+// blinks PAUSED; everything else, GAME_OVER included, is "no race
+// running" and scrolls the title.
+static void publish_vfd_mode(void) {
+    switch (app_state) {
+        case APP_STATE_PLAYING:
+        case APP_STATE_CRASHING:
+        case APP_STATE_STALL_OUT:
+        case APP_STATE_CHECKPOINT_REDO:
+            vfd_set_mode(VFD_MODE_STAGE, hud_stage_number(&world));
+            break;
+        case APP_STATE_PAUSED:
+            vfd_set_mode(VFD_MODE_PAUSED, 0);
+            break;
+        case APP_STATE_SETTINGS:
+        case APP_STATE_CONTROLS:
+        case APP_STATE_DISPLAY:
+        case APP_STATE_AUDIO_SETTINGS:
+            vfd_set_mode(s_settings_origin == APP_STATE_PAUSED ? VFD_MODE_PAUSED : VFD_MODE_IDLE, 0);
+            break;
+        default:
+            vfd_set_mode(VFD_MODE_IDLE, 0);
+            break;
+    }
+}
+
+void app_exit_to_launcher(void) {
+    audio_mixer_shutdown();
+    vfd_shutdown();
+    bsp_device_restart_to_launcher();
+}
+
 // on_render — the foreground: the 3D scene + HUD + menus + state
 // transitions, switched on app_state. Runs after on_backdrop on the same
 // back buffer; the engine blits + swaps once this returns.
@@ -1092,6 +1132,8 @@ static void on_render(pax_buf_t* fb_param, void* user) {
             case APP_STATE_CHECKPOINT_REDO: play_checkpoint_redo_frame();   break;
 
         }
+        // After the dispatch, so this frame's state transitions are included.
+        publish_vfd_mode();
         int64_t const t_after_fg = esp_timer_get_time();
         prof_obs_us    += t_after_obs - s_t_bg_end;
         prof_fgrest_us += t_after_fg  - t_after_obs;
@@ -1153,16 +1195,24 @@ static void on_render(pax_buf_t* fb_param, void* user) {
 // per-frame consume_* accessors read in on_update / on_render.
 static void on_input(bsp_input_event_t const* ev, void* user) {
     (void)user;
+    // F1 exits from any state. Handled here rather than by the engine's
+    // f1_exits so the VFD is switched off before the reboot.
+    if (ev->type == INPUT_EVENT_TYPE_NAVIGATION && ev->args_navigation.state
+        && ev->args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
+        app_exit_to_launcher();
+        return;
+    }
     input_handle_event(ev);
 }
 
 // app_main — hand the run loop to the engine. The engine owns the device
 // + display bootstrap, the framebuffers, vsync/blit, the input-queue pump
-// (volume/jack + F1-exit) and the frame loop; the callbacks above supply
-// the content. f1_exits=true: the engine returns to the launcher on F1.
+// (volume/jack) and the frame loop; the callbacks above supply the
+// content. f1_exits=false: F1 reaches on_input, which exits via
+// app_exit_to_launcher (so the VFD goes dark too).
 void app_main(void) {
     static se_app_config_t const cfg = {
-        .f1_exits      = true,
+        .f1_exits      = false,
         .backdrop_argb = 0xFF000000u,
     };
     static se_app_callbacks_t const cb = {

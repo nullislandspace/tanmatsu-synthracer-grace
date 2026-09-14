@@ -180,3 +180,7 @@ music_source_t* build_music_source(uint32_t seed);
 void pause_audio_for_pause_menu(void);
 void resume_audio_from_pause_menu(void);
 void commit_run_end(game_state_t const* g, world_state_t const* w, bool head_on);
+
+// Leave the app: silence audio, switch the external VFD off, reboot to the
+// launcher. Shared by F1 and the main menu's Exit entry. Does not return.
+void app_exit_to_launcher(void);

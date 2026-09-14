@@ -577,8 +577,7 @@ void screen_menu_frame(void)
                             app_state = APP_STATE_CREDITS;
                             break;
                         case MENU_ENTRY_EXIT:
-                            audio_mixer_shutdown();
-                            bsp_device_restart_to_launcher();
+                            app_exit_to_launcher();
                             break;
                     }
                 }

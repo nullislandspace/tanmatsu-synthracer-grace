@@ -79,7 +79,8 @@ this is the current home):
 backdrop art + its PPA compositor (`synthwave.c`, `backdrop.c`), the HUD
 (`hud.c`), input policy (`input.c`), the save schema (`save.c`), settings
 policy (`audio_settings.c`, `controls_settings.c`), the upgrade catalog
-(`attachments.c`), the SFX recipes (`sfx/*.c`), and the controller +
+(`attachments.c`), the SFX recipes (`sfx/*.c`), the optional external VFD
+status display (`vfd.c`), and the controller +
 state machine (`main.c`, `screens.c`, `play_states.c`, `game_app.h`).
 
 ## File Layout
@@ -822,6 +823,27 @@ reference.
 - Action button: spacebar (scancode `0x39`) for use-pickup; `F1` for
   restart-to-launcher; `F2`/`F3` for backlight (matches template).
 - Volume keys handled inside the drain (delegated to `audio.c`).
+
+### `vfd.c` — optional external VFD status display
+
+Some Tanmatsu units carry a NE-HCS12SS59T-R1 12-character I2C VFD jumpered to
+address **0x13** (same hardware + probe as `tanmatsu-vfdclock-grace`). On boot
+`vfd_init()` starts a low-priority task (core 1) that probes 0x13 on the CATT
+I2C bus, then the internal bus (claim/release around every transfer there), and
+if found switches the tube on at filament current 110. The game never touches
+the bus: `main.c`'s `publish_vfd_mode()` stores the wanted content each frame
+and the task writes only on change.
+
+| App state | VFD |
+|---|---|
+| PLAYING, CRASHING, STALL_OUT, CHECKPOINT_REDO | `STAGE N` (same number as the HUD readout, `hud_stage_number`) |
+| PAUSED, and the settings family opened from pause | blinking `PAUSED` (500 ms on/off, software) |
+| everything else (menus, GAME_OVER) | `RACE THE SYNTH BY CAVAC`, looped by the display's own scroll |
+
+Exit (F1 or the menu's Exit) goes through `app_exit_to_launcher()`, which blanks
+and switches the VFD off before rebooting. That is why the game runs with
+`f1_exits = false` and handles F1 in `on_input` — the engine's own F1 path
+reboots without any game callback.
 
 ### `main.c` — top-level
 
