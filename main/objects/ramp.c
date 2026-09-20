@@ -42,13 +42,13 @@ static void ramp_emit(obstacle_t const* o) {
 
     // Camera-side triangle (the wedge's profile).
     if (show_left) {
-        scene_tri(xL, 0.0f, zN,  xL, 0.0f, zF,  xL, rise, zF,  side);
+        scene_tri(xL, 0.0f, zN,  xL, 0.0f, zF,  xL, rise, zF,  side, 0);
     } else if (show_right) {
-        scene_tri(xR, 0.0f, zN,  xR, 0.0f, zF,  xR, rise, zF,  side);
+        scene_tri(xR, 0.0f, zN,  xR, 0.0f, zF,  xR, rise, zF,  side, 0);
     }
     // Sloped top — quad nbL → nbR → ftR → ftL, two triangles.
-    scene_tri(xL, 0.0f, zN,  xR, 0.0f, zN,  xR, rise, zF,  top);
-    scene_tri(xL, 0.0f, zN,  xR, rise, zF,  xL, rise, zF,  top);
+    scene_tri(xL, 0.0f, zN,  xR, 0.0f, zN,  xR, rise, zF,  top, 0);
+    scene_tri(xL, 0.0f, zN,  xR, rise, zF,  xL, rise, zF,  top, 0);
 
     // Bright outline — the sloped top's four edges, plus the two
     // sloping edges of the visible side triangle.

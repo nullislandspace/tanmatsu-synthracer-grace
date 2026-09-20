@@ -95,7 +95,7 @@ static void restarea_marker_emit(obstacle_t const* o) {
 
         scene_tri(wx[a], wy[a], wz[a],
                   wx[b], wy[b], wz[b],
-                  wx[c], wy[c], wz[c], col);
+                  wx[c], wy[c], wz[c], col, 0);
     }
 
     // Outline: per-region colour from the model — white post, neutral

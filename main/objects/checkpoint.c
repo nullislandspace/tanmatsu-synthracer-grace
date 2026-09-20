@@ -134,7 +134,7 @@ static void checkpoint_emit(obstacle_t const* o) {
         scene_tri(wvx[a], wvy[a], wvz[a],
                   wvx[b], wvy[b], wvz[b],
                   wvx[c], wvy[c], wvz[c],
-                  cp_dim(base, tint));
+                  cp_dim(base, tint), 0);
         scene_line(wvx[a], wvy[a], wvz[a], wvx[b], wvy[b], wvz[b], CHECKPOINT_OUTLINE_COLOR);
         scene_line(wvx[b], wvy[b], wvz[b], wvx[c], wvy[c], wvz[c], CHECKPOINT_OUTLINE_COLOR);
         scene_line(wvx[c], wvy[c], wvz[c], wvx[a], wvy[a], wvz[a], CHECKPOINT_OUTLINE_COLOR);

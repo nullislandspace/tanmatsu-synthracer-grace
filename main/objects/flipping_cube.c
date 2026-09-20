@@ -171,15 +171,15 @@ static void flipping_emit(obstacle_t const* o) {
         if (!show[i]) continue;
         int const j = (i + 1) & 3;
         scene_tri(cx[i], cy[i], zF,  cx[j], cy[j], zF,  cx[j], cy[j], zB,
-                  face_color[i]);
+                  face_color[i], 0);
         scene_tri(cx[i], cy[i], zF,  cx[j], cy[j], zB,  cx[i], cy[i], zB,
-                  face_color[i]);
+                  face_color[i], 0);
     }
 
     // Front face — the (rotated) convex cross-section quad, fanned
     // from corner 0.
-    scene_tri(cx[0], cy[0], zF,  cx[1], cy[1], zF,  cx[2], cy[2], zF,  front_c);
-    scene_tri(cx[0], cy[0], zF,  cx[2], cy[2], zF,  cx[3], cy[3], zF,  front_c);
+    scene_tri(cx[0], cy[0], zF,  cx[1], cy[1], zF,  cx[2], cy[2], zF,  front_c, 0);
+    scene_tri(cx[0], cy[0], zF,  cx[2], cy[2], zF,  cx[3], cy[3], zF,  front_c, 0);
 
     // Wireframe. The outline_color carries the per-subtype red/green
     // tint. Front quad always; back-quad edge + connecting verticals

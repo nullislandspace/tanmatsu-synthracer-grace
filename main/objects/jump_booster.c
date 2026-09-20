@@ -126,7 +126,7 @@ static void jump_booster_emit(obstacle_t const* o) {
         scene_tri(wvx[a], wvy[a], wvz[a],
                   wvx[b], wvy[b], wvz[b],
                   wvx[c], wvy[c], wvz[c],
-                  jump_dim(base, tint));
+                  jump_dim(base, tint), 0);
         scene_line(wvx[a], wvy[a], wvz[a], wvx[b], wvy[b], wvz[b], o->outline_color);
         scene_line(wvx[b], wvy[b], wvz[b], wvx[c], wvy[c], wvz[c], o->outline_color);
         scene_line(wvx[c], wvy[c], wvz[c], wvx[a], wvy[a], wvz[a], o->outline_color);

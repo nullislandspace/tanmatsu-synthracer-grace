@@ -141,7 +141,7 @@ static void synthengine_sign_emit(obstacle_t const* o) {
         if (d < 0.0f) d = 0.0f;
         pax_col_t const col = sign_dim((pax_col_t)SYNTHSIGN_REGION_FILL[t->region],
                                        0.55f + 0.45f * d);
-        scene_tri(wx[a], wy[a], wz[a], wx[b], wy[b], wz[b], wx[c], wy[c], wz[c], col);
+        scene_tri(wx[a], wy[a], wz[a], wx[b], wy[b], wz[b], wx[c], wy[c], wz[c], col, 0);
     }
 
     for (size_t i = 0; i < SYNTHSIGN_EDGE_COUNT; i++) {

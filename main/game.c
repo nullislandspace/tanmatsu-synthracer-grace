@@ -891,7 +891,7 @@ void game_submit_ship(game_state_t const* g) {
         scene_tri(wx[a], wy[a], wz[a],
                   wx[b], wy[b], wz[b],
                   wx[cc], wy[cc], wz[cc],
-                  col);
+                  col, 0);
     }
 
     for (size_t i = 0; i < SHIP_MODEL_EDGE_COUNT; i++) {

@@ -26,10 +26,12 @@ static inline pax_col_t dim_argb_render(pax_col_t col, float scale) {
 // without any special-case code.
 //
 // Near-plane handling lives in the engine scene (se_scene.c): scene_tri /
-// scene_line clamp each vertex's z to RENDER_NEAR_CLIP_Z and drop geometry
-// that is wholly behind the near plane, so the emitters below just hand
-// over raw world-space geometry. The whole-object `z` culls kept here are
-// a cheap early-out, not a correctness requirement.
+// scene_line clip geometry to RENDER_NEAR_CLIP_Z -- a crossing triangle is
+// cut at the plane (engine 2.0; 1.x clamped its vertices onto it, which
+// distorted the face), a crossing edge is shortened -- and drop what is
+// wholly behind it, so the emitters below just hand over raw world-space
+// geometry. The whole-object `z` culls kept here are a cheap early-out,
+// not a correctness requirement.
 //
 // The camera + projection (render_set_camera / render_camera /
 // render_project) also moved into the engine scene; this module just
@@ -135,9 +137,9 @@ static void emit_pyramid(obstacle_t const* o) {
 
     // Front face, then whichever side faces the camera. The back
     // face is never camera-facing, so it is not emitted.
-    scene_tri(xA, yA, zA,  xR, yB, zF,  xL, yB, zF,  fc);
-    if (show_left)  scene_tri(xA, yA, zA,  xL, yB, zF,  xL, yB, zB,  sc);
-    if (show_right) scene_tri(xA, yA, zA,  xR, yB, zB,  xR, yB, zF,  sc);
+    scene_tri(xA, yA, zA,  xR, yB, zF,  xL, yB, zF,  fc, 0);
+    if (show_left)  scene_tri(xA, yA, zA,  xL, yB, zF,  xL, yB, zB,  sc, 0);
+    if (show_right) scene_tri(xA, yA, zA,  xR, yB, zB,  xR, yB, zF,  sc, 0);
 
     scene_line(xA, yA, zA,  xL, yB, zF,  oc);
     scene_line(xA, yA, zA,  xR, yB, zF,  oc);
@@ -278,7 +280,7 @@ static void emit_icosahedron(obstacle_t const* o, float angle) {
         scene_tri(wvx[a], wvy[a], wvz[a],
                   wvx[b], wvy[b], wvz[b],
                   wvx[c], wvy[c], wvz[c],
-                  dim_argb_render(base_col, tint));
+                  dim_argb_render(base_col, tint), 0);
 
         scene_line(wvx[a], wvy[a], wvz[a], wvx[b], wvy[b], wvz[b], o->outline_color);
         scene_line(wvx[b], wvy[b], wvz[b], wvx[c], wvy[c], wvz[c], o->outline_color);
@@ -310,23 +312,23 @@ static void emit_cube(obstacle_t const* o) {
     // Front face (-z normal) always faces the camera (camera is at
     // z = 0, the cube is at z > 0). The other faces are emitted only
     // when camera-facing — a pure speed optimisation.
-    scene_tri(xL, yB, zF,  xR, yB, zF,  xR, yT, zF,  fc);
-    scene_tri(xL, yB, zF,  xR, yT, zF,  xL, yT, zF,  fc);
+    scene_tri(xL, yB, zF,  xR, yB, zF,  xR, yT, zF,  fc, 0);
+    scene_tri(xL, yB, zF,  xR, yT, zF,  xL, yT, zF,  fc, 0);
     if (show_left) {
-        scene_tri(xL, yB, zF,  xL, yT, zF,  xL, yT, zB,  sc);
-        scene_tri(xL, yB, zF,  xL, yT, zB,  xL, yB, zB,  sc);
+        scene_tri(xL, yB, zF,  xL, yT, zF,  xL, yT, zB,  sc, 0);
+        scene_tri(xL, yB, zF,  xL, yT, zB,  xL, yB, zB,  sc, 0);
     }
     if (show_right) {
-        scene_tri(xR, yB, zF,  xR, yT, zF,  xR, yT, zB,  sc);
-        scene_tri(xR, yB, zF,  xR, yT, zB,  xR, yB, zB,  sc);
+        scene_tri(xR, yB, zF,  xR, yT, zF,  xR, yT, zB,  sc, 0);
+        scene_tri(xR, yB, zF,  xR, yT, zB,  xR, yB, zB,  sc, 0);
     }
     if (show_top) {
-        scene_tri(xL, yT, zF,  xR, yT, zF,  xR, yT, zB,  tc);
-        scene_tri(xL, yT, zF,  xR, yT, zB,  xL, yT, zB,  tc);
+        scene_tri(xL, yT, zF,  xR, yT, zF,  xR, yT, zB,  tc, 0);
+        scene_tri(xL, yT, zF,  xR, yT, zB,  xL, yT, zB,  tc, 0);
     }
     if (show_bottom) {
-        scene_tri(xL, yB, zF,  xR, yB, zF,  xR, yB, zB,  sc);
-        scene_tri(xL, yB, zF,  xR, yB, zB,  xL, yB, zB,  sc);
+        scene_tri(xL, yB, zF,  xR, yB, zF,  xR, yB, zB,  sc, 0);
+        scene_tri(xL, yB, zF,  xR, yB, zB,  xL, yB, zB,  sc, 0);
     }
 
     // All 12 edges, emitted unconditionally. The depth test (with the

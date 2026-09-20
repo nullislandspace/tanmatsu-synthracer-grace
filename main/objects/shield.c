@@ -73,14 +73,14 @@ static void shield_emit(obstacle_t const* o) {
     // Front + back hexagon caps — triangle fan from corner 0.
     for (int i = 1; i < 5; i++) {
         int const j = i + 1;
-        scene_tri(fx[0], fy[0], fz[0], fx[i], fy[i], fz[i], fx[j], fy[j], fz[j], cap);
-        scene_tri(bx[0], by[0], bz[0], bx[i], by[i], bz[i], bx[j], by[j], bz[j], cap);
+        scene_tri(fx[0], fy[0], fz[0], fx[i], fy[i], fz[i], fx[j], fy[j], fz[j], cap, 0);
+        scene_tri(bx[0], by[0], bz[0], bx[i], by[i], bz[i], bx[j], by[j], bz[j], cap, 0);
     }
     // Rim — one quad (two triangles) per hexagon edge.
     for (int i = 0; i < 6; i++) {
         int const j = (i + 1) % 6;
-        scene_tri(fx[i], fy[i], fz[i], fx[j], fy[j], fz[j], bx[j], by[j], bz[j], rim);
-        scene_tri(fx[i], fy[i], fz[i], bx[j], by[j], bz[j], bx[i], by[i], bz[i], rim);
+        scene_tri(fx[i], fy[i], fz[i], fx[j], fy[j], fz[j], bx[j], by[j], bz[j], rim, 0);
+        scene_tri(fx[i], fy[i], fz[i], bx[j], by[j], bz[j], bx[i], by[i], bz[i], rim, 0);
     }
     // Wireframe — front hexagon, back hexagon, and the 6 connectors.
     for (int i = 0; i < 6; i++) {
