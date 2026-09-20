@@ -87,16 +87,28 @@ target_compile_options(app_obj PRIVATE
     "SHELL:-include freertos/event_groups.h"
 )
 
-# SynthEngine3D engine component (see synthengine3D/ and
-# devdocs/engine-extraction.md). In this plain-CMake build it provides a
-# relocatable OBJECT library; add_subdirectory MUST precede the link-script
-# file(GENERATE) below so $<TARGET_OBJECTS:synthengine3d> resolves. Linking it
-# to app_obj propagates the engine's PUBLIC include dir (synthengine3D/include)
-# so game sources can #include "synthengine3d.h"; the engine's object files are
-# folded into app.so explicitly in the link script (no double-counting -- the
-# custom command, not CMake, performs the link).
-add_subdirectory(synthengine3D)
-target_link_libraries(app_obj PRIVATE synthengine3d)
+# SynthEngine3D, the 3D engine (https://github.com/nullislandspace/synthengine3D),
+# if this app has it. It is not part of the template: an app that wants 3D adds
+# it as a git submodule at synthengine3D/ (`make engine`, see README), and this
+# block then builds it. Without it every variable below stays empty and the
+# link line is exactly the one a plain app has always had, so apps that do not
+# use the engine are unaffected by merges from the template.
+#
+# In this plain-CMake build the engine is a relocatable OBJECT library, so
+# add_subdirectory MUST come before the link script's file(GENERATE) for
+# $<TARGET_OBJECTS:synthengine3d> to resolve. Linking it to app_obj propagates
+# the engine's PUBLIC include directory (synthengine3D/include), which is what
+# lets app sources #include "synthengine3d.h"; its object files are folded into
+# app.so by the link script below, since the custom command, not CMake, links.
+set(ENGINE_OBJS "")
+set(ENGINE_DEPS "")
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/synthengine3D/CMakeLists.txt)
+    message(STATUS "SynthEngine3D: building synthengine3D/")
+    add_subdirectory(synthengine3D)
+    target_link_libraries(app_obj PRIVATE synthengine3d)
+    set(ENGINE_OBJS "$<JOIN:$<TARGET_OBJECTS:synthengine3d>, >")
+    list(APPEND ENGINE_DEPS synthengine3d $<TARGET_OBJECTS:synthengine3d>)
+endif()
 
 # Collect object files into a list file, then link via a response file
 # This avoids issues with generator expressions in custom commands
@@ -112,8 +124,7 @@ ${CMAKE_C_COMPILER} \
     -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/app.ld \
     -Wl,-Map=${CMAKE_BINARY_DIR}/app.map \
     -L${CMAKE_CURRENT_SOURCE_DIR}/fakelib \
-    $<JOIN:$<TARGET_OBJECTS:app_obj>, > \
-    $<JOIN:$<TARGET_OBJECTS:synthengine3d>, > \
+    $<JOIN:$<TARGET_OBJECTS:app_obj>, > ${ENGINE_OBJS} \
     -lall \
     -o ${CMAKE_BINARY_DIR}/app.so
 ")
@@ -122,8 +133,7 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/app.so
     COMMAND sh ${LINK_SCRIPT}
     DEPENDS app_obj
         $<TARGET_OBJECTS:app_obj>
-        synthengine3d
-        $<TARGET_OBJECTS:synthengine3d>
+        ${ENGINE_DEPS}
         ${CMAKE_CURRENT_SOURCE_DIR}/app.ld
         ${CMAKE_CURRENT_SOURCE_DIR}/app_version.script
         ${CMAKE_CURRENT_SOURCE_DIR}/fakelib/liball.so
