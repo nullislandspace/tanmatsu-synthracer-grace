@@ -29,9 +29,8 @@ void screen_credits_frame(void);
 // Shared draw helpers reused by the gameplay states (play_states.c).
 // The 3D scene is drawn in two phases so the geometry-only prepare can
 // Select / read the engine renderer the 3D scene resolves through
-// (SE_RENDER_ZBUFFER or SE_RENDER_RAYCAST; see se_scene.h). Applies from the
-// next prepared frame -- both halves of a frame always use one mode. Safe to
-// change at any time: the two renderers produce the same image.
+// (SE_RENDER_ZBUFFER; see se_scene.h). Applies from the next prepared
+// frame -- both halves of a frame always use one mode.
 void             render_set_mode(se_render_mode_t mode);
 se_render_mode_t render_get_mode(void);
 

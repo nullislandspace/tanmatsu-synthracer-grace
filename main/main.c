@@ -684,18 +684,6 @@ static void on_update(float dt, void* user) {
             o.depth_order = !o.depth_order;
             scene_set_options(&o);
         }
-        // Debug: R cycles the scene renderer (z-buffer <-> raycast) live.
-        // Both draw the same image, so the only thing that changes is the
-        // frame cost -- pair it with V (freeze) to compare the two against
-        // identical static geometry, and read `rend=` / `rast=` in the perf
-        // line below.
-        if (input_consume_renderer_toggle()) {
-            se_render_mode_t const next =
-                (render_get_mode() == SE_RENDER_ZBUFFER) ? SE_RENDER_RAYCAST
-                                                         : SE_RENDER_ZBUFFER;
-            render_set_mode(next);
-            ESP_LOGI(TAG, "scene renderer -> %s", se_renderer_name(next));
-        }
         if (input_consume_freeze_toggle()) {
             s_debug_freeze = !s_debug_freeze;
         }
