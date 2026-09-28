@@ -8,6 +8,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "bsp/power.h"
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
@@ -522,6 +523,20 @@ static int64_t prof_window_start = 0;
 // se_display_info() is valid and the mixer gates can be pushed).
 static void on_init(void* user) {
     (void)user;
+
+    // THE RADIO OFF. The ESP32-C6 beside the P4 is the WiFi and
+    // Bluetooth co-processor, and this game uses neither -- nor does
+    // graceloader any more, which stopped linking ESP-Hosted on
+    // 2026-09-28. Left enabled it is a second chip drawing current for
+    // nothing, on a handheld running off a battery.
+    //
+    // HERE RATHER THAN IN THE LOADER because the loader deliberately
+    // initialises nothing -- "The app decides what to initialize"
+    // (graceloader main.c) -- and bsp_power_set_radio_state() needs a
+    // coprocessor handle that only bsp_device_initialize() creates. By
+    // the time on_init runs, the engine has done that.
+    esp_err_t const radio = bsp_power_set_radio_state(BSP_POWER_RADIO_STATE_OFF);
+    ESP_LOGI(TAG, "radio (ESP32-C6): %s", radio == ESP_OK ? "powered down" : esp_err_to_name(radio));
 
     // Optional external VFD: probe + switch on in the background, showing
     // the idle marquee until a run starts. Its own task on core 1, so it
